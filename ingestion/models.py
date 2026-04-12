@@ -1,20 +1,20 @@
 # ingestion/models.py
 
 from datetime import datetime
-from typing import Optional
+from typing import Annotated, Literal, Optional, Union
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, RootModel, field_validator
 
 
 class MetaData(BaseModel):
     MMSI: int
-    ShipName: Optional[str]
+    ShipName: Optional[str] = None
     time_utc: str
 
     @field_validator("time_utc")
     @classmethod
     def parse_timestamp(cls, v: str) -> datetime:
-        # "2026-04-12 19:10:08.192247737 +0000 UTC"
+        # "-04-12 19:10:08.192247737 +0000 UTC"
         v = v.replace(" UTC", "")
         parts = v.split(".")
         microseconds = parts[1][:6]
@@ -22,14 +22,14 @@ class MetaData(BaseModel):
         return datetime.strptime(v, "%Y-%m-%d %H:%M:%S.%f %z")
 
 
-class PositionReportBody(BaseModel):
+class PositionReportMessage(BaseModel):
     NavigationalStatus: int
     Sog: float
     Latitude: float
     Longitude: float
 
 
-class ShipStaticDataBody(BaseModel):
+class ShipStaticDataMessage(BaseModel):
     ImoNumber: Optional[int] = None
     Name: Optional[str] = None
     CallSign: Optional[str] = None
@@ -44,12 +44,23 @@ class ShipStaticDataBody(BaseModel):
         return None if v == 0.0 else v
 
 
-class MessageBody(BaseModel):
-    PositionReport: PositionReportBody
-    ShipStaticData: ShipStaticDataBody
-
-
-class AISMessage(BaseModel):
-    MessageType: str
+class PositionReport(BaseModel):
+    MessageType: Literal["PositionReport"]
     MetaData: MetaData
-    Message: MessageBody
+    Message: PositionReportMessage
+
+
+class ShipStaticData(BaseModel):
+    MessageType: Literal["ShipStaticData"]
+    MetaData: MetaData
+    Message: ShipStaticDataMessage
+
+
+class AISMessage(
+    RootModel[
+        Annotated[
+            Union[PositionReport, ShipStaticData], Field(discriminator="MessageType")
+        ]
+    ]
+):
+    pass

@@ -10,7 +10,7 @@ from rich.logging import RichHandler
 
 from config import settings
 
-from .models import AISMessage
+from .models import AISMessage, PositionReport, ShipStaticData
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,42 +34,40 @@ def build_subscribe_payload(api_key: str):
     }
 
 
-async def insert_fix(conn: asyncpg.pool.PoolConnectionProxy, msg: AISMessage):
-    """Extract fields and insert a single fix"""
-    await conn.execute(
-        """
-        INSERT INTO ais_fixes
-            (server_ts, fix_ts, mmsi, lat, lon, nav_status, sog, draught, dest, eta)
-        VALUES
-            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-        """,
-        datetime.now(tz=UTC),
-        msg.MetaData.time_utc,
-        msg.MetaData.MMSI,
-        msg.Message.PositionReport.Latitude,
-        msg.Message.PositionReport.Longitude,
-        msg.Message.PositionReport.NavigationalStatus,
-        msg.Message.PositionReport.Sog,
-        msg.Message.ShipStaticData.MaximumStaticDraught,
-        msg.Message.ShipStaticData.Destination,
-        msg.Message.ShipStaticData.Eta,
-    )
+async def insert_fix(conn: asyncpg.pool.PoolConnectionProxy, msg: PositionReport):
+    """Extract PositionReport fields and insert a single fix"""
+    ...
+
+
+async def upsert_registry():
+    """Extract static ShipStaticData + MetaData fields and add new ships/ upsert existing ones in the vessel registry"""
+    ...
+
+
+async def insert_state():
+    """Extract voyage-specific ShipsStaticData fields and insert a vessel state record"""
+    ...
 
 
 async def handle_message(raw: str | bytes, pool: asyncpg.Pool):
     try:
         data = json.loads(raw)
-        msg = AISMessage.model_validate(data)
+        msg = AISMessage.model_validate(data).root
 
     except Exception as e:
         logger.warning(f"Discarding invalid message: {e}")
         return
 
     async with pool.acquire() as conn:
-        await insert_fix(conn, msg)
-        logger.debug(
-            f"Inserted fix: MMSI={msg.MetaData.MMSI}, Name={msg.MetaData.ShipName}"
-        )
+        if isinstance(msg, PositionReport):
+            await insert_fix(conn, msg)
+            logger.debug(
+                f"Inserted fix: MMSI={msg.MetaData.MMSI}, Name={msg.MetaData.ShipName}"
+            )
+
+        elif isinstance(msg, ShipStaticData):
+            await upsert_registry()
+            await insert_state()
 
 
 async def ingest():
