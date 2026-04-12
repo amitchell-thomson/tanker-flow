@@ -1,7 +1,7 @@
 [project]
 name = "tanker-flow"
 version = "0.1.0"
-description = "Add your description here"
+description = "using live tanker positions to derive leading brent-wti spread price signal"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -10,6 +10,8 @@ dependencies = [
     "httpx>=0.28.1",
     "pandas>=3.0.2",
     "pydantic>=2.12.5",
+    "pydantic-settings>=2.13.1",
+    "rich>=15.0.0",
     "sqlalchemy>=2.0.49",
     "websockets>=16.0",
 ]

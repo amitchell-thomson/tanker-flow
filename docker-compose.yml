@@ -8,7 +8,7 @@ services:
       POSTGRES_USER: tanker_user
       POSTGRES_PASSWORD: ${DB_PASSWORD}
     volumes:
-      - tanker_db_data:/var/lib/postgresql/data
+      - /srv/data/tanker_db:/var/lib/postgresql/data
       - ./db/init:/docker-entrypoint-initdb.d:ro
     ports:
       - "127.0.0.1:5432:5432"
@@ -23,5 +23,3 @@ services:
         -c wal_compression=on
         -c timescaledb.telemetry_level=off
 
-volumes:
-  tanker_db_data:
