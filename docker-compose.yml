@@ -1,0 +1,27 @@
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: tanker_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: tanker_flow
+      POSTGRES_USER: tanker_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - tanker_db_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:5432:5432"
+    shm_size: 256mb
+    command: >
+      postgres
+        -c shared_buffers=8GB
+        -c effective_cache_size=24GB
+        -c work_mem=64MB
+        -c maintenance_work_mem=512MB
+        -c max_connections=20
+        -c wal_compression=on
+        -c timescaledb.telemetry_level=off
+
+volumes:
+  tanker_db_data:
