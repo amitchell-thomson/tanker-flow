@@ -1,7 +1,6 @@
 # ingestion/models.py
 
 from datetime import datetime
-from re import S
 from typing import Optional
 
 from pydantic import BaseModel, field_validator
@@ -45,12 +44,12 @@ class ShipStaticDataBody(BaseModel):
         return None if v == 0.0 else v
 
 
-class MessageBody:
-    PositionReport: Optional[PositionReportBody] = None
-    ShipStaticData: Optional[ShipStaticDataBody] = None
+class MessageBody(BaseModel):
+    PositionReport: PositionReportBody
+    ShipStaticData: ShipStaticDataBody
 
 
-class AISMessage:
+class AISMessage(BaseModel):
     MessageType: str
     MetaData: MetaData
     Message: MessageBody
