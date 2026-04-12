@@ -2,26 +2,41 @@ CREATE EXTENSION IF NOT EXISTS timescaledb;
 
 -- Raw AIS fixes: append-only, never updated
 CREATE TABLE ais_fixes (
-    received_at     TIMESTAMPTZ      NOT NULL,
+    server_ts       TIMESTAMPTZ      DEFAULT now(),
+    fix_ts          TIMESTAMPTZ      NOT NULL,
     mmsi            BIGINT           NOT NULL,
     lat             DOUBLE PRECISION,
     lon             DOUBLE PRECISION,
     nav_status      SMALLINT,
     sog             REAL,
-    cog             REAL,
-    draught         REAL,            -- NULL if reported as 0
     source          TEXT             NOT NULL  -- 'aisstream' | 'vesselfinder'
 );
 
-SELECT create_hypertable('ais_fixes', 'received_at');
+SELECT create_hypertable('ais_fixes', 'server_ts');
 SELECT set_chunk_time_interval('ais_fixes', INTERVAL '1 day');
-CREATE INDEX ON ais_fixes (mmsi, received_at DESC);
+CREATE INDEX ON ais_fixes (mmsi, server_ts DESC);
+
+
+CREATE TABLE vessel_state(
+    server_ts       TIMESTAMPTZ     DEFAULT now(),
+    state_ts        TIMESTAMPTZ     NOT NULL,
+    mmsi            BIGINT          NOT NULL,
+    draught         REAL,
+    dest            TEXT,
+    eta             JSONB,
+    source          TEXT            NOT NULL,
+);
+
+SELECT create_hypertable('vessel_state', 'server_ts');
+SELECT set_chunk_time_interval('vessel_state', INTERVAL '1 day');
+CREATE INDEX ON vessel_state (mmsi, server_ts DESC);
 
 -- Vessel registry: populated passively + enriched from VesselFinder
 CREATE TABLE vessel_registry (
     mmsi            BIGINT           PRIMARY KEY,
     imo             BIGINT,
     vessel_name     TEXT,
+    call_sign       TEXT,
     vessel_type     SMALLINT,
     dwt             INTEGER,
     design_draught  REAL,
