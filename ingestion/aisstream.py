@@ -2,7 +2,6 @@
 import asyncio
 import json
 import logging
-from datetime import UTC, date, datetime
 
 import asyncpg
 import websockets
@@ -112,7 +111,14 @@ async def handle_message(raw: str | bytes, pool: asyncpg.Pool):
 
         elif isinstance(msg, ShipStaticData):
             await upsert_registry(conn, msg)
+            logger.debug(
+                f"Upserted ship: MMSI={msg.MetaData.MMSI}, Name={msg.MetaData.ShipName}"
+            )
+
             await insert_state(conn, msg)
+            logger.debug(
+                f"Upserted ship: MMSI={msg.MetaData.MMSI}, Name={msg.MetaData.ShipName}"
+            )
 
 
 async def ingest():
