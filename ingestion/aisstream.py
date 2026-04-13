@@ -2,7 +2,7 @@
 import asyncio
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import asyncpg
 import websockets
@@ -36,17 +36,62 @@ def build_subscribe_payload(api_key: str):
 
 async def insert_fix(conn: asyncpg.pool.PoolConnectionProxy, msg: PositionReport):
     """Extract PositionReport fields and insert a single fix"""
-    ...
+    await conn.execute(
+        """
+        INSERT INTO ais_fixes
+            (fix_ts, mmsi, lat, lon, nav_status, sog, source)
+        VALUES
+            ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (fix_ts, mmsi) DO NOTHING
+        """,
+        msg.MetaData.time_utc,
+        msg.MetaData.MMSI,
+        msg.Message.Latitude,
+        msg.Message.Longitude,
+        msg.Message.NavigationalStatus,
+        msg.Message.Sog,
+        "aisstream",
+    )
 
 
 async def upsert_registry(conn: asyncpg.pool.PoolConnectionProxy, msg: ShipStaticData):
     """Extract static ShipStaticData + MetaData fields and add new ships/ upsert existing ones in the vessel registry"""
-    ...
+    await conn.execute(
+        """
+        INSERT INTO vessel_registry
+            (mmsi, imo, vessel_name, call_sign, vessel_type)
+        VALUES
+            ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (mmsi) DO UPDATE SET
+            vessel_name = EXCLUDED.vessel_name,
+            call_sign = EXCLUDED.call_sign,
+            vessel_type = EXCLUDED.vessel_type
+        """,
+        msg.MetaData.MMSI,
+        msg.Message.ImoNumber,
+        msg.MetaData.ShipName,
+        msg.Message.CallSign,
+        msg.Message.Type,
+    )
 
 
 async def insert_state(conn: asyncpg.pool.PoolConnectionProxy, msg: ShipStaticData):
     """Extract voyage-specific ShipsStaticData fields and insert a vessel state record"""
-    ...
+    await conn.execute(
+        """
+        INSERT INTO vessel_state
+            (state_ts, mmsi, draught, dest, eta, source)
+        VALUES 
+            ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (state_ts, mmsi) DO NOTHING
+        """,
+        msg.MetaData.time_utc,
+        msg.MetaData.MMSI,
+        msg.Message.MaximumStaticDraught,
+        msg.Message.Destination,
+        msg.Message.Eta,
+        "aisstream",
+    )
 
 
 async def handle_message(raw: str | bytes, pool: asyncpg.Pool):
