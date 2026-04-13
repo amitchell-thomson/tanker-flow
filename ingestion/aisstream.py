@@ -39,12 +39,12 @@ async def insert_fix(conn: asyncpg.pool.PoolConnectionProxy, msg: PositionReport
     ...
 
 
-async def upsert_registry():
+async def upsert_registry(conn: asyncpg.pool.PoolConnectionProxy, msg: ShipStaticData):
     """Extract static ShipStaticData + MetaData fields and add new ships/ upsert existing ones in the vessel registry"""
     ...
 
 
-async def insert_state():
+async def insert_state(conn: asyncpg.pool.PoolConnectionProxy, msg: ShipStaticData):
     """Extract voyage-specific ShipsStaticData fields and insert a vessel state record"""
     ...
 
@@ -66,8 +66,8 @@ async def handle_message(raw: str | bytes, pool: asyncpg.Pool):
             )
 
         elif isinstance(msg, ShipStaticData):
-            await upsert_registry()
-            await insert_state()
+            await upsert_registry(conn, msg)
+            await insert_state(conn, msg)
 
 
 async def ingest():
