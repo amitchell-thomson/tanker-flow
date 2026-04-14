@@ -3,15 +3,15 @@
 from datetime import datetime
 from typing import Annotated, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, RootModel, field_validator
+from pydantic import BaseModel, Field, RootModel, field_validator, model_validator
 
 
 class MetaData(BaseModel):
     MMSI: int
     ShipName: Optional[str] = None
-    time_utc: str
+    time_utc: datetime
 
-    @field_validator("time_utc")
+    @field_validator("time_utc", mode="before")
     @classmethod
     def parse_timestamp(cls, v: str) -> datetime:
         # "-04-12 19:10:08.192247737 +0000 UTC"
@@ -31,7 +31,6 @@ class PositionReportMessage(BaseModel):
 
 class ShipStaticDataMessage(BaseModel):
     ImoNumber: Optional[int] = None
-    Name: Optional[str] = None
     CallSign: Optional[str] = None
     Type: Optional[int] = None
     MaximumStaticDraught: Optional[float] = None
@@ -49,11 +48,25 @@ class PositionReport(BaseModel):
     MetaData: MetaData
     Message: PositionReportMessage
 
+    @model_validator(mode="before")
+    @classmethod
+    def unwrap_message(cls, data):
+        if "Message" in data and "PositionReport" in data["Message"]:
+            data["Message"] = data["Message"]["PositionReport"]
+        return data
+
 
 class ShipStaticData(BaseModel):
     MessageType: Literal["ShipStaticData"]
     MetaData: MetaData
     Message: ShipStaticDataMessage
+
+    @model_validator(mode="before")
+    @classmethod
+    def unwrap_message(cls, data):
+        if "Message" in data and "ShipStaticData" in data["Message"]:
+            data["Message"] = data["Message"]["ShipStaticData"]
+        return data
 
 
 class AISMessage(
