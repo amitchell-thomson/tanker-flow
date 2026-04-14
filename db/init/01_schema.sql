@@ -12,9 +12,9 @@ CREATE TABLE ais_fixes (
     source          TEXT             NOT NULL  -- 'aisstream' | 'vesselfinder'
 );
 
-SELECT create_hypertable('ais_fixes', 'server_ts');
+SELECT create_hypertable('ais_fixes', 'fix_ts');
 SELECT set_chunk_time_interval('ais_fixes', INTERVAL '1 day');
-CREATE INDEX ON ais_fixes (mmsi, server_ts DESC);
+CREATE UNIQUE INDEX ON ais_fixes (fix_ts, mmsi);
 
 
 CREATE TABLE vessel_state(
@@ -24,12 +24,12 @@ CREATE TABLE vessel_state(
     draught         REAL,
     dest            TEXT,
     eta             JSONB,
-    source          TEXT            NOT NULL,
+    source          TEXT            NOT NULL
 );
 
-SELECT create_hypertable('vessel_state', 'server_ts');
+SELECT create_hypertable('vessel_state', 'state_ts');
 SELECT set_chunk_time_interval('vessel_state', INTERVAL '1 day');
-CREATE INDEX ON vessel_state (mmsi, server_ts DESC);
+CREATE UNIQUE INDEX ON vessel_state (state_ts, mmsi);
 
 -- Vessel registry: populated passively + enriched from VesselFinder
 CREATE TABLE vessel_registry (

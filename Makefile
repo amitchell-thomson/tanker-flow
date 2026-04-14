@@ -18,4 +18,6 @@ logs:
 reset:
 	@echo "WARNING: This will delete all data. Ctrl+C to cancel."
 	@sleep 5
-	docker compose down -v && docker compose up -d
+	docker compose down
+	sudo rm -rf /srv/data/tanker_db
+	docker compose up -d
