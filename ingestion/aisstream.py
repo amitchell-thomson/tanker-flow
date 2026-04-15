@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import time
 
 import asyncpg
 import websockets
@@ -18,6 +19,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+SILENCE_THRESHOLD_SECONDS = 45
 
 BOUNDING_BOXES = [
     [[25.0, -98.0], [31.0, -88.0]],
@@ -100,6 +103,7 @@ async def handle_message(
     pool: asyncpg.Pool,
     tanker_mmsis: set[int],
     non_tanker_mmsis: set[int],
+    telemetry: dict,
 ):
     try:
         data = json.loads(raw)
@@ -118,6 +122,11 @@ async def handle_message(
         async with pool.acquire() as conn:
             try:
                 await insert_fix(conn, msg)
+                telemetry["fix_inserts"] += 1
+                if telemetry["fix_inserts"] % 1000 == 0:
+                    logger.info(
+                        f"fixes={telemetry['fix_inserts']}, registry={telemetry['registry_upserts']}, state={telemetry['state_inserts']}"
+                    )
                 logger.debug(f"Inserted fix: MMSI={mmsi}, Name={msg.MetaData.ShipName}")
 
             except Exception as e:
@@ -141,6 +150,7 @@ async def handle_message(
         async with pool.acquire() as conn:
             try:
                 await upsert_registry(conn, msg)
+                telemetry["registry_upserts"] += 1
                 logger.debug(
                     f"Upserted ship: MMSI={mmsi}, Name={msg.MetaData.ShipName}"
                 )
@@ -151,6 +161,7 @@ async def handle_message(
 
             try:
                 await insert_state(conn, msg)
+                telemetry["state_inserts"] += 1
                 logger.debug(
                     f"Inserted state: MMSI={mmsi}, Name={msg.MetaData.ShipName}"
                 )
@@ -168,18 +179,45 @@ async def ingest():
 
     tanker_mmsis = set()
     non_tanker_mmsis = set()
+    telemetry = {"fix_inserts": 0, "registry_upserts": 0, "state_inserts": 0}
+
     try:
         while True:
             try:
                 logger.info("Connecting to aisstream.io...")
-                async with websockets.connect(url) as ws:
+                async with websockets.connect(
+                    url, ping_interval=20, ping_timeout=None
+                ) as ws:
                     await ws.send(json.dumps(payload))
                     logger.info("Subscribed. Receiving messages...")
 
-                    async for raw_message in ws:
-                        await handle_message(
-                            raw_message, pool, tanker_mmsis, non_tanker_mmsis
-                        )
+                    last_message_time = time.monotonic()
+
+                    async def watchdog():
+                        """Force reconnect if no message received for SILENCE_THRESHOLD_SECONDS."""
+                        while True:
+                            await asyncio.sleep(15)
+                            silence = time.monotonic() - last_message_time
+                            if silence > SILENCE_THRESHOLD_SECONDS:
+                                logger.warning(f"No messages for {silence:.0f}s — triggering reconnect")
+                                await ws.close()
+
+                    watchdog_task = asyncio.create_task(watchdog())
+
+                    try:
+                        async for raw_message in ws:
+                            last_message_time = time.monotonic()
+                            await handle_message(
+                                raw_message,
+                                pool,
+                                tanker_mmsis,
+                                non_tanker_mmsis,
+                                telemetry,
+                            )
+
+                    finally:
+                        watchdog_task.cancel()
+                        await asyncio.gather(watchdog_task, return_exceptions=True)
 
             except websockets.ConnectionClosed as e:
                 logger.warning(f"Websocket closed: {e}. Reconnecting in 30s")
