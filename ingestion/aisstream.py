@@ -199,7 +199,9 @@ async def ingest():
                             await asyncio.sleep(15)
                             silence = time.monotonic() - last_message_time
                             if silence > SILENCE_THRESHOLD_SECONDS:
-                                logger.warning(f"No messages for {silence:.0f}s — triggering reconnect")
+                                logger.warning(
+                                    f"No messages for {silence:.0f}s — triggering reconnect"
+                                )
                                 await ws.close()
 
                     watchdog_task = asyncio.create_task(watchdog())
