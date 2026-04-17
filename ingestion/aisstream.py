@@ -101,7 +101,6 @@ async def insert_state(conn: asyncpg.pool.PoolConnectionProxy, msg: ShipStaticDa
 async def handle_message(
     raw: str | bytes,
     pool: asyncpg.Pool,
-    tanker_mmsis: set[int],
     non_tanker_mmsis: set[int],
     telemetry: dict,
 ):
@@ -135,16 +134,11 @@ async def handle_message(
     elif isinstance(msg, ShipStaticData):
         vessel_type = msg.Message.Type
 
-        if (
-            vessel_type is not None
-            and vessel_type != 0
-            and vessel_type not in TANKER_TYPES
-        ):
+        if vessel_type is not None and vessel_type not in TANKER_TYPES:
             non_tanker_mmsis.add(mmsi)
             return
 
         if vessel_type in TANKER_TYPES:
-            tanker_mmsis.add(mmsi)
             non_tanker_mmsis.discard(mmsi)
 
         async with pool.acquire() as conn:
@@ -177,17 +171,14 @@ async def ingest():
     url = "wss://stream.aisstream.io/v0/stream"
     payload = build_subscribe_payload(settings.aisstream_api_key)
 
-    tanker_mmsis = set()
-    non_tanker_mmsis = set()
+    non_tanker_mmsis: set[int] = set()
     telemetry = {"fix_inserts": 0, "registry_upserts": 0, "state_inserts": 0}
 
     try:
         while True:
             try:
                 logger.info("Connecting to aisstream.io...")
-                async with websockets.connect(
-                    url, ping_interval=20, ping_timeout=None
-                ) as ws:
+                async with websockets.connect(url, ping_timeout=None) as ws:
                     await ws.send(json.dumps(payload))
                     logger.info("Subscribed. Receiving messages...")
 
@@ -212,7 +203,6 @@ async def ingest():
                             await handle_message(
                                 raw_message,
                                 pool,
-                                tanker_mmsis,
                                 non_tanker_mmsis,
                                 telemetry,
                             )

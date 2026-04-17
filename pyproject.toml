@@ -5,7 +5,6 @@ description = "using live tanker positions to derive leading brent-wti spread pr
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "alembic>=1.18.4",
     "asyncpg>=0.31.0",
     "httpx>=0.28.1",
     "pandas>=3.0.2",
