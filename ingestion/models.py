@@ -14,12 +14,17 @@ class MetaData(BaseModel):
     @field_validator("time_utc", mode="before")
     @classmethod
     def parse_timestamp(cls, v: str) -> datetime:
-        # "-04-12 19:10:08.192247737 +0000 UTC"
-        v = v.replace(" UTC", "")
-        parts = v.split(".")
-        microseconds = parts[1][:6]
-        v = f"{parts[0]}.{microseconds} +0000"
-        return datetime.strptime(v, "%Y-%m-%d %H:%M:%S.%f %z")
+        v = v.replace(" UTC", "").strip()
+        # Split into date-time and timezone parts on the space before +0000
+        # e.g. "2026-04-17 11:19:46.4611 +0000"
+        #   or "2026-04-17 11:19:46.192247737 +0000"
+        dt_part, tz_part = v.rsplit(" ", 1)
+        # dt_part may be "2026-04-17 11:19:46.4611" or "2026-04-17 11:19:46.192247737"
+        if "." in dt_part:
+            base, frac = dt_part.split(".")
+            frac = frac[:6].ljust(6, "0")  # normalise to exactly 6 digits
+            dt_part = f"{base}.{frac}"
+        return datetime.strptime(f"{dt_part} {tz_part}", "%Y-%m-%d %H:%M:%S.%f %z")
 
 
 class PositionReportMessage(BaseModel):
