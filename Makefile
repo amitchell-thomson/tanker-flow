@@ -1,4 +1,4 @@
-.PHONY: up down psql logs reset
+.PHONY: up down psql logs reset viz
 
 up:
 	docker compose up -d
@@ -7,7 +7,7 @@ down:
 	docker compose down
 
 ui:
-	lazysql "postgres://tanker_user:$(shell grep DB_PASSWORD .env | cut -d= -f2)@localhost:5432/tanker_flow?sslmode=disable"
+	PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring sqlit -c tanker-flow
 
 psql:
 	docker exec -it tanker_db psql -U tanker_user -d tanker_flow
@@ -21,3 +21,6 @@ reset:
 	docker compose down
 	sudo rm -rf /srv/data/tanker_db
 	docker compose up -d
+
+viz:
+	uv run uvicorn viz.app:app --host 127.0.0.1 --port 8000 --reload
