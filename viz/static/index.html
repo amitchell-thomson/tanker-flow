@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Tanker Flow</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    body { margin: 0; background: #1a1a2e; }
+    #map { height: 100vh; width: 100vw; }
+    #reset-btn {
+      display: none;
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      z-index: 1000;
+      padding: 8px 16px;
+      background: #2c3e50;
+      color: #ecf0f1;
+      border: 1px solid #7f8c8d;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    #reset-btn:hover { background: #34495e; }
+    #status {
+      position: absolute;
+      bottom: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 1000;
+      padding: 4px 12px;
+      background: rgba(0,0,0,0.6);
+      color: #bdc3c7;
+      border-radius: 4px;
+      font-size: 12px;
+      font-family: monospace;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <button id="reset-btn" onclick="resetView()">Show all vessels</button>
+  <div id="status">Loading...</div>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const map = L.map('map').setView([25, -30], 3);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors',
+      maxZoom: 18,
+    }).addTo(map);
+
+    const vesselLayer = L.layerGroup().addTo(map);
+    let trackLayer = null;
+    const markers = {};
+
+    function setStatus(msg) {
+      document.getElementById('status').textContent = msg;
+    }
+
+    function formatTime(iso) {
+      return new Date(iso).toUTCString().replace(' GMT', ' UTC');
+    }
+
+    async function loadVessels() {
+      setStatus('Fetching vessels...');
+      const vessels = await fetch('/api/vessels').then(r => r.json());
+      vessels.forEach(v => {
+        const marker = L.circleMarker([v.lat, v.lon], {
+          radius: 6,
+          color: '#e67e22',
+          fillColor: '#e67e22',
+          fillOpacity: 0.85,
+          weight: 1.5,
+        });
+        const name = v.vessel_name || 'Unknown';
+        const sog = v.sog != null ? v.sog.toFixed(1) + ' kn' : '?';
+        marker.bindPopup(
+          `<b>${name}</b><br>MMSI: ${v.mmsi}` +
+          (v.flag ? `<br>Flag: ${v.flag}` : '') +
+          `<br>SOG: ${sog}<br>${formatTime(v.fix_ts)}`
+        );
+        marker.on('click', () => selectVessel(v.mmsi, name));
+        marker.addTo(vesselLayer);
+        markers[v.mmsi] = marker;
+      });
+      setStatus(`${vessels.length} vessels — click a vessel to inspect`);
+    }
+
+    async function selectVessel(mmsi, name) {
+      setStatus(`Loading track for ${name} (${mmsi})...`);
+
+      Object.entries(markers).forEach(([m, mk]) => {
+        const active = String(m) === String(mmsi);
+        mk.setStyle({ opacity: active ? 1 : 0.12, fillOpacity: active ? 0.85 : 0.12 });
+      });
+
+      if (trackLayer) { map.removeLayer(trackLayer); trackLayer = null; }
+
+      const history = await fetch(`/api/vessel/${mmsi}/history`).then(r => r.json());
+      if (!history.length) { setStatus('No history found'); return; }
+
+      const coords = history.map(h => [h.lat, h.lon]);
+      trackLayer = L.layerGroup();
+      L.polyline(coords, { color: '#3498db', weight: 2, opacity: 0.8 }).addTo(trackLayer);
+      history.forEach((h, i) => {
+        const isNewest = i === 0;
+        L.circleMarker([h.lat, h.lon], {
+          radius: isNewest ? 5 : 3,
+          color: isNewest ? '#2ecc71' : '#3498db',
+          fillColor: isNewest ? '#2ecc71' : '#3498db',
+          fillOpacity: 0.7,
+          weight: 1,
+        }).addTo(trackLayer);
+      });
+      trackLayer.addTo(map);
+      map.fitBounds(L.latLngBounds(coords).pad(0.2));
+
+      document.getElementById('reset-btn').style.display = 'block';
+      setStatus(`${name} — last ${history.length} fixes`);
+    }
+
+    function resetView() {
+      Object.values(markers).forEach(mk => mk.setStyle({ opacity: 1, fillOpacity: 0.85 }));
+      if (trackLayer) { map.removeLayer(trackLayer); trackLayer = null; }
+      document.getElementById('reset-btn').style.display = 'none';
+      setStatus(`${Object.keys(markers).length} vessels — click a vessel to inspect`);
+    }
+
+    loadVessels();
+  </script>
+</body>
+</html>
