@@ -6,7 +6,7 @@ up:
 down:
 	docker compose down
 
-ui:
+db-ui:
 	PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring sqlit -c tanker-flow
 
 psql:

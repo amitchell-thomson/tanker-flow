@@ -52,7 +52,7 @@ async def vessel_history(mmsi: int, pool: asyncpg.Pool = Depends(get_pool)):
         FROM ais_fixes
         WHERE mmsi = $1 AND lat IS NOT NULL AND lon IS NOT NULL
         ORDER BY fix_ts DESC
-        LIMIT 50
+        LIMIT 400
     """,
         mmsi,
     )
