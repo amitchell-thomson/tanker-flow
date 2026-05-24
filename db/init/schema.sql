@@ -33,16 +33,36 @@ CREATE UNIQUE INDEX ON vessel_state (state_ts, mmsi);
 
 -- Vessel registry: populated passively + enriched from VesselFinder
 CREATE TABLE vessel_registry (
-    mmsi            BIGINT           PRIMARY KEY,
-    imo             BIGINT,
-    vessel_name     TEXT,
-    call_sign       TEXT,
-    vessel_type     SMALLINT,
-    dwt             INTEGER,
-    design_draught  REAL,
-    flag            TEXT,
-    enriched_at     TIMESTAMPTZ,     -- NULL means not yet enriched
-    updated_at      TIMESTAMPTZ      DEFAULT now()
+    mmsi                BIGINT           PRIMARY KEY,
+    imo                 BIGINT,
+    vessel_name         TEXT,
+    call_sign           TEXT,
+    vessel_type         SMALLINT,        -- AIS numeric type code (80-89 = tanker)
+    flag                TEXT,
+    -- VesselFinder enrichment
+    vf_vessel_type      TEXT,            -- e.g. 'LNG Tanker', 'FSRU'
+    year_built          SMALLINT,
+    builder             TEXT,
+    owner               TEXT,
+    manager             TEXT,
+    length_m            REAL,
+    beam_m              REAL,
+    gross_tonnage       INTEGER,
+    net_tonnage         INTEGER,
+    dwt                 INTEGER,
+    design_draught      REAL,
+    teu                 INTEGER,
+    crude_capacity      INTEGER,
+    gas_capacity_m3     INTEGER,
+    -- Derived classification
+    is_lng_carrier      BOOLEAN,
+    is_fsru             BOOLEAN,
+    excluded            BOOLEAN          NOT NULL DEFAULT FALSE,
+    exclusion_reason    TEXT,
+    -- Enrichment tracking
+    enriched_at         TIMESTAMPTZ,
+    vf_enrichment_status TEXT,           -- 'ok'|'not_found'|'error'|'pending'
+    updated_at          TIMESTAMPTZ      DEFAULT now()
 );
 
 -- Port events: derived from ais_fixes, recomputable
