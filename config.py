@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     db_host: str = "localhost"
     db_port: int = 5432
     aisstream_api_key: str
+    vf_api_key: str
 
     @property
     def database_url(self) -> str:

@@ -1,4 +1,4 @@
-.PHONY: up down psql logs reset viz
+.PHONY: up down psql logs reset viz ingest enrich
 
 up:
 	docker compose up -d
@@ -21,6 +21,15 @@ reset:
 	docker compose down
 	sudo rm -rf /srv/data/tanker_db
 	docker compose up -d
+
+ingest:
+	uv run python -m ingestion.aisstream
+
+enrich:
+	uv run python -m ingestion.vesselfinder
+
+enrich-test:
+	uv run python -m ingestion.vesselfinder --probe $(IMO)
 
 viz:
 	uv run uvicorn viz.app:app --host 127.0.0.1 --port 8000 --reload

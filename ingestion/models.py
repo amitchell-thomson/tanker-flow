@@ -82,3 +82,27 @@ class AISMessage(
     ]
 ):
     pass
+
+
+class VesselFinderMasterdata(BaseModel):
+    IMO: int
+    NAME: Optional[str] = None
+    FLAG: Optional[str] = None
+    TYPE: Optional[str] = None
+    BUILT: Optional[int] = None
+    BUILDER: Optional[str] = None
+    OWNER: Optional[str] = None
+    MANAGER: Optional[str] = None
+    LENGTH: Optional[float] = None
+    BEAM: Optional[float] = None
+    MAXDRAUGHT: Optional[float] = None
+    GT: Optional[int] = None
+    NT: Optional[int] = None
+    DWT: Optional[int] = None
+    TEU: Optional[int] = None
+    CRUDE: Optional[int] = None
+    GAS: Optional[int] = None  # field name unconfirmed — verify against a real LNG response
+
+
+class VesselFinderResponse(BaseModel):
+    MASTERDATA: VesselFinderMasterdata
