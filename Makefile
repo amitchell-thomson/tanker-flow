@@ -23,7 +23,10 @@ reset:
 	docker compose up -d
 
 ingest:
-	uv run python -m ingestion.aisstream
+	@uv run python -m ingestion.aisstream >/dev/null 2>&1 & \
+	INGEST_PID=$$!; \
+	uv run python -m viz.tui; \
+	kill $$INGEST_PID 2>/dev/null || true
 
 enrich:
 	uv run python -m ingestion.vesselfinder
