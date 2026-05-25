@@ -38,6 +38,20 @@ def build_subscribe_payload(api_key: str):
     }
 
 
+async def upsert_heartbeat(pool: asyncpg.Pool, status: str) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO ingestion_heartbeat (source, status, last_heartbeat)
+            VALUES ('aisstream', $1, now())
+            ON CONFLICT (source) DO UPDATE SET
+                status = EXCLUDED.status,
+                last_heartbeat = EXCLUDED.last_heartbeat
+            """,
+            status,
+        )
+
+
 async def insert_fix(conn: asyncpg.pool.PoolConnectionProxy, msg: PositionReport):
     """Extract PositionReport fields and insert a single fix"""
     await conn.execute(
@@ -178,9 +192,11 @@ async def ingest():
         while True:
             try:
                 logger.info("Connecting to aisstream.io...")
+                await upsert_heartbeat(pool, "connecting")
                 async with websockets.connect(url, ping_timeout=None) as ws:
                     await ws.send(json.dumps(payload))
                     logger.info("Subscribed. Receiving messages...")
+                    await upsert_heartbeat(pool, "connected")
 
                     last_message_time = time.monotonic()
 
@@ -195,7 +211,17 @@ async def ingest():
                                 )
                                 await ws.close()
 
+                    async def heartbeat_loop():
+                        """Periodically refresh the DB heartbeat while connected."""
+                        while True:
+                            await asyncio.sleep(10)
+                            try:
+                                await upsert_heartbeat(pool, "connected")
+                            except Exception as _hb_err:
+                                logger.warning(f"Heartbeat write failed: {_hb_err}")
+
                     watchdog_task = asyncio.create_task(watchdog())
+                    heartbeat_task = asyncio.create_task(heartbeat_loop())
 
                     try:
                         async for raw_message in ws:
@@ -209,14 +235,25 @@ async def ingest():
 
                     finally:
                         watchdog_task.cancel()
-                        await asyncio.gather(watchdog_task, return_exceptions=True)
+                        heartbeat_task.cancel()
+                        await asyncio.gather(
+                            watchdog_task, heartbeat_task, return_exceptions=True
+                        )
 
             except websockets.ConnectionClosed as e:
                 logger.warning(f"Websocket closed: {e}. Reconnecting in 30s")
+                try:
+                    await upsert_heartbeat(pool, "reconnecting")
+                except Exception as _hb_err:
+                    logger.warning(f"Failed to write reconnecting heartbeat: {_hb_err}")
                 await asyncio.sleep(30)
 
             except Exception as e:
                 logger.warning(f"Unexpected error: {e}. Reconnecting in 60s")
+                try:
+                    await upsert_heartbeat(pool, "reconnecting")
+                except Exception as _hb_err:
+                    logger.warning(f"Failed to write reconnecting heartbeat: {_hb_err}")
                 await asyncio.sleep(60)
     finally:
         await pool.close()

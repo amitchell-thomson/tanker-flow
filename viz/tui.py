@@ -128,7 +128,7 @@ class TankerFlowApp(App):
         self._pool: asyncpg.Pool | None = None
 
     def compose(self) -> ComposeResult:
-        yield Static("Connecting to database...", id="status")
+        yield Static("Connecting to database...", id="status", markup=True)
         with Vertical(id="sparkline-container"):
             yield Label("Fixes/min — peak: 0, mean: 0", id="sparkline-label")
             yield _XAxisPlot(id="chart", allow_pan_and_zoom=False)
@@ -178,7 +178,7 @@ class TankerFlowApp(App):
         minutes_back = max(60, min(plot_width * 2, 1440))
 
         try:
-            total, last60s, last5m, bucket_rows, fix_rows = await asyncio.gather(
+            total, last60s, last5m, bucket_rows, fix_rows, hb_row = await asyncio.gather(
                 self._pool.fetchval("SELECT COUNT(*) FROM ais_fixes"),
                 self._pool.fetchval(
                     "SELECT COUNT(*) FROM ais_fixes WHERE fix_ts > now() - INTERVAL '60 seconds'"
@@ -213,15 +213,43 @@ class TankerFlowApp(App):
                     LIMIT 5
                     """
                 ),
+                self._pool.fetchrow(
+                    """
+                    SELECT status,
+                           EXTRACT(EPOCH FROM (now() - last_heartbeat))::int AS age_s
+                    FROM ingestion_heartbeat
+                    WHERE source = 'aisstream'
+                    """
+                ),
             )
         except Exception:
             now = datetime.now(timezone.utc).strftime("%H:%M:%S")
             self.query_one("#status", Static).update(f"⚠ DB error {now}")
             return
 
+        if hb_row is None:
+            dot = "[dim]●[/dim]"
+            hb_label = "no heartbeat"
+        else:
+            age_s: int = hb_row["age_s"]
+            hb_status: str = hb_row["status"]
+            if hb_status == "connected" and age_s < 30:
+                dot = "[green]●[/green]"
+                hb_label = "live"
+            elif hb_status == "connected" and age_s < 120:
+                dot = "[yellow]●[/yellow]"
+                hb_label = f"stale {age_s}s"
+            elif hb_status == "connecting":
+                dot = "[yellow]●[/yellow]"
+                hb_label = "connecting"
+            else:
+                dot = "[red]●[/red]"
+                age_str = f"{age_s // 60}m" if age_s >= 60 else f"{age_s}s"
+                hb_label = f"{hb_status} ({age_str} ago)"
+
         now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
         self.query_one("#status", Static).update(
-            f"Total: {total:,} | Last 60s: {last60s} | Last 5m: {last5m} | {now_str} UTC"
+            f"{dot} {hb_label} | Total: {total:,} | Last 60s: {last60s} | Last 5m: {last5m} | {now_str} UTC"
         )
 
         data = [float(row["cnt"]) for row in bucket_rows]
