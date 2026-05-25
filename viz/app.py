@@ -31,16 +31,18 @@ async def index():
 
 @app.get("/api/vessels")
 async def vessels(pool: asyncpg.Pool = Depends(get_pool)):
-    rows = await pool.fetch("""
+    rows = await pool.fetch(
+        """
         SELECT DISTINCT ON (f.mmsi)
             f.mmsi, f.lat, f.lon, f.fix_ts, f.sog, f.nav_status,
             v.vessel_name, v.flag
         FROM ais_fixes f
         LEFT JOIN vessel_registry v USING (mmsi)
-        WHERE f.lat IS NOT NULL AND f.lon IS NOT NULL
+        WHERE f.lat IS NOT NULL AND f.lon IS NOT NULL AND f.imo != 0
           AND f.fix_ts > now() - INTERVAL '48 hours'
         ORDER BY f.mmsi, f.fix_ts DESC
-    """)
+        """
+    )
     return [dict(r) for r in rows]
 
 
@@ -53,7 +55,7 @@ async def vessel_history(mmsi: int, pool: asyncpg.Pool = Depends(get_pool)):
         WHERE mmsi = $1 AND lat IS NOT NULL AND lon IS NOT NULL
         ORDER BY fix_ts DESC
         LIMIT 400
-    """,
+        """,
         mmsi,
     )
     return [dict(r) for r in rows]
