@@ -66,28 +66,33 @@ CREATE TABLE vessel_registry (
     updated_at          TIMESTAMPTZ      DEFAULT now()
 );
 
--- LNG terminal zones: polygons imported from QGIS, used for port event detection
-CREATE TABLE port_zones (
-    id              SERIAL PRIMARY KEY,
-    terminal_name   VARCHAR(100) NOT NULL,
-    zone_type       VARCHAR(20)  NOT NULL
-                      CHECK (zone_type IN ('berth', 'anchorage')),
-    sub_zone        SMALLINT     NOT NULL DEFAULT 0,
+-- LNG terminal metadata: one row per terminal, referenced by terminal_zones
+CREATE TABLE terminals (
+    terminal_id     SERIAL PRIMARY KEY,
+    terminal_name   VARCHAR(100) NOT NULL UNIQUE,
     country         CHAR(2)      NOT NULL,
-    flow_direction  VARCHAR(10)  NOT NULL
-                      CHECK (flow_direction IN ('export', 'import')),
+    flow_direction  VARCHAR(10)  NOT NULL CHECK (flow_direction IN ('export','import')),
+    in_signal_scope BOOLEAN      NOT NULL DEFAULT TRUE,
+    is_fsru         BOOLEAN      NOT NULL DEFAULT FALSE,
+    notes           TEXT
+);
+
+-- LNG terminal zones: polygons imported from QGIS, used for port event detection
+CREATE TABLE terminal_zones (
+    id              SERIAL PRIMARY KEY,
+    terminal_id     INTEGER      NOT NULL REFERENCES terminals(terminal_id),
+    zone_type       VARCHAR(20)  NOT NULL CHECK (zone_type IN ('berth','anchorage')),
+    sub_zone        SMALLINT     NOT NULL DEFAULT 0,
     is_provisional  BOOLEAN      NOT NULL DEFAULT TRUE,
     source          VARCHAR(30),
     notes           TEXT,
-    created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
     geom            geometry(MultiPolygon, 4326) NOT NULL,
 
-    CONSTRAINT uq_terminal_zone
-        UNIQUE (terminal_name, zone_type, sub_zone)
+    UNIQUE (terminal_id, zone_type, sub_zone)
 );
 
-CREATE INDEX idx_port_zones_geom ON port_zones USING GIST (geom);
-CREATE INDEX idx_port_zones_lookup ON port_zones (zone_type, flow_direction);
+CREATE INDEX idx_terminal_zones_geom     ON terminal_zones USING GIST (geom);
+CREATE INDEX idx_terminal_zones_terminal ON terminal_zones (terminal_id);
 
 -- Port events: derived from ais_fixes, recomputable
 CREATE TABLE port_events (
