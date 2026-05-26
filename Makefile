@@ -1,4 +1,4 @@
-.PHONY: up down psql logs reset viz ingest enrich
+.PHONY: up down psql logs reset seed viz ingest enrich
 
 up:
 	docker compose up -d
@@ -21,6 +21,9 @@ reset:
 	docker compose down
 	sudo rm -rf /srv/data/tanker_db
 	docker compose up -d
+
+seed:
+	docker exec -i tanker_db psql -U tanker_user -d tanker_flow < db/seed/terminals.sql
 
 ingest:
 	@uv run python -m ingestion.aisstream >/dev/null 2>&1 & \
