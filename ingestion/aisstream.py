@@ -38,6 +38,13 @@ def build_subscribe_payload(api_key: str):
     }
 
 
+async def _try_heartbeat(pool: asyncpg.Pool, status: str) -> None:
+    try:
+        await upsert_heartbeat(pool, status)
+    except Exception as e:
+        logger.warning(f"Heartbeat write failed ({status}): {e}")
+
+
 async def upsert_heartbeat(pool: asyncpg.Pool, status: str) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
@@ -242,18 +249,12 @@ async def ingest():
 
             except websockets.ConnectionClosed as e:
                 logger.warning(f"Websocket closed: {e}. Reconnecting in 30s")
-                try:
-                    await upsert_heartbeat(pool, "reconnecting")
-                except Exception as _hb_err:
-                    logger.warning(f"Failed to write reconnecting heartbeat: {_hb_err}")
+                await _try_heartbeat(pool, "reconnecting")
                 await asyncio.sleep(30)
 
             except Exception as e:
                 logger.warning(f"Unexpected error: {e}. Reconnecting in 60s")
-                try:
-                    await upsert_heartbeat(pool, "reconnecting")
-                except Exception as _hb_err:
-                    logger.warning(f"Failed to write reconnecting heartbeat: {_hb_err}")
+                await _try_heartbeat(pool, "reconnecting")
                 await asyncio.sleep(60)
     finally:
         await pool.close()

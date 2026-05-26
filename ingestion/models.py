@@ -48,30 +48,26 @@ class ShipStaticDataMessage(BaseModel):
         return None if v == 0.0 else v
 
 
-class PositionReport(BaseModel):
+class AISBaseMessage(BaseModel):
+    @model_validator(mode="before")
+    @classmethod
+    def unwrap_message(cls, data):
+        msg_type = data.get("MessageType")
+        if "Message" in data and msg_type and msg_type in data["Message"]:
+            data["Message"] = data["Message"][msg_type]
+        return data
+
+
+class PositionReport(AISBaseMessage):
     MessageType: Literal["PositionReport"]
     MetaData: MetaData
     Message: PositionReportMessage
 
-    @model_validator(mode="before")
-    @classmethod
-    def unwrap_message(cls, data):
-        if "Message" in data and "PositionReport" in data["Message"]:
-            data["Message"] = data["Message"]["PositionReport"]
-        return data
 
-
-class ShipStaticData(BaseModel):
+class ShipStaticData(AISBaseMessage):
     MessageType: Literal["ShipStaticData"]
     MetaData: MetaData
     Message: ShipStaticDataMessage
-
-    @model_validator(mode="before")
-    @classmethod
-    def unwrap_message(cls, data):
-        if "Message" in data and "ShipStaticData" in data["Message"]:
-            data["Message"] = data["Message"]["ShipStaticData"]
-        return data
 
 
 class AISMessage(

@@ -93,14 +93,18 @@ async def mark_status(
     )
 
 
+async def _fetch_raw(client: httpx.AsyncClient, imo: int) -> httpx.Response:
+    return await client.get(
+        VF_API_BASE,
+        params={"userkey": settings.vf_api_key, "imo": imo},
+    )
+
+
 async def fetch_masterdata(
     client: httpx.AsyncClient,
     imo: int,
 ) -> VesselFinderMasterdata | None:
-    response = await client.get(
-        VF_API_BASE,
-        params={"userkey": settings.vf_api_key, "imo": imo},
-    )
+    response = await _fetch_raw(client, imo)
 
     if response.status_code == 404:
         return None
@@ -172,10 +176,7 @@ async def enrich() -> None:
 async def probe(imo: int) -> None:
     """Fetch a single IMO, print raw response and parsed fields. No DB writes."""
     async with httpx.AsyncClient(timeout=10.0) as client:
-        response = await client.get(
-            VF_API_BASE,
-            params={"userkey": settings.vf_api_key, "imo": imo},
-        )
+        response = await _fetch_raw(client, imo)
 
     print(f"\n--- Raw response (status {response.status_code}) ---")
     try:
