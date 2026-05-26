@@ -1,4 +1,5 @@
 CREATE EXTENSION IF NOT EXISTS timescaledb;
+CREATE EXTENSION IF NOT EXISTS postgis;
 
 -- Raw AIS fixes: append-only, never updated
 CREATE TABLE ais_fixes (
@@ -82,3 +83,37 @@ CREATE TABLE port_events (
 
 CREATE INDEX ON port_events (mmsi, event_time DESC);
 CREATE INDEX ON port_events (zone, event_type, event_time DESC);
+
+
+-- Ingestion health: one row per source, upserted on each heartbeat
+CREATE TABLE ingestion_heartbeat (
+    source          TEXT             PRIMARY KEY,
+    status          TEXT             NOT NULL,
+    last_heartbeat  TIMESTAMPTZ      NOT NULL
+);
+
+
+-- Continuous aggregates for ingestion monitoring
+CREATE MATERIALIZED VIEW fixes_per_minute
+WITH (timescaledb.continuous) AS
+SELECT time_bucket('1 minute', fix_ts) AS bucket, COUNT(*) AS cnt
+FROM ais_fixes
+GROUP BY bucket
+WITH NO DATA;
+
+SELECT add_continuous_aggregate_policy('fixes_per_minute',
+    start_offset      => INTERVAL '2 days',
+    end_offset        => INTERVAL '1 minute',
+    schedule_interval => INTERVAL '1 minute');
+
+CREATE MATERIALIZED VIEW fixes_per_hour
+WITH (timescaledb.continuous) AS
+SELECT time_bucket('1 hour', fix_ts) AS bucket, COUNT(*) AS cnt
+FROM ais_fixes
+GROUP BY bucket
+WITH NO DATA;
+
+SELECT add_continuous_aggregate_policy('fixes_per_hour',
+    start_offset      => INTERVAL '365 days',
+    end_offset        => INTERVAL '1 hour',
+    schedule_interval => INTERVAL '1 hour');

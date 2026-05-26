@@ -1,6 +1,6 @@
 services:
   timescaledb:
-    image: timescale/timescaledb:latest-pg16
+    image: timescale/timescaledb-ha:pg16-all
     container_name: tanker_db
     restart: unless-stopped
     environment:
@@ -8,7 +8,7 @@ services:
       POSTGRES_USER: tanker_user
       POSTGRES_PASSWORD: ${DB_PASSWORD}
     volumes:
-      - /srv/data/tanker_db:/var/lib/postgresql/data
+      - /srv/data/tanker_db:/home/postgres/pgdata/data
       - ./db/init:/docker-entrypoint-initdb.d:ro
     ports:
       - "127.0.0.1:5432:5432"
