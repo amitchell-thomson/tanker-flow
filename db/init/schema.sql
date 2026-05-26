@@ -70,14 +70,24 @@ CREATE TABLE vessel_registry (
 CREATE TABLE port_zones (
     id              SERIAL PRIMARY KEY,
     terminal_name   VARCHAR(100) NOT NULL,
-    zone_type       VARCHAR(20)  NOT NULL CHECK (zone_type IN ('berth', 'anchorage')),
-    country         CHAR(5)      NOT NULL,
-    flow_direction  VARCHAR(10)  NOT NULL CHECK (flow_direction IN ('export', 'import')),
+    zone_type       VARCHAR(20)  NOT NULL
+                      CHECK (zone_type IN ('berth', 'anchorage')),
+    sub_zone        SMALLINT     NOT NULL DEFAULT 0,
+    country         CHAR(2)      NOT NULL,
+    flow_direction  VARCHAR(10)  NOT NULL
+                      CHECK (flow_direction IN ('export', 'import')),
+    is_provisional  BOOLEAN      NOT NULL DEFAULT TRUE,
+    source          VARCHAR(30),
     notes           TEXT,
-    geom            geometry(Polygon, 4326) NOT NULL
+    created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    geom            geometry(MultiPolygon, 4326) NOT NULL,
+
+    CONSTRAINT uq_terminal_zone
+        UNIQUE (terminal_name, zone_type, sub_zone)
 );
 
 CREATE INDEX idx_port_zones_geom ON port_zones USING GIST (geom);
+CREATE INDEX idx_port_zones_lookup ON port_zones (zone_type, flow_direction);
 
 -- Port events: derived from ais_fixes, recomputable
 CREATE TABLE port_events (
