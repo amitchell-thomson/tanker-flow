@@ -66,6 +66,19 @@ CREATE TABLE vessel_registry (
     updated_at          TIMESTAMPTZ      DEFAULT now()
 );
 
+-- LNG terminal zones: polygons imported from QGIS, used for port event detection
+CREATE TABLE port_zones (
+    id              SERIAL PRIMARY KEY,
+    terminal_name   VARCHAR(100) NOT NULL,
+    zone_type       VARCHAR(20)  NOT NULL CHECK (zone_type IN ('berth', 'anchorage')),
+    country         CHAR(5)      NOT NULL,
+    flow_direction  VARCHAR(10)  NOT NULL CHECK (flow_direction IN ('export', 'import')),
+    notes           TEXT,
+    geom            geometry(Polygon, 4326) NOT NULL
+);
+
+CREATE INDEX idx_port_zones_geom ON port_zones USING GIST (geom);
+
 -- Port events: derived from ais_fixes, recomputable
 CREATE TABLE port_events (
     id              BIGSERIAL        PRIMARY KEY,
