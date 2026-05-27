@@ -1,6 +1,6 @@
 -- =============================================================================
 -- tanker-flow: terminals seed
--- 39 rows: 33 Tier-1 (in_signal_scope = TRUE) + 6 Tier-2 (in_signal_scope = FALSE)
+-- 40 rows: 34 Tier-1 (in_signal_scope = TRUE) + 6 Tier-2 (in_signal_scope = FALSE)
 --
 -- FSRU flag: TRUE for every floating storage & regasification unit.
 --   These rows still appear in the signal pipeline so that they can be
@@ -43,7 +43,8 @@ VALUES
 ('Wilhelmshaven 1 FSRU',    'DE', 'import', TRUE,  TRUE,  'Hoegh Esperanza'),
 ('Wilhelmshaven 2 FSRU',    'DE', 'import', TRUE,  TRUE,  'Excelsior; online Aug 2025'),
 ('Brunsbuttel FSRU',        'DE', 'import', TRUE,  TRUE,  'Neptune FSRU'),
-('Lubmin II FSRU',          'DE', 'import', TRUE,  TRUE,  'Deutsche Courage'),
+('Lubmin II FSRU',          'DE', 'import', FALSE, TRUE,  'FSRU Neptune departed May 2024 to Mukran. Site repurposed for hydrogen terminal. Retired as LNG import terminal.'),
+('Mukran (Deutsche Ostsee)','DE', 'import', TRUE,  TRUE,  'Neptune + Energos Power FSRUs at Mukran port, Rugen island. Replaced Lubmin II as active German Baltic import terminal. Operational 2024.'),
 
 -- ---------------------------------------------------------------------------
 -- TIER 1 — EU IMPORT, IBERIA
@@ -104,4 +105,4 @@ ORDER BY 1, 2, 3;
 --  export | false | false |  6   <- Tier-2 exclusion terminals
 --  export | true  | false |  9   <- US export Tier-1
 --  import | true  | false | 14   <- EU onshore import
---  import | true  | true  | 10   <- EU FSRU import
+--  import | true  | true  | 10   <- EU FSRU import (Lubmin II retired; Mukran added)
