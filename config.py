@@ -32,8 +32,8 @@ AIS_BOUNDING_BOXES = [
     [[36.5, -10.0], [44.0, -2.5]],
     # NW Europe: South Hook, Isle of Grain, Dunkirk, Zeebrugge, Gate/Rotterdam, Eemshaven, Wilhelmshaven, Brunsbuttel
     [[50.5, -6.0], [54.5, 10.0]],
-    # Baltic: Mukran (DE), Swinoujscie (PL)
-    [[53.5, 13.0], [55.0, 15.0]],
+    # Baltic: Mukran (DE), Swinoujscie (PL), Klaipeda FSRU (LT, ~55.74N 20.84E)
+    [[53.5, 13.0], [56.2, 21.5]],
     # W Mediterranean: Cartagena, Sagunto, Barcelona (ES), Piombino (IT), Krk (HR)
     [[36.0, -2.0], [46.0, 15.0]],
     # E Mediterranean: Revithoussa, Alexandroupolis (GR)

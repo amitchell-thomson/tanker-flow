@@ -1,7 +1,8 @@
 """Import terminal zone polygons from QGIS GeoPackage into terminal_zones table.
 
 Usage:
-    uv run python db/import_terminal_zones.py [--dry-run]
+    make seed-zones                   # or:
+    uv run python db/seed/import_terminal_zones.py [--dry-run]
 """
 
 import sqlite3
@@ -13,7 +14,7 @@ import psycopg2.extras
 
 from config import settings
 
-GPKG_PATH = Path(__file__).parent.parent / "qgis" / "terminal_zones_scratch.gpkg"
+GPKG_PATH = Path(__file__).resolve().parents[2] / "qgis" / "terminal_zones_scratch.gpkg"
 
 # terminal_name in QGIS -> terminal_name in DB
 NAME_MAP = {
