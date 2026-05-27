@@ -1,0 +1,1093 @@
+{
+  "version": "1.0.0",
+  "gitCommitHash": "86406cd0033f6b878f19768f2eec195ff6b0387f",
+  "generatedAt": "2026-05-27T10:39:10.505Z",
+  "files": {
+    "ingestion/aisstream.py": {
+      "filePath": "ingestion/aisstream.py",
+      "contentHash": "dbca1d6e06f68c2bc603eab6d2fa3d586da8208db7d691aa19b93e5d06592e74",
+      "functions": [
+        {
+          "name": "build_subscribe_payload",
+          "params": [
+            "api_key"
+          ],
+          "exported": true,
+          "lineCount": 6
+        },
+        {
+          "name": "_try_heartbeat",
+          "params": [
+            "pool",
+            "status"
+          ],
+          "returnType": "None",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "upsert_heartbeat",
+          "params": [
+            "pool",
+            "status"
+          ],
+          "returnType": "None",
+          "exported": true,
+          "lineCount": 12
+        },
+        {
+          "name": "insert_fix",
+          "params": [
+            "conn",
+            "msg"
+          ],
+          "exported": true,
+          "lineCount": 18
+        },
+        {
+          "name": "upsert_registry",
+          "params": [
+            "conn",
+            "msg"
+          ],
+          "exported": true,
+          "lineCount": 19
+        },
+        {
+          "name": "insert_state",
+          "params": [
+            "conn",
+            "msg"
+          ],
+          "exported": true,
+          "lineCount": 17
+        },
+        {
+          "name": "handle_message",
+          "params": [
+            "raw",
+            "pool",
+            "non_tanker_mmsis",
+            "telemetry"
+          ],
+          "exported": true,
+          "lineCount": 64
+        },
+        {
+          "name": "ingest",
+          "params": [],
+          "exported": true,
+          "lineCount": 73
+        },
+        {
+          "name": "main",
+          "params": [],
+          "exported": true,
+          "lineCount": 2
+        }
+      ],
+      "classes": [],
+      "imports": [
+        {
+          "source": "asyncio",
+          "specifiers": [
+            "asyncio"
+          ]
+        },
+        {
+          "source": "json",
+          "specifiers": [
+            "json"
+          ]
+        },
+        {
+          "source": "logging",
+          "specifiers": [
+            "logging"
+          ]
+        },
+        {
+          "source": "time",
+          "specifiers": [
+            "time"
+          ]
+        },
+        {
+          "source": "asyncpg",
+          "specifiers": [
+            "asyncpg"
+          ]
+        },
+        {
+          "source": "websockets",
+          "specifiers": [
+            "websockets"
+          ]
+        },
+        {
+          "source": "rich.logging",
+          "specifiers": [
+            "RichHandler"
+          ]
+        },
+        {
+          "source": "config",
+          "specifiers": [
+            "AIS_BOUNDING_BOXES",
+            "settings"
+          ]
+        },
+        {
+          "source": ".models",
+          "specifiers": [
+            "AISMessage",
+            "PositionReport",
+            "ShipStaticData"
+          ]
+        }
+      ],
+      "exports": [
+        "build_subscribe_payload",
+        "_try_heartbeat",
+        "upsert_heartbeat",
+        "insert_fix",
+        "upsert_registry",
+        "insert_state",
+        "handle_message",
+        "ingest",
+        "main"
+      ],
+      "totalLines": 268,
+      "hasStructuralAnalysis": true
+    },
+    ".python-version": {
+      "filePath": ".python-version",
+      "contentHash": "02e735b3dfe1c32833eb550b7ff8ffa17f5f2bc3fa1e7bae61a8f5a3883ce398",
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 2,
+      "hasStructuralAnalysis": false
+    },
+    "Makefile": {
+      "filePath": "Makefile",
+      "contentHash": "2aae03fb9f9f8da2a37cc1d6e102292b051326c9d17d2bdac942ae45faa62e02",
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 45,
+      "hasStructuralAnalysis": true
+    },
+    "config.py": {
+      "filePath": "config.py",
+      "contentHash": "f4e50827601fc8a01fab69c03f138976de04cc5e187c23340b815116b56025c3",
+      "functions": [],
+      "classes": [
+        {
+          "name": "Settings",
+          "methods": [
+            "database_url"
+          ],
+          "properties": [
+            "db_password",
+            "db_user",
+            "db_name",
+            "db_host",
+            "db_port",
+            "aisstream_api_key",
+            "vf_api_key"
+          ],
+          "exported": true,
+          "lineCount": 14
+        }
+      ],
+      "imports": [
+        {
+          "source": "pydantic_settings",
+          "specifiers": [
+            "BaseSettings"
+          ]
+        }
+      ],
+      "exports": [
+        "Settings"
+      ],
+      "totalLines": 42,
+      "hasStructuralAnalysis": true
+    },
+    "ingestion/__init__.py": {
+      "filePath": "ingestion/__init__.py",
+      "contentHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 1,
+      "hasStructuralAnalysis": true
+    },
+    "pyproject.toml": {
+      "filePath": "pyproject.toml",
+      "contentHash": "51206881b843e0d8b0e9d042a9d3894f36d5d8673559383dfa4bdad8385832b1",
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 29,
+      "hasStructuralAnalysis": true
+    },
+    "viz/static/index.html": {
+      "filePath": "viz/static/index.html",
+      "contentHash": "45e22057c1907cf7fb6686aaed503117b7b7ea79d8e9240dc21d68753e3428f1",
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 196,
+      "hasStructuralAnalysis": false
+    },
+    ".gitignore": {
+      "filePath": ".gitignore",
+      "contentHash": "ec0a788a576ff9447aafafb02f722999baecf6f3bf0a5415923aaf937f6c7db6",
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 7,
+      "hasStructuralAnalysis": false
+    },
+    "alembic.ini": {
+      "filePath": "alembic.ini",
+      "contentHash": "151be7eac332143525437fe8bd65b366ff9fd4b32893b67df17983abba531cec",
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 150,
+      "hasStructuralAnalysis": false
+    },
+    "README.md": {
+      "filePath": "README.md",
+      "contentHash": "07ac980b602cfb953deaac23c6a7b77eb14e3121b835f2643eac3aace1dda7fe",
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 89,
+      "hasStructuralAnalysis": true
+    },
+    "db/seed/import_terminal_zones.py": {
+      "filePath": "db/seed/import_terminal_zones.py",
+      "contentHash": "fea0e0ac8e31fb7077b8d5d9b486c037d5c6e4ea0425a82fcc8162b27f27b816",
+      "functions": [
+        {
+          "name": "gpkg_to_wkb",
+          "params": [
+            "geom_bytes"
+          ],
+          "returnType": "bytes",
+          "exported": true,
+          "lineCount": 8
+        },
+        {
+          "name": "main",
+          "params": [
+            "dry_run"
+          ],
+          "returnType": "None",
+          "exported": true,
+          "lineCount": 67
+        }
+      ],
+      "classes": [],
+      "imports": [
+        {
+          "source": "sqlite3",
+          "specifiers": [
+            "sqlite3"
+          ]
+        },
+        {
+          "source": "sys",
+          "specifiers": [
+            "sys"
+          ]
+        },
+        {
+          "source": "pathlib",
+          "specifiers": [
+            "Path"
+          ]
+        },
+        {
+          "source": "psycopg2",
+          "specifiers": [
+            "psycopg2"
+          ]
+        },
+        {
+          "source": "psycopg2.extras",
+          "specifiers": [
+            "psycopg2.extras"
+          ]
+        },
+        {
+          "source": "config",
+          "specifiers": [
+            "settings"
+          ]
+        }
+      ],
+      "exports": [
+        "gpkg_to_wkb",
+        "main"
+      ],
+      "totalLines": 105,
+      "hasStructuralAnalysis": true
+    },
+    "viz/app.py": {
+      "filePath": "viz/app.py",
+      "contentHash": "51900d18459172f12c81ccf23e8e7e654160fbe9c89da1261c1e66d33ebc445e",
+      "functions": [
+        {
+          "name": "lifespan",
+          "params": [
+            "app"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "get_pool",
+          "params": [
+            "request"
+          ],
+          "returnType": "asyncpg.Pool",
+          "exported": true,
+          "lineCount": 2
+        },
+        {
+          "name": "index",
+          "params": [],
+          "exported": true,
+          "lineCount": 2
+        },
+        {
+          "name": "vessels",
+          "params": [
+            "pool"
+          ],
+          "exported": true,
+          "lineCount": 14
+        },
+        {
+          "name": "terminal_zones",
+          "params": [
+            "pool"
+          ],
+          "exported": true,
+          "lineCount": 24
+        },
+        {
+          "name": "bounding_boxes",
+          "params": [],
+          "exported": true,
+          "lineCount": 17
+        },
+        {
+          "name": "vessel_history",
+          "params": [
+            "mmsi",
+            "pool"
+          ],
+          "exported": true,
+          "lineCount": 12
+        }
+      ],
+      "classes": [],
+      "imports": [
+        {
+          "source": "json",
+          "specifiers": [
+            "json"
+          ]
+        },
+        {
+          "source": "contextlib",
+          "specifiers": [
+            "asynccontextmanager"
+          ]
+        },
+        {
+          "source": "pathlib",
+          "specifiers": [
+            "Path"
+          ]
+        },
+        {
+          "source": "asyncpg",
+          "specifiers": [
+            "asyncpg"
+          ]
+        },
+        {
+          "source": "fastapi",
+          "specifiers": [
+            "Depends",
+            "FastAPI",
+            "Request"
+          ]
+        },
+        {
+          "source": "fastapi.responses",
+          "specifiers": [
+            "FileResponse"
+          ]
+        },
+        {
+          "source": "config",
+          "specifiers": [
+            "AIS_BOUNDING_BOXES",
+            "settings"
+          ]
+        }
+      ],
+      "exports": [
+        "lifespan",
+        "get_pool",
+        "index",
+        "vessels",
+        "terminal_zones",
+        "bounding_boxes",
+        "vessel_history"
+      ],
+      "totalLines": 110,
+      "hasStructuralAnalysis": true
+    },
+    "CLAUDE.md": {
+      "filePath": "CLAUDE.md",
+      "contentHash": "18a8e8f3d78e83747621920d92f38323b56d539525beaabad7d03381286e9615",
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 61,
+      "hasStructuralAnalysis": true
+    },
+    "db/seed/terminals.sql": {
+      "filePath": "db/seed/terminals.sql",
+      "contentHash": "29827b4342dc3decc85914c50d62b73c5b15118240ac0d42ec5d434b01b9bfea",
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 109,
+      "hasStructuralAnalysis": true
+    },
+    "db/migrations/script.py.mako": {
+      "filePath": "db/migrations/script.py.mako",
+      "contentHash": "d38920781b4d31ae1c0a71bc09f41c2ade8feab9e5a087e3f30cb4bbf0c1c9d3",
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 29,
+      "hasStructuralAnalysis": false
+    },
+    "viz/tui.py": {
+      "filePath": "viz/tui.py",
+      "contentHash": "6cdd161e016bb9e6433cb1b8953988d6402821896244f13a3ecca231101d28d1",
+      "functions": [],
+      "classes": [
+        {
+          "name": "_Settings",
+          "methods": [
+            "database_url"
+          ],
+          "properties": [
+            "db_password",
+            "db_user",
+            "db_name",
+            "db_host",
+            "db_port"
+          ],
+          "exported": true,
+          "lineCount": 12
+        },
+        {
+          "name": "_MinAgoFormatter",
+          "methods": [
+            "__init__",
+            "get_ticks",
+            "get_labels_for_ticks"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 15
+        },
+        {
+          "name": "_HourAgoFormatter",
+          "methods": [
+            "__init__",
+            "get_ticks",
+            "get_labels_for_ticks"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 20
+        },
+        {
+          "name": "_XAxisPlot",
+          "methods": [
+            "_render_plot"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 27
+        },
+        {
+          "name": "TankerFlowApp",
+          "methods": [
+            "__init__",
+            "compose",
+            "on_mount",
+            "on_unmount",
+            "refresh_data"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 239
+        }
+      ],
+      "imports": [
+        {
+          "source": "asyncio",
+          "specifiers": [
+            "asyncio"
+          ]
+        },
+        {
+          "source": "datetime",
+          "specifiers": [
+            "datetime",
+            "timezone"
+          ]
+        },
+        {
+          "source": "asyncpg",
+          "specifiers": [
+            "asyncpg"
+          ]
+        },
+        {
+          "source": "pydantic_settings",
+          "specifiers": [
+            "BaseSettings"
+          ]
+        },
+        {
+          "source": "textual.app",
+          "specifiers": [
+            "App",
+            "ComposeResult"
+          ]
+        },
+        {
+          "source": "textual.binding",
+          "specifiers": [
+            "Binding"
+          ]
+        },
+        {
+          "source": "textual.containers",
+          "specifiers": [
+            "Vertical"
+          ]
+        },
+        {
+          "source": "textual.theme",
+          "specifiers": [
+            "Theme"
+          ]
+        },
+        {
+          "source": "textual.widgets",
+          "specifiers": [
+            "DataTable",
+            "Label",
+            "Static"
+          ]
+        },
+        {
+          "source": "textual_hires_canvas",
+          "specifiers": [
+            "_HiResCanvas"
+          ]
+        },
+        {
+          "source": "textual_plot",
+          "specifiers": [
+            "AxisFormatter",
+            "HiResMode",
+            "NumericAxisFormatter",
+            "PlotWidget"
+          ]
+        }
+      ],
+      "exports": [
+        "_Settings",
+        "_MinAgoFormatter",
+        "_HourAgoFormatter",
+        "_XAxisPlot",
+        "TankerFlowApp"
+      ],
+      "totalLines": 361,
+      "hasStructuralAnalysis": true
+    },
+    "pyrightconfig.json": {
+      "filePath": "pyrightconfig.json",
+      "contentHash": "e9dfd253b3cb9743dda92b825613cef2a9a81d2ade2ccfc3c72ffcde5d794ad4",
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 6,
+      "hasStructuralAnalysis": true
+    },
+    "db/migrations/README": {
+      "filePath": "db/migrations/README",
+      "contentHash": "31595cf53626af9ed16e15c44fa43183209cc163fbc3ebcb904b22ac436a8884",
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 1,
+      "hasStructuralAnalysis": false
+    },
+    "ingestion/vesselfinder.py": {
+      "filePath": "ingestion/vesselfinder.py",
+      "contentHash": "212e228d3c5b911495809bffd3e42df1a5401be7bdc48d10b7841adc0719d640",
+      "functions": [
+        {
+          "name": "fetch_pending",
+          "params": [
+            "pool"
+          ],
+          "returnType": "list[asyncpg.Record]",
+          "exported": true,
+          "lineCount": 10
+        },
+        {
+          "name": "update_registry",
+          "params": [
+            "conn",
+            "mmsi",
+            "data",
+            "status"
+          ],
+          "returnType": "None",
+          "exported": true,
+          "lineCount": 47
+        },
+        {
+          "name": "mark_status",
+          "params": [
+            "conn",
+            "mmsi",
+            "status"
+          ],
+          "returnType": "None",
+          "exported": true,
+          "lineCount": 10
+        },
+        {
+          "name": "_fetch_raw",
+          "params": [
+            "client",
+            "imo"
+          ],
+          "returnType": "httpx.Response",
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "fetch_masterdata",
+          "params": [
+            "client",
+            "imo"
+          ],
+          "returnType": "VesselFinderMasterdata | None",
+          "exported": true,
+          "lineCount": 16
+        },
+        {
+          "name": "enrich_vessel",
+          "params": [
+            "pool",
+            "client",
+            "mmsi",
+            "imo"
+          ],
+          "returnType": "None",
+          "exported": true,
+          "lineCount": 30
+        },
+        {
+          "name": "enrich",
+          "params": [
+            "limit"
+          ],
+          "returnType": "None",
+          "exported": true,
+          "lineCount": 25
+        },
+        {
+          "name": "probe",
+          "params": [
+            "imo"
+          ],
+          "returnType": "None",
+          "exported": true,
+          "lineCount": 22
+        },
+        {
+          "name": "main",
+          "params": [],
+          "exported": true,
+          "lineCount": 23
+        }
+      ],
+      "classes": [],
+      "imports": [
+        {
+          "source": "argparse",
+          "specifiers": [
+            "argparse"
+          ]
+        },
+        {
+          "source": "asyncio",
+          "specifiers": [
+            "asyncio"
+          ]
+        },
+        {
+          "source": "json",
+          "specifiers": [
+            "json"
+          ]
+        },
+        {
+          "source": "logging",
+          "specifiers": [
+            "logging"
+          ]
+        },
+        {
+          "source": "asyncpg",
+          "specifiers": [
+            "asyncpg"
+          ]
+        },
+        {
+          "source": "httpx",
+          "specifiers": [
+            "httpx"
+          ]
+        },
+        {
+          "source": "rich.logging",
+          "specifiers": [
+            "RichHandler"
+          ]
+        },
+        {
+          "source": "config",
+          "specifiers": [
+            "settings"
+          ]
+        },
+        {
+          "source": ".models",
+          "specifiers": [
+            "VesselFinderMasterdata",
+            "VesselFinderResponse"
+          ]
+        }
+      ],
+      "exports": [
+        "fetch_pending",
+        "update_registry",
+        "mark_status",
+        "_fetch_raw",
+        "fetch_masterdata",
+        "enrich_vessel",
+        "enrich",
+        "probe",
+        "main"
+      ],
+      "totalLines": 233,
+      "hasStructuralAnalysis": true
+    },
+    "db/init/schema.sql": {
+      "filePath": "db/init/schema.sql",
+      "contentHash": "d4cd05e39afa4d75e7c70f7fb6f91a6f45ef1e29ad08234458d1fe0afde745b9",
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 148,
+      "hasStructuralAnalysis": true
+    },
+    "ingestion/models.py": {
+      "filePath": "ingestion/models.py",
+      "contentHash": "fc198b08426ee44a00f21b72c484e89a85f1a12e790bfb0b47243215cb2041c5",
+      "functions": [],
+      "classes": [
+        {
+          "name": "MetaData",
+          "methods": [
+            "parse_timestamp"
+          ],
+          "properties": [
+            "MMSI",
+            "ShipName",
+            "time_utc"
+          ],
+          "exported": true,
+          "lineCount": 19
+        },
+        {
+          "name": "PositionReportMessage",
+          "methods": [],
+          "properties": [
+            "NavigationalStatus",
+            "Sog",
+            "Latitude",
+            "Longitude"
+          ],
+          "exported": true,
+          "lineCount": 5
+        },
+        {
+          "name": "ShipStaticDataMessage",
+          "methods": [
+            "null_zero_draught"
+          ],
+          "properties": [
+            "ImoNumber",
+            "CallSign",
+            "Type",
+            "MaximumStaticDraught",
+            "Destination",
+            "Eta"
+          ],
+          "exported": true,
+          "lineCount": 12
+        },
+        {
+          "name": "AISBaseMessage",
+          "methods": [
+            "unwrap_message"
+          ],
+          "properties": [],
+          "exported": true,
+          "lineCount": 8
+        },
+        {
+          "name": "PositionReport",
+          "methods": [],
+          "properties": [
+            "MessageType",
+            "MetaData",
+            "Message"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "ShipStaticData",
+          "methods": [],
+          "properties": [
+            "MessageType",
+            "MetaData",
+            "Message"
+          ],
+          "exported": true,
+          "lineCount": 4
+        },
+        {
+          "name": "AISMessage",
+          "methods": [],
+          "properties": [],
+          "exported": true,
+          "lineCount": 8
+        },
+        {
+          "name": "VesselFinderMasterdata",
+          "methods": [],
+          "properties": [
+            "IMO",
+            "NAME",
+            "FLAG",
+            "TYPE",
+            "BUILT",
+            "BUILDER",
+            "OWNER",
+            "MANAGER",
+            "LENGTH",
+            "BEAM",
+            "MAXDRAUGHT",
+            "GT",
+            "NT",
+            "DWT",
+            "TEU",
+            "CRUDE",
+            "GAS"
+          ],
+          "exported": true,
+          "lineCount": 18
+        },
+        {
+          "name": "VesselFinderResponse",
+          "methods": [],
+          "properties": [
+            "MASTERDATA"
+          ],
+          "exported": true,
+          "lineCount": 2
+        }
+      ],
+      "imports": [
+        {
+          "source": "datetime",
+          "specifiers": [
+            "datetime"
+          ]
+        },
+        {
+          "source": "typing",
+          "specifiers": [
+            "Annotated",
+            "Literal",
+            "Optional",
+            "Union"
+          ]
+        },
+        {
+          "source": "pydantic",
+          "specifiers": [
+            "BaseModel",
+            "Field",
+            "RootModel",
+            "field_validator",
+            "model_validator"
+          ]
+        }
+      ],
+      "exports": [
+        "MetaData",
+        "PositionReportMessage",
+        "ShipStaticDataMessage",
+        "AISBaseMessage",
+        "PositionReport",
+        "ShipStaticData",
+        "AISMessage",
+        "VesselFinderMasterdata",
+        "VesselFinderResponse"
+      ],
+      "totalLines": 105,
+      "hasStructuralAnalysis": true
+    },
+    "docker-compose.yml": {
+      "filePath": "docker-compose.yml",
+      "contentHash": "b82fdf3226e79afc87697516feebcd94334fd07cb4931c73d478306ae622bfa7",
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 26,
+      "hasStructuralAnalysis": true
+    },
+    "db/migrations/env.py": {
+      "filePath": "db/migrations/env.py",
+      "contentHash": "2f9125c26a296eee97c48238ec12cf361ca4b60297862b5f00e2b49e50aa2caf",
+      "functions": [
+        {
+          "name": "run_migrations_offline",
+          "params": [],
+          "returnType": "None",
+          "exported": true,
+          "lineCount": 22
+        },
+        {
+          "name": "run_migrations_online",
+          "params": [],
+          "returnType": "None",
+          "exported": true,
+          "lineCount": 20
+        }
+      ],
+      "classes": [],
+      "imports": [
+        {
+          "source": "logging.config",
+          "specifiers": [
+            "fileConfig"
+          ]
+        },
+        {
+          "source": "sqlalchemy",
+          "specifiers": [
+            "engine_from_config"
+          ]
+        },
+        {
+          "source": "sqlalchemy",
+          "specifiers": [
+            "pool"
+          ]
+        },
+        {
+          "source": "alembic",
+          "specifiers": [
+            "context"
+          ]
+        },
+        {
+          "source": "config",
+          "specifiers": [
+            "settings"
+          ]
+        }
+      ],
+      "exports": [
+        "run_migrations_offline",
+        "run_migrations_online"
+      ],
+      "totalLines": 74,
+      "hasStructuralAnalysis": true
+    },
+    "qgis/README.md": {
+      "filePath": "qgis/README.md",
+      "contentHash": "110103639a980cfdbe4f9120e7c23a4bc163f710b72253abc4e5a2400fe4e7eb",
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 31,
+      "hasStructuralAnalysis": true
+    },
+    "qgis/terminal_names.csv": {
+      "filePath": "qgis/terminal_names.csv",
+      "contentHash": "6e5ff23a0227c548d27d7887dd3b69ca37d2ca458d88359a525d35c721dcad8e",
+      "functions": [],
+      "classes": [],
+      "imports": [],
+      "exports": [],
+      "totalLines": 41,
+      "hasStructuralAnalysis": false
+    }
+  }
+}

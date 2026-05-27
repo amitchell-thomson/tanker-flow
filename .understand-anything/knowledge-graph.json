@@ -1,0 +1,2358 @@
+{
+  "version": "1.0.0",
+  "project": {
+    "name": "tanker-flow",
+    "languages": [
+      "python",
+      "sql",
+      "yaml",
+      "html",
+      "csv"
+    ],
+    "frameworks": [
+      "FastAPI",
+      "Alembic",
+      "TimescaleDB",
+      "PostGIS",
+      "Textual",
+      "asyncpg",
+      "Pydantic",
+      "SQLAlchemy",
+      "websockets"
+    ],
+    "description": "LNG carrier AIS ingestion pipeline deriving Henry Hub/TTF spread signal from live vessel positions and terminal zone classifications",
+    "analyzedAt": "2026-05-27T10:37:46.502883+00:00",
+    "gitCommitHash": "86406cd0033f6b878f19768f2eec195ff6b0387f"
+  },
+  "nodes": [
+    {
+      "id": "file:config.py",
+      "type": "file",
+      "name": "config.py",
+      "filePath": "config.py",
+      "summary": "Defines the pydantic-settings `Settings` class that loads all environment variables (DB credentials, API keys) from a `.env` file and exposes a `database_url` property. Also declares `AIS_BOUNDING_BOXES`, the list of seven geographic bounding boxes used to subscribe to AIS position feeds across US Gulf, US Atlantic, Iberian Atlantic, NW Europe, Baltic, and Mediterranean LNG terminal regions.",
+      "complexity": "simple",
+      "tags": [
+        "configuration",
+        "settings",
+        "environment",
+        "pydantic",
+        "ais",
+        "bounding-boxes"
+      ],
+      "exports": [
+        "Settings",
+        "settings",
+        "AIS_BOUNDING_BOXES"
+      ]
+    },
+    {
+      "id": "class:config.py:Settings",
+      "type": "class",
+      "name": "Settings",
+      "filePath": "config.py",
+      "summary": "Pydantic BaseSettings subclass that reads DB connection parameters and API keys from environment / `.env` file, and provides a `database_url` property assembling the PostgreSQL DSN.",
+      "complexity": "simple",
+      "tags": [
+        "settings",
+        "pydantic",
+        "database",
+        "configuration"
+      ],
+      "exports": [
+        "Settings"
+      ]
+    },
+    {
+      "id": "file:db/migrations/env.py",
+      "type": "file",
+      "name": "env.py",
+      "filePath": "db/migrations/env.py",
+      "summary": "Alembic migration environment script that injects the application's `settings.database_url` into the Alembic config and implements both offline (SQL-only) and online (live connection) migration execution modes.",
+      "complexity": "simple",
+      "tags": [
+        "alembic",
+        "migrations",
+        "database",
+        "sqlalchemy"
+      ],
+      "exports": [
+        "run_migrations_offline",
+        "run_migrations_online"
+      ]
+    },
+    {
+      "id": "function:db/migrations/env.py:run_migrations_offline",
+      "type": "function",
+      "name": "run_migrations_offline",
+      "filePath": "db/migrations/env.py",
+      "summary": "Configures Alembic to run migrations in offline mode using only the database URL, emitting SQL to stdout without requiring a live DB connection.",
+      "complexity": "simple",
+      "tags": [
+        "alembic",
+        "migrations",
+        "offline"
+      ],
+      "exports": []
+    },
+    {
+      "id": "function:db/migrations/env.py:run_migrations_online",
+      "type": "function",
+      "name": "run_migrations_online",
+      "filePath": "db/migrations/env.py",
+      "summary": "Configures Alembic to run migrations in online mode by creating a SQLAlchemy engine with NullPool and executing migrations against a live database connection.",
+      "complexity": "simple",
+      "tags": [
+        "alembic",
+        "migrations",
+        "online",
+        "sqlalchemy"
+      ],
+      "exports": []
+    },
+    {
+      "id": "file:viz/app.py",
+      "type": "file",
+      "name": "app.py",
+      "filePath": "viz/app.py",
+      "summary": "FastAPI web application providing the visualization backend. Manages an asyncpg connection pool via lifespan context, serves a static HTML frontend, and exposes REST endpoints for latest vessel positions, terminal zone GeoJSON, AIS bounding boxes as GeoJSON polygons, and per-vessel position history.",
+      "complexity": "moderate",
+      "tags": [
+        "fastapi",
+        "visualization",
+        "api",
+        "geojson",
+        "asyncpg",
+        "vessels",
+        "terminal-zones"
+      ],
+      "exports": [
+        "app",
+        "lifespan",
+        "get_pool",
+        "index",
+        "vessels",
+        "terminal_zones",
+        "bounding_boxes",
+        "vessel_history"
+      ]
+    },
+    {
+      "id": "function:viz/app.py:lifespan",
+      "type": "function",
+      "name": "lifespan",
+      "filePath": "viz/app.py",
+      "summary": "Async context manager that creates and closes the asyncpg connection pool on FastAPI application startup and shutdown.",
+      "complexity": "simple",
+      "tags": [
+        "fastapi",
+        "asyncpg",
+        "lifespan",
+        "connection-pool"
+      ],
+      "exports": []
+    },
+    {
+      "id": "function:viz/app.py:get_pool",
+      "type": "function",
+      "name": "get_pool",
+      "filePath": "viz/app.py",
+      "summary": "FastAPI dependency that retrieves the asyncpg connection pool from application state for injection into route handlers.",
+      "complexity": "simple",
+      "tags": [
+        "fastapi",
+        "dependency-injection",
+        "asyncpg"
+      ],
+      "exports": []
+    },
+    {
+      "id": "function:viz/app.py:vessels",
+      "type": "function",
+      "name": "vessels",
+      "filePath": "viz/app.py",
+      "summary": "GET /api/vessels endpoint \u2014 returns the most recent AIS fix per MMSI within the last 48 hours, joined with vessel registry name and flag data.",
+      "complexity": "simple",
+      "tags": [
+        "api",
+        "vessels",
+        "ais-fixes",
+        "vessel-registry"
+      ],
+      "exports": []
+    },
+    {
+      "id": "function:viz/app.py:terminal_zones",
+      "type": "function",
+      "name": "terminal_zones",
+      "filePath": "viz/app.py",
+      "summary": "GET /api/terminal-zones endpoint \u2014 returns all terminal zone geometries as a GeoJSON FeatureCollection with terminal name, zone type, sub-zone, and source properties.",
+      "complexity": "simple",
+      "tags": [
+        "api",
+        "terminal-zones",
+        "geojson",
+        "postgis"
+      ],
+      "exports": []
+    },
+    {
+      "id": "function:viz/app.py:bounding_boxes",
+      "type": "function",
+      "name": "bounding_boxes",
+      "filePath": "viz/app.py",
+      "summary": "GET /api/bounding-boxes endpoint \u2014 converts the `AIS_BOUNDING_BOXES` config list into a GeoJSON FeatureCollection of rectangular polygons for map display.",
+      "complexity": "simple",
+      "tags": [
+        "api",
+        "bounding-boxes",
+        "geojson",
+        "ais"
+      ],
+      "exports": []
+    },
+    {
+      "id": "function:viz/app.py:vessel_history",
+      "type": "function",
+      "name": "vessel_history",
+      "filePath": "viz/app.py",
+      "summary": "GET /api/vessel/{mmsi}/history endpoint \u2014 returns the last 400 AIS fixes for a given MMSI, ordered newest-first, for rendering vessel track lines.",
+      "complexity": "simple",
+      "tags": [
+        "api",
+        "vessel-history",
+        "ais-fixes",
+        "track"
+      ],
+      "exports": []
+    },
+    {
+      "id": "file:ingestion/aisstream.py",
+      "type": "file",
+      "name": "aisstream.py",
+      "filePath": "ingestion/aisstream.py",
+      "summary": "Async WebSocket ingestion loop that subscribes to AISstream.io, filters for tanker-type vessels, and persists position fixes, vessel registry entries, and voyage state records into TimescaleDB via asyncpg. Implements reconnect logic with silence watchdog and periodic DB heartbeat.",
+      "complexity": "complex",
+      "tags": [
+        "ingestion",
+        "websocket",
+        "ais",
+        "asyncio",
+        "timescaledb",
+        "tanker"
+      ],
+      "exports": [
+        "main",
+        "ingest",
+        "handle_message",
+        "insert_fix",
+        "upsert_registry",
+        "insert_state",
+        "upsert_heartbeat",
+        "build_subscribe_payload",
+        "TANKER_TYPES"
+      ]
+    },
+    {
+      "id": "function:ingestion/aisstream.py:build_subscribe_payload",
+      "type": "function",
+      "name": "build_subscribe_payload",
+      "filePath": "ingestion/aisstream.py",
+      "summary": "Builds the JSON subscription payload for AISstream WebSocket, specifying bounding boxes and message type filters.",
+      "complexity": "simple",
+      "tags": [
+        "aisstream",
+        "websocket",
+        "subscription"
+      ],
+      "exports": []
+    },
+    {
+      "id": "function:ingestion/aisstream.py:upsert_heartbeat",
+      "type": "function",
+      "name": "upsert_heartbeat",
+      "filePath": "ingestion/aisstream.py",
+      "summary": "Upserts a heartbeat row into ingestion_heartbeat for the 'aisstream' source with the current status and timestamp.",
+      "complexity": "simple",
+      "tags": [
+        "heartbeat",
+        "monitoring",
+        "db"
+      ],
+      "exports": []
+    },
+    {
+      "id": "function:ingestion/aisstream.py:insert_fix",
+      "type": "function",
+      "name": "insert_fix",
+      "filePath": "ingestion/aisstream.py",
+      "summary": "Inserts a single AIS position fix (lat/lon, nav status, SOG) from a PositionReport into the ais_fixes hypertable, ignoring duplicate (fix_ts, mmsi) pairs.",
+      "complexity": "simple",
+      "tags": [
+        "ais_fixes",
+        "db",
+        "insert"
+      ],
+      "exports": []
+    },
+    {
+      "id": "function:ingestion/aisstream.py:upsert_registry",
+      "type": "function",
+      "name": "upsert_registry",
+      "filePath": "ingestion/aisstream.py",
+      "summary": "Upserts static vessel identity fields (MMSI, IMO, name, call sign, vessel type) into vessel_registry from a ShipStaticData message.",
+      "complexity": "simple",
+      "tags": [
+        "vessel_registry",
+        "db",
+        "upsert"
+      ],
+      "exports": []
+    },
+    {
+      "id": "function:ingestion/aisstream.py:insert_state",
+      "type": "function",
+      "name": "insert_state",
+      "filePath": "ingestion/aisstream.py",
+      "summary": "Inserts a voyage-specific state record (draught, destination, ETA) into vessel_state from a ShipStaticData message, ignoring duplicate (state_ts, mmsi) pairs.",
+      "complexity": "simple",
+      "tags": [
+        "vessel_state",
+        "db",
+        "insert"
+      ],
+      "exports": []
+    },
+    {
+      "id": "function:ingestion/aisstream.py:handle_message",
+      "type": "function",
+      "name": "handle_message",
+      "filePath": "ingestion/aisstream.py",
+      "summary": "Parses a raw WebSocket message, dispatches to insert_fix or upsert_registry+insert_state based on message type, and applies tanker-type filtering using a cached non-tanker MMSI set.",
+      "complexity": "moderate",
+      "tags": [
+        "message-handling",
+        "dispatch",
+        "filtering"
+      ],
+      "exports": []
+    },
+    {
+      "id": "function:ingestion/aisstream.py:ingest",
+      "type": "function",
+      "name": "ingest",
+      "filePath": "ingestion/aisstream.py",
+      "summary": "Main async ingestion coroutine: creates DB pool, connects to AISstream WebSocket, runs a silence watchdog and heartbeat loop, and reconnects on errors with exponential backoff.",
+      "complexity": "complex",
+      "tags": [
+        "entrypoint",
+        "asyncio",
+        "reconnect",
+        "websocket"
+      ],
+      "exports": []
+    },
+    {
+      "id": "function:ingestion/aisstream.py:main",
+      "type": "function",
+      "name": "main",
+      "filePath": "ingestion/aisstream.py",
+      "summary": "Synchronous entry point that runs the ingest coroutine via asyncio.run.",
+      "complexity": "simple",
+      "tags": [
+        "entrypoint"
+      ],
+      "exports": []
+    },
+    {
+      "id": "file:ingestion/models.py",
+      "type": "file",
+      "name": "models.py",
+      "filePath": "ingestion/models.py",
+      "summary": "Pydantic models for validating raw AISstream JSON messages and VesselFinder API responses. Handles the non-standard Go timestamp format in MetaData.time_utc and normalises zero draught values to NULL.",
+      "complexity": "moderate",
+      "tags": [
+        "pydantic",
+        "models",
+        "validation",
+        "ais",
+        "vesselfinder"
+      ],
+      "exports": [
+        "MetaData",
+        "PositionReportMessage",
+        "ShipStaticDataMessage",
+        "AISBaseMessage",
+        "PositionReport",
+        "ShipStaticData",
+        "AISMessage",
+        "VesselFinderMasterdata",
+        "VesselFinderResponse"
+      ]
+    },
+    {
+      "id": "class:ingestion/models.py:MetaData",
+      "type": "class",
+      "name": "MetaData",
+      "filePath": "ingestion/models.py",
+      "summary": "Pydantic model for AIS message metadata (MMSI, ShipName, time_utc). Contains a field_validator that parses the non-standard Go timestamp string into a Python datetime.",
+      "complexity": "moderate",
+      "tags": [
+        "pydantic",
+        "timestamp",
+        "mmsi"
+      ],
+      "exports": []
+    },
+    {
+      "id": "class:ingestion/models.py:PositionReportMessage",
+      "type": "class",
+      "name": "PositionReportMessage",
+      "filePath": "ingestion/models.py",
+      "summary": "Pydantic model for the Message payload of a PositionReport: NavigationalStatus, SOG, Latitude, Longitude.",
+      "complexity": "simple",
+      "tags": [
+        "pydantic",
+        "position"
+      ],
+      "exports": []
+    },
+    {
+      "id": "class:ingestion/models.py:ShipStaticDataMessage",
+      "type": "class",
+      "name": "ShipStaticDataMessage",
+      "filePath": "ingestion/models.py",
+      "summary": "Pydantic model for static/voyage fields in ShipStaticData messages. Validates MaximumStaticDraught, treating 0.0 as NULL.",
+      "complexity": "simple",
+      "tags": [
+        "pydantic",
+        "static-data",
+        "draught"
+      ],
+      "exports": []
+    },
+    {
+      "id": "class:ingestion/models.py:AISBaseMessage",
+      "type": "class",
+      "name": "AISBaseMessage",
+      "filePath": "ingestion/models.py",
+      "summary": "Base Pydantic model with a model_validator that unwraps the nested Message dict keyed by MessageType before field assignment.",
+      "complexity": "simple",
+      "tags": [
+        "pydantic",
+        "base",
+        "unwrap"
+      ],
+      "exports": []
+    },
+    {
+      "id": "class:ingestion/models.py:PositionReport",
+      "type": "class",
+      "name": "PositionReport",
+      "filePath": "ingestion/models.py",
+      "summary": "Discriminated-union branch for PositionReport AIS messages, composing MetaData and PositionReportMessage.",
+      "complexity": "simple",
+      "tags": [
+        "pydantic",
+        "position-report"
+      ],
+      "exports": []
+    },
+    {
+      "id": "class:ingestion/models.py:ShipStaticData",
+      "type": "class",
+      "name": "ShipStaticData",
+      "filePath": "ingestion/models.py",
+      "summary": "Discriminated-union branch for ShipStaticData AIS messages, composing MetaData and ShipStaticDataMessage.",
+      "complexity": "simple",
+      "tags": [
+        "pydantic",
+        "ship-static-data"
+      ],
+      "exports": []
+    },
+    {
+      "id": "class:ingestion/models.py:AISMessage",
+      "type": "class",
+      "name": "AISMessage",
+      "filePath": "ingestion/models.py",
+      "summary": "RootModel that acts as the top-level discriminated union (by MessageType) between PositionReport and ShipStaticData.",
+      "complexity": "simple",
+      "tags": [
+        "pydantic",
+        "discriminated-union",
+        "root-model"
+      ],
+      "exports": []
+    },
+    {
+      "id": "class:ingestion/models.py:VesselFinderMasterdata",
+      "type": "class",
+      "name": "VesselFinderMasterdata",
+      "filePath": "ingestion/models.py",
+      "summary": "Pydantic model for VesselFinder masterdata fields: IMO, flag, type, dimensions, tonnages, capacities. GAS field name is unconfirmed.",
+      "complexity": "simple",
+      "tags": [
+        "pydantic",
+        "vesselfinder",
+        "masterdata"
+      ],
+      "exports": []
+    },
+    {
+      "id": "class:ingestion/models.py:VesselFinderResponse",
+      "type": "class",
+      "name": "VesselFinderResponse",
+      "filePath": "ingestion/models.py",
+      "summary": "Pydantic wrapper for a single VesselFinder API response item containing a MASTERDATA nested object.",
+      "complexity": "simple",
+      "tags": [
+        "pydantic",
+        "vesselfinder",
+        "response"
+      ],
+      "exports": []
+    },
+    {
+      "id": "file:ingestion/vesselfinder.py",
+      "type": "file",
+      "name": "vesselfinder.py",
+      "filePath": "ingestion/vesselfinder.py",
+      "summary": "Async VesselFinder masterdata enrichment script that fetches vessel details by IMO number and writes them back to vessel_registry, with per-vessel status tracking (ok/not_found/error) and rate limiting. Supports a --probe mode for debugging individual IMOs.",
+      "complexity": "moderate",
+      "tags": [
+        "enrichment",
+        "vesselfinder",
+        "httpx",
+        "asyncio",
+        "vessel_registry"
+      ],
+      "exports": [
+        "main",
+        "enrich",
+        "enrich_vessel",
+        "fetch_masterdata",
+        "fetch_pending",
+        "update_registry",
+        "mark_status",
+        "probe"
+      ]
+    },
+    {
+      "id": "function:ingestion/vesselfinder.py:fetch_pending",
+      "type": "function",
+      "name": "fetch_pending",
+      "filePath": "ingestion/vesselfinder.py",
+      "summary": "Queries vessel_registry for rows with a non-null IMO and missing or error enrichment status, returning them as a list of asyncpg Records.",
+      "complexity": "simple",
+      "tags": [
+        "db",
+        "query",
+        "vessel_registry"
+      ],
+      "exports": []
+    },
+    {
+      "id": "function:ingestion/vesselfinder.py:update_registry",
+      "type": "function",
+      "name": "update_registry",
+      "filePath": "ingestion/vesselfinder.py",
+      "summary": "Updates all VesselFinder-derived fields on a vessel_registry row by MMSI, including enriched_at timestamp and vf_enrichment_status.",
+      "complexity": "simple",
+      "tags": [
+        "db",
+        "update",
+        "vessel_registry"
+      ],
+      "exports": []
+    },
+    {
+      "id": "function:ingestion/vesselfinder.py:mark_status",
+      "type": "function",
+      "name": "mark_status",
+      "filePath": "ingestion/vesselfinder.py",
+      "summary": "Sets only the vf_enrichment_status and updated_at on a vessel_registry row, used for not_found and error outcomes.",
+      "complexity": "simple",
+      "tags": [
+        "db",
+        "update",
+        "status"
+      ],
+      "exports": []
+    },
+    {
+      "id": "function:ingestion/vesselfinder.py:fetch_masterdata",
+      "type": "function",
+      "name": "fetch_masterdata",
+      "filePath": "ingestion/vesselfinder.py",
+      "summary": "Makes an HTTP GET to the VesselFinder masterdata API for a given IMO, validates the response with VesselFinderResponse, and returns VesselFinderMasterdata or None.",
+      "complexity": "simple",
+      "tags": [
+        "http",
+        "api",
+        "vesselfinder"
+      ],
+      "exports": []
+    },
+    {
+      "id": "function:ingestion/vesselfinder.py:enrich_vessel",
+      "type": "function",
+      "name": "enrich_vessel",
+      "filePath": "ingestion/vesselfinder.py",
+      "summary": "Orchestrates fetching and persisting masterdata for a single vessel: calls fetch_masterdata, then update_registry or mark_status depending on the outcome.",
+      "complexity": "moderate",
+      "tags": [
+        "enrichment",
+        "orchestration"
+      ],
+      "exports": []
+    },
+    {
+      "id": "function:ingestion/vesselfinder.py:enrich",
+      "type": "function",
+      "name": "enrich",
+      "filePath": "ingestion/vesselfinder.py",
+      "summary": "Main async enrichment loop: fetches all pending vessels from DB, optionally limits the batch, and sequentially enriches each with a 1-second rate-limit delay between requests.",
+      "complexity": "moderate",
+      "tags": [
+        "entrypoint",
+        "batch",
+        "rate-limiting"
+      ],
+      "exports": []
+    },
+    {
+      "id": "function:ingestion/vesselfinder.py:probe",
+      "type": "function",
+      "name": "probe",
+      "filePath": "ingestion/vesselfinder.py",
+      "summary": "Debug utility that fetches and pretty-prints the raw VesselFinder API response and parsed model for a single IMO without writing to the DB.",
+      "complexity": "simple",
+      "tags": [
+        "debug",
+        "probe"
+      ],
+      "exports": []
+    },
+    {
+      "id": "function:ingestion/vesselfinder.py:main",
+      "type": "function",
+      "name": "main",
+      "filePath": "ingestion/vesselfinder.py",
+      "summary": "CLI entry point using argparse, dispatching to probe or enrich based on --probe/--limit arguments.",
+      "complexity": "simple",
+      "tags": [
+        "entrypoint",
+        "cli",
+        "argparse"
+      ],
+      "exports": []
+    },
+    {
+      "id": "config:.gitignore",
+      "type": "config",
+      "name": ".gitignore",
+      "filePath": ".gitignore",
+      "summary": "Git ignore rules excluding .env secrets, Python bytecode, virtualenv, and macOS artifacts",
+      "complexity": "simple",
+      "tags": [
+        "git",
+        "config",
+        "security"
+      ]
+    },
+    {
+      "id": "config:.python-version",
+      "type": "config",
+      "name": ".python-version",
+      "filePath": ".python-version",
+      "summary": "Pins Python interpreter to version 3.13 for uv/pyenv tooling",
+      "complexity": "simple",
+      "tags": [
+        "python",
+        "version",
+        "config"
+      ]
+    },
+    {
+      "id": "document:CLAUDE.md",
+      "type": "document",
+      "name": "CLAUDE.md",
+      "filePath": "CLAUDE.md",
+      "summary": "AI assistant project guide covering architecture overview, data flow, database schema, ingestion modules, CLI commands, and planned pipeline components",
+      "complexity": "moderate",
+      "tags": [
+        "documentation",
+        "architecture",
+        "onboarding"
+      ]
+    },
+    {
+      "id": "config:Makefile",
+      "type": "config",
+      "name": "Makefile",
+      "filePath": "Makefile",
+      "summary": "Build automation with targets for Docker lifecycle (up/down/reset), DB access (psql/db-ui), seeding (seed-terminals/seed-zones), ingestion (ingest/enrich), and the FastAPI viz server (viz)",
+      "complexity": "simple",
+      "tags": [
+        "make",
+        "automation",
+        "docker",
+        "database",
+        "devops"
+      ]
+    },
+    {
+      "id": "config:alembic.ini",
+      "type": "config",
+      "name": "alembic.ini",
+      "filePath": "alembic.ini",
+      "summary": "Alembic migration configuration pointing script location to db/migrations, with logging and path settings; database URL left blank for env-driven env.py",
+      "complexity": "simple",
+      "tags": [
+        "alembic",
+        "database",
+        "migrations",
+        "config"
+      ]
+    },
+    {
+      "id": "service:docker-compose.yml",
+      "type": "service",
+      "name": "docker-compose.yml",
+      "filePath": "docker-compose.yml",
+      "summary": "Defines the timescaledb service using timescale/timescaledb-ha:pg16-all, mounts db/init as init scripts, persists data to /srv/data/tanker_db, exposes port 5432 locally, and tunes PostgreSQL memory settings for a high-throughput time-series workload",
+      "complexity": "simple",
+      "tags": [
+        "docker",
+        "timescaledb",
+        "postgresql",
+        "infra",
+        "database"
+      ]
+    },
+    {
+      "id": "config:pyproject.toml",
+      "type": "config",
+      "name": "pyproject.toml",
+      "filePath": "pyproject.toml",
+      "summary": "Python project metadata for tanker-flow; declares runtime dependencies (asyncpg, websockets, pydantic-settings, fastapi, textual, sqlalchemy, alembic, httpx, pandas) and dev dependencies (pytest, ruff); requires Python >=3.13",
+      "complexity": "simple",
+      "tags": [
+        "python",
+        "dependencies",
+        "packaging",
+        "config"
+      ]
+    },
+    {
+      "id": "config:pyrightconfig.json",
+      "type": "config",
+      "name": "pyrightconfig.json",
+      "filePath": "pyrightconfig.json",
+      "summary": "Pyright static type checker configuration pointing at the .venv virtualenv and declaring pythonVersion 3.14",
+      "complexity": "simple",
+      "tags": [
+        "pyright",
+        "type-checking",
+        "config"
+      ]
+    },
+    {
+      "id": "file:viz/tui.py",
+      "type": "file",
+      "name": "tui.py",
+      "filePath": "viz/tui.py",
+      "summary": "Textual TUI monitoring dashboard that polls TimescaleDB every 2 seconds to display ingestion heartbeat status, fixes/min sparkline, fixes/hour long-term chart, and a live table of the 5 most recent AIS fixes with vessel registry enrichment",
+      "complexity": "moderate",
+      "tags": [
+        "monitoring",
+        "tui",
+        "visualization",
+        "textual",
+        "asyncpg",
+        "timescaledb"
+      ]
+    },
+    {
+      "id": "class:viz/tui.py:TankerFlowApp",
+      "type": "class",
+      "name": "TankerFlowApp",
+      "filePath": "viz/tui.py",
+      "summary": "Main Textual App subclass; composes status bar, short-term fixes/min chart, long-term fixes/hour chart, and recent-fixes DataTable; manages asyncpg connection pool and a 2-second polling interval",
+      "complexity": "moderate",
+      "tags": [
+        "textual",
+        "app",
+        "monitoring",
+        "asyncpg"
+      ]
+    },
+    {
+      "id": "function:viz/tui.py:TankerFlowApp.refresh_data",
+      "type": "function",
+      "name": "refresh_data",
+      "filePath": "viz/tui.py",
+      "summary": "Async method that fires 7 concurrent DB queries (total fixes, last-60s count, last-5m count, per-minute buckets, per-hour buckets, recent fix rows, heartbeat) then updates all TUI widgets with the results",
+      "complexity": "moderate",
+      "tags": [
+        "asyncpg",
+        "query",
+        "refresh",
+        "dashboard"
+      ]
+    },
+    {
+      "id": "class:viz/tui.py:_MinAgoFormatter",
+      "type": "class",
+      "name": "_MinAgoFormatter",
+      "filePath": "viz/tui.py",
+      "summary": "AxisFormatter subclass rendering negative-minute x-axis values as 'Xm ago' / 'now' labels for the fixes/min sparkline",
+      "complexity": "simple",
+      "tags": [
+        "chart",
+        "formatter",
+        "textual-plot"
+      ]
+    },
+    {
+      "id": "class:viz/tui.py:_HourAgoFormatter",
+      "type": "class",
+      "name": "_HourAgoFormatter",
+      "filePath": "viz/tui.py",
+      "summary": "AxisFormatter subclass rendering negative-hour x-axis values as 'Xh', 'Xd', or 'now' labels for the fixes/hour long-term chart",
+      "complexity": "simple",
+      "tags": [
+        "chart",
+        "formatter",
+        "textual-plot"
+      ]
+    },
+    {
+      "id": "class:viz/tui.py:_XAxisPlot",
+      "type": "class",
+      "name": "_XAxisPlot",
+      "filePath": "viz/tui.py",
+      "summary": "PlotWidget subclass that overrides _render_plot to erase the top border and left/right border columns, leaving only a bottom x-axis for a cleaner terminal sparkline look",
+      "complexity": "simple",
+      "tags": [
+        "chart",
+        "textual-plot",
+        "rendering"
+      ]
+    },
+    {
+      "id": "class:viz/tui.py:_Settings",
+      "type": "class",
+      "name": "_Settings",
+      "filePath": "viz/tui.py",
+      "summary": "Pydantic BaseSettings subclass loading DB connection credentials from the .env file; exposes a database_url property for asyncpg",
+      "complexity": "simple",
+      "tags": [
+        "pydantic",
+        "settings",
+        "database",
+        "config"
+      ]
+    },
+    {
+      "id": "file:ingestion/__init__.py",
+      "type": "file",
+      "name": "__init__.py",
+      "filePath": "ingestion/__init__.py",
+      "summary": "Empty package init file marking the ingestion directory as a Python package",
+      "complexity": "simple",
+      "tags": [
+        "package",
+        "python"
+      ]
+    },
+    {
+      "id": "schema:db/init/schema.sql",
+      "type": "schema",
+      "label": "schema.sql",
+      "filePath": "db/init/schema.sql",
+      "summary": "TimescaleDB/PostGIS schema definition. Source of truth for the full database schema. Docker init script \u2014 make reset recreates the DB from it. Enables timescaledb and postgis extensions, creates all tables, hypertables, indexes, and continuous aggregates.",
+      "symbols": [],
+      "language": "SQL",
+      "fileCategory": "data",
+      "complexity": "moderate",
+      "name": "schema.sql",
+      "tags": [
+        "database",
+        "schema",
+        "timescaledb",
+        "postgis"
+      ]
+    },
+    {
+      "id": "table:db/init/schema.sql:ais_fixes",
+      "type": "table",
+      "label": "ais_fixes",
+      "filePath": "db/init/schema.sql",
+      "summary": "TimescaleDB hypertable (partitioned by fix_ts, 1-day chunks). Append-only raw AIS position fixes. Columns: server_ts, fix_ts (PK partition key), mmsi (BIGINT), lat, lon, nav_status (SMALLINT), sog (REAL), source (TEXT: 'aisstream'|'vesselfinder'). Unique index on (fix_ts, mmsi).",
+      "symbols": [
+        "ais_fixes"
+      ],
+      "language": "SQL",
+      "fileCategory": "data",
+      "complexity": "moderate",
+      "name": "ais_fixes",
+      "tags": [
+        "database",
+        "table",
+        "timescaledb",
+        "hypertable",
+        "ais"
+      ]
+    },
+    {
+      "id": "table:db/init/schema.sql:vessel_state",
+      "type": "table",
+      "label": "vessel_state",
+      "filePath": "db/init/schema.sql",
+      "summary": "TimescaleDB hypertable (partitioned by state_ts, 1-day chunks). Voyage-specific fields from ShipStaticData messages. Columns: server_ts, state_ts, mmsi, draught (REAL), dest (TEXT), eta (JSONB), source (TEXT). Unique index on (state_ts, mmsi).",
+      "symbols": [
+        "vessel_state"
+      ],
+      "language": "SQL",
+      "fileCategory": "data",
+      "complexity": "moderate",
+      "name": "vessel_state",
+      "tags": [
+        "database",
+        "table",
+        "vessel",
+        "voyage"
+      ]
+    },
+    {
+      "id": "table:db/init/schema.sql:vessel_registry",
+      "type": "table",
+      "label": "vessel_registry",
+      "filePath": "db/init/schema.sql",
+      "summary": "One row per MMSI. Populated passively as vessels are seen; enriched with VesselFinder masterdata. Key columns: mmsi (PK), imo, vessel_name, vessel_type (SMALLINT, 80-89=tanker), vf_vessel_type, gas_capacity_m3, is_lng_carrier (BOOLEAN), is_fsru (BOOLEAN), excluded (BOOLEAN), enriched_at, vf_enrichment_status ('ok'|'not_found'|'error'|'pending'), updated_at.",
+      "symbols": [
+        "vessel_registry"
+      ],
+      "language": "SQL",
+      "fileCategory": "data",
+      "complexity": "moderate",
+      "name": "vessel_registry",
+      "tags": [
+        "database",
+        "table",
+        "vessel",
+        "masterdata"
+      ]
+    },
+    {
+      "id": "table:db/init/schema.sql:terminals",
+      "type": "table",
+      "label": "terminals",
+      "filePath": "db/init/schema.sql",
+      "summary": "LNG terminal reference data. 40 rows: 34 Tier-1 in signal scope, 6 Tier-2 exclusion-only. Columns: terminal_id (SERIAL PK), terminal_name (VARCHAR UNIQUE), country (CHAR(2)), flow_direction ('export'|'import'), in_signal_scope (BOOLEAN), is_fsru (BOOLEAN), notes.",
+      "symbols": [
+        "terminals"
+      ],
+      "language": "SQL",
+      "fileCategory": "data",
+      "complexity": "moderate",
+      "name": "terminals",
+      "tags": [
+        "database",
+        "table",
+        "reference",
+        "lng"
+      ]
+    },
+    {
+      "id": "table:db/init/schema.sql:terminal_zones",
+      "type": "table",
+      "label": "terminal_zones",
+      "filePath": "db/init/schema.sql",
+      "summary": "PostGIS polygons for LNG terminal berth and anchorage zones. Imported from QGIS GeoPackage. Columns: id (SERIAL PK), terminal_id (FK\u2192terminals), zone_type ('berth'|'anchorage'), sub_zone (SMALLINT), is_provisional (BOOLEAN), source (VARCHAR), notes, geom (geometry MultiPolygon SRID 4326). GIST spatial index on geom. Unique on (terminal_id, zone_type, sub_zone).",
+      "symbols": [
+        "terminal_zones"
+      ],
+      "language": "SQL",
+      "fileCategory": "data",
+      "complexity": "moderate",
+      "name": "terminal_zones",
+      "tags": [
+        "database",
+        "table",
+        "postgis",
+        "spatial",
+        "lng"
+      ]
+    },
+    {
+      "id": "table:db/init/schema.sql:port_events",
+      "type": "table",
+      "label": "port_events",
+      "filePath": "db/init/schema.sql",
+      "summary": "Derived port events table, recomputable from ais_fixes. Columns: id (BIGSERIAL PK), mmsi, event_type ('zone_entry'|'anchored'|'moored'|'departed'|'zone_exit'), zone (currently constrained to 'usgulf'|'nweurope' \u2014 needs updating for usatlantic), event_time (TIMESTAMPTZ), laden_flag (BOOLEAN), created_at. Indexed on (mmsi, event_time DESC) and (zone, event_type, event_time DESC).",
+      "symbols": [
+        "port_events"
+      ],
+      "language": "SQL",
+      "fileCategory": "data",
+      "complexity": "moderate",
+      "name": "port_events",
+      "tags": [
+        "database",
+        "table",
+        "derived",
+        "pipeline"
+      ]
+    },
+    {
+      "id": "table:db/init/schema.sql:ingestion_heartbeat",
+      "type": "table",
+      "label": "ingestion_heartbeat",
+      "filePath": "db/init/schema.sql",
+      "summary": "Ingestion health monitoring. One row per ingestion source, upserted every 10s by aisstream.py. Columns: source (TEXT PK), status (TEXT), last_heartbeat (TIMESTAMPTZ). Used by the monitoring TUI and viz app.",
+      "symbols": [
+        "ingestion_heartbeat"
+      ],
+      "language": "SQL",
+      "fileCategory": "data",
+      "complexity": "moderate",
+      "name": "ingestion_heartbeat",
+      "tags": [
+        "database",
+        "table",
+        "monitoring",
+        "health"
+      ]
+    },
+    {
+      "id": "table:db/init/schema.sql:fixes_per_minute",
+      "type": "table",
+      "label": "fixes_per_minute",
+      "filePath": "db/init/schema.sql",
+      "summary": "TimescaleDB continuous aggregate (materialized view) over ais_fixes. Buckets fix count by 1-minute intervals. Columns: bucket (time_bucket), cnt (COUNT). Policy: 2-day start offset, 1-minute end offset, 1-minute schedule. Used by monitoring TUI.",
+      "symbols": [
+        "fixes_per_minute"
+      ],
+      "language": "SQL",
+      "fileCategory": "data",
+      "complexity": "moderate",
+      "name": "fixes_per_minute",
+      "tags": [
+        "database",
+        "view",
+        "aggregate",
+        "monitoring"
+      ]
+    },
+    {
+      "id": "table:db/init/schema.sql:fixes_per_hour",
+      "type": "table",
+      "label": "fixes_per_hour",
+      "filePath": "db/init/schema.sql",
+      "summary": "TimescaleDB continuous aggregate (materialized view) over ais_fixes. Buckets fix count by 1-hour intervals. Columns: bucket (time_bucket), cnt (COUNT). Policy: 365-day start offset, 1-hour end offset, 1-hour schedule. Used by monitoring TUI.",
+      "symbols": [
+        "fixes_per_hour"
+      ],
+      "language": "SQL",
+      "fileCategory": "data",
+      "complexity": "moderate",
+      "name": "fixes_per_hour",
+      "tags": [
+        "database",
+        "view",
+        "aggregate",
+        "monitoring"
+      ]
+    },
+    {
+      "id": "file:db/seed/import_terminal_zones.py",
+      "type": "file",
+      "label": "import_terminal_zones.py",
+      "filePath": "db/seed/import_terminal_zones.py",
+      "summary": "One-shot seed script that imports terminal zone polygons from a QGIS GeoPackage (terminal_zones_scratch.gpkg) into the terminal_zones DB table. Reads geometries via sqlite3, strips the GeoPackage geometry header to extract raw WKB, maps QGIS terminal names to DB names via NAME_MAP, looks up terminal_id from terminals table, and upserts via ST_GeomFromWKB. Supports --dry-run flag. Uses psycopg2 and settings from config.py.",
+      "symbols": [
+        "main",
+        "gpkg_to_wkb"
+      ],
+      "language": "Python",
+      "fileCategory": "script",
+      "complexity": "moderate",
+      "name": "import_terminal_zones.py",
+      "tags": [
+        "seed",
+        "postgis",
+        "qgis",
+        "spatial"
+      ]
+    },
+    {
+      "id": "config:db/seed/terminals.sql",
+      "type": "config",
+      "label": "terminals.sql",
+      "filePath": "db/seed/terminals.sql",
+      "summary": "Seed SQL for the terminals reference table. 40 rows via upsert (ON CONFLICT DO UPDATE). 9 US export Tier-1 terminals (Sabine Pass through Elba Island), 24 EU/European import Tier-1 terminals (NW Europe, Iberia, Italy, Baltic/CEE, Greece), 6 non-US export Tier-2 exclusion-only terminals. Includes verification SELECT query grouped by flow_direction, in_signal_scope, is_fsru.",
+      "symbols": [],
+      "language": "SQL",
+      "fileCategory": "data",
+      "complexity": "moderate",
+      "name": "terminals.sql",
+      "tags": [
+        "seed",
+        "reference",
+        "lng",
+        "data"
+      ]
+    },
+    {
+      "id": "document:qgis/README.md",
+      "type": "document",
+      "label": "QGIS Terminal Zones README",
+      "filePath": "qgis/README.md",
+      "summary": "Documents the QGIS GeoPackage workflow for digitizing terminal zone polygons. Describes the layer schema fields (terminal_name, zone_type, sub_zone, source, notes), the make seed-zones import command (safe to re-run, upserts), and current coverage status: 40 terminals in DB, 29 have zones drawn. Lists 4 in-scope terminals still missing zones (Cameron, Adriatic LNG, Klaipeda FSRU, Ravenna FSRU).",
+      "symbols": [],
+      "language": "Markdown",
+      "fileCategory": "document",
+      "complexity": "moderate",
+      "name": "qgis/README.md",
+      "tags": [
+        "documentation",
+        "qgis",
+        "spatial",
+        "terminal-zones"
+      ]
+    },
+    {
+      "id": "config:qgis/terminal_names.csv",
+      "type": "config",
+      "label": "terminal_names.csv",
+      "filePath": "qgis/terminal_names.csv",
+      "summary": "CSV lookup of terminal names (value, description columns) used in QGIS. Lists all 39 terminal names matching the terminals.sql seed data, used as a picklist in the QGIS digitizing workflow. Note: Mukran (Deutsche Ostsee) is absent \u2014 covered by NAME_MAP in import_terminal_zones.py.",
+      "symbols": [],
+      "language": "CSV",
+      "fileCategory": "data",
+      "complexity": "moderate",
+      "name": "terminal_names.csv",
+      "tags": [
+        "reference",
+        "data",
+        "csv",
+        "terminals"
+      ]
+    },
+    {
+      "id": "document:db/migrations/README",
+      "type": "document",
+      "label": "Alembic Migrations README",
+      "filePath": "db/migrations/README",
+      "summary": "Alembic generic single-database configuration note. Minimal placeholder document for the db/migrations directory.",
+      "symbols": [],
+      "language": "text",
+      "fileCategory": "document",
+      "complexity": "moderate",
+      "name": "migrations/README",
+      "tags": [
+        "documentation",
+        "migrations",
+        "alembic"
+      ]
+    },
+    {
+      "id": "config:db/migrations/script.py.mako",
+      "type": "config",
+      "label": "script.py.mako",
+      "filePath": "db/migrations/script.py.mako",
+      "summary": "Alembic Mako template for generating new migration scripts. Emits revision metadata (revision ID, down_revision, branch_labels, depends_on) and stub upgrade()/downgrade() functions. Used by alembic revision --autogenerate.",
+      "symbols": [],
+      "language": "Mako",
+      "fileCategory": "config",
+      "complexity": "moderate",
+      "name": "script.py.mako",
+      "tags": [
+        "migrations",
+        "alembic",
+        "template"
+      ]
+    },
+    {
+      "id": "document:README.md",
+      "type": "document",
+      "label": "Project README",
+      "filePath": "README.md",
+      "summary": "Main project README. Describes tanker-flow as an LNG carrier AIS ingestion pipeline that derives a leading Henry Hub/TTF spread signal via laden ton-miles in transit. Covers architecture data flow diagram, tech stack (TimescaleDB, PostGIS, asyncpg, VesselFinder, QGIS, FastAPI, Textual TUI, uv), full database schema overview, ingestion description, make commands, and what is not yet implemented (pipeline, data/eia.py, analysis, US Atlantic AIS box, vessel enrichment).",
+      "symbols": [],
+      "language": "Markdown",
+      "fileCategory": "document",
+      "complexity": "moderate",
+      "name": "README.md",
+      "tags": [
+        "documentation",
+        "overview",
+        "architecture"
+      ]
+    },
+    {
+      "id": "file:viz/static/index.html",
+      "type": "file",
+      "label": "index.html",
+      "filePath": "viz/static/index.html",
+      "summary": "Single-page Leaflet.js map frontend for the monitoring viz app. Renders vessel positions (orange circle markers), terminal zone polygons (berth=orange fill, anchorage=blue dashed), and AIS bounding boxes on an OpenStreetMap tile layer. Features: vessel track history on click (polyline + markers), layer toggle buttons, status bar. Fetches data from FastAPI endpoints: GET /api/vessels, GET /api/vessel/{mmsi}/history, GET /api/terminal-zones, GET /api/bounding-boxes.",
+      "symbols": [],
+      "language": "HTML",
+      "fileCategory": "frontend",
+      "complexity": "moderate",
+      "name": "index.html",
+      "tags": [
+        "frontend",
+        "html",
+        "leaflet",
+        "visualization"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "source": "file:config.py",
+      "target": "class:config.py:Settings",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:db/migrations/env.py",
+      "target": "function:db/migrations/env.py:run_migrations_offline",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:db/migrations/env.py",
+      "target": "function:db/migrations/env.py:run_migrations_online",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:viz/app.py",
+      "target": "function:viz/app.py:lifespan",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:viz/app.py",
+      "target": "function:viz/app.py:get_pool",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:viz/app.py",
+      "target": "function:viz/app.py:vessels",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:viz/app.py",
+      "target": "function:viz/app.py:terminal_zones",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:viz/app.py",
+      "target": "function:viz/app.py:bounding_boxes",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:viz/app.py",
+      "target": "function:viz/app.py:vessel_history",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:db/migrations/env.py",
+      "target": "file:config.py",
+      "type": "imports",
+      "weight": 0.7,
+      "direction": "forward"
+    },
+    {
+      "source": "file:viz/app.py",
+      "target": "file:config.py",
+      "type": "imports",
+      "weight": 0.7,
+      "direction": "forward"
+    },
+    {
+      "source": "file:db/migrations/env.py",
+      "target": "class:config.py:Settings",
+      "type": "depends_on",
+      "weight": 0.6,
+      "direction": "forward"
+    },
+    {
+      "source": "file:viz/app.py",
+      "target": "class:config.py:Settings",
+      "type": "depends_on",
+      "weight": 0.6,
+      "direction": "forward"
+    },
+    {
+      "source": "function:viz/app.py:bounding_boxes",
+      "target": "file:config.py",
+      "type": "reads_from",
+      "weight": 0.8,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/aisstream.py",
+      "target": "file:config.py",
+      "type": "imports",
+      "weight": 0.7,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/aisstream.py",
+      "target": "file:ingestion/models.py",
+      "type": "imports",
+      "weight": 0.7,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/models.py",
+      "target": "file:ingestion/aisstream.py",
+      "type": "related",
+      "weight": 0.6,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/vesselfinder.py",
+      "target": "file:config.py",
+      "type": "imports",
+      "weight": 0.7,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/vesselfinder.py",
+      "target": "file:ingestion/models.py",
+      "type": "imports",
+      "weight": 0.7,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/aisstream.py",
+      "target": "function:ingestion/aisstream.py:build_subscribe_payload",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/aisstream.py",
+      "target": "function:ingestion/aisstream.py:upsert_heartbeat",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/aisstream.py",
+      "target": "function:ingestion/aisstream.py:insert_fix",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/aisstream.py",
+      "target": "function:ingestion/aisstream.py:upsert_registry",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/aisstream.py",
+      "target": "function:ingestion/aisstream.py:insert_state",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/aisstream.py",
+      "target": "function:ingestion/aisstream.py:handle_message",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/aisstream.py",
+      "target": "function:ingestion/aisstream.py:ingest",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/aisstream.py",
+      "target": "function:ingestion/aisstream.py:main",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/models.py",
+      "target": "class:ingestion/models.py:MetaData",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/models.py",
+      "target": "class:ingestion/models.py:PositionReportMessage",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/models.py",
+      "target": "class:ingestion/models.py:ShipStaticDataMessage",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/models.py",
+      "target": "class:ingestion/models.py:AISBaseMessage",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/models.py",
+      "target": "class:ingestion/models.py:PositionReport",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/models.py",
+      "target": "class:ingestion/models.py:ShipStaticData",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/models.py",
+      "target": "class:ingestion/models.py:AISMessage",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/models.py",
+      "target": "class:ingestion/models.py:VesselFinderMasterdata",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/models.py",
+      "target": "class:ingestion/models.py:VesselFinderResponse",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "class:ingestion/models.py:PositionReport",
+      "target": "class:ingestion/models.py:AISBaseMessage",
+      "type": "inherits",
+      "weight": 0.9,
+      "direction": "forward"
+    },
+    {
+      "source": "class:ingestion/models.py:ShipStaticData",
+      "target": "class:ingestion/models.py:AISBaseMessage",
+      "type": "inherits",
+      "weight": 0.9,
+      "direction": "forward"
+    },
+    {
+      "source": "class:ingestion/models.py:PositionReport",
+      "target": "class:ingestion/models.py:MetaData",
+      "type": "depends_on",
+      "weight": 0.6,
+      "direction": "forward"
+    },
+    {
+      "source": "class:ingestion/models.py:PositionReport",
+      "target": "class:ingestion/models.py:PositionReportMessage",
+      "type": "depends_on",
+      "weight": 0.6,
+      "direction": "forward"
+    },
+    {
+      "source": "class:ingestion/models.py:ShipStaticData",
+      "target": "class:ingestion/models.py:MetaData",
+      "type": "depends_on",
+      "weight": 0.6,
+      "direction": "forward"
+    },
+    {
+      "source": "class:ingestion/models.py:ShipStaticData",
+      "target": "class:ingestion/models.py:ShipStaticDataMessage",
+      "type": "depends_on",
+      "weight": 0.6,
+      "direction": "forward"
+    },
+    {
+      "source": "class:ingestion/models.py:AISMessage",
+      "target": "class:ingestion/models.py:PositionReport",
+      "type": "depends_on",
+      "weight": 0.6,
+      "direction": "forward"
+    },
+    {
+      "source": "class:ingestion/models.py:AISMessage",
+      "target": "class:ingestion/models.py:ShipStaticData",
+      "type": "depends_on",
+      "weight": 0.6,
+      "direction": "forward"
+    },
+    {
+      "source": "class:ingestion/models.py:VesselFinderResponse",
+      "target": "class:ingestion/models.py:VesselFinderMasterdata",
+      "type": "depends_on",
+      "weight": 0.6,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/vesselfinder.py",
+      "target": "function:ingestion/vesselfinder.py:fetch_pending",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/vesselfinder.py",
+      "target": "function:ingestion/vesselfinder.py:update_registry",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/vesselfinder.py",
+      "target": "function:ingestion/vesselfinder.py:mark_status",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/vesselfinder.py",
+      "target": "function:ingestion/vesselfinder.py:fetch_masterdata",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/vesselfinder.py",
+      "target": "function:ingestion/vesselfinder.py:enrich_vessel",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/vesselfinder.py",
+      "target": "function:ingestion/vesselfinder.py:enrich",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/vesselfinder.py",
+      "target": "function:ingestion/vesselfinder.py:probe",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/vesselfinder.py",
+      "target": "function:ingestion/vesselfinder.py:main",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "function:ingestion/aisstream.py:handle_message",
+      "target": "function:ingestion/aisstream.py:insert_fix",
+      "type": "calls",
+      "weight": 0.8,
+      "direction": "forward"
+    },
+    {
+      "source": "function:ingestion/aisstream.py:handle_message",
+      "target": "function:ingestion/aisstream.py:upsert_registry",
+      "type": "calls",
+      "weight": 0.8,
+      "direction": "forward"
+    },
+    {
+      "source": "function:ingestion/aisstream.py:handle_message",
+      "target": "function:ingestion/aisstream.py:insert_state",
+      "type": "calls",
+      "weight": 0.8,
+      "direction": "forward"
+    },
+    {
+      "source": "function:ingestion/aisstream.py:ingest",
+      "target": "function:ingestion/aisstream.py:handle_message",
+      "type": "calls",
+      "weight": 0.8,
+      "direction": "forward"
+    },
+    {
+      "source": "function:ingestion/aisstream.py:ingest",
+      "target": "function:ingestion/aisstream.py:upsert_heartbeat",
+      "type": "calls",
+      "weight": 0.8,
+      "direction": "forward"
+    },
+    {
+      "source": "function:ingestion/aisstream.py:ingest",
+      "target": "function:ingestion/aisstream.py:build_subscribe_payload",
+      "type": "calls",
+      "weight": 0.8,
+      "direction": "forward"
+    },
+    {
+      "source": "function:ingestion/aisstream.py:main",
+      "target": "function:ingestion/aisstream.py:ingest",
+      "type": "calls",
+      "weight": 0.8,
+      "direction": "forward"
+    },
+    {
+      "source": "function:ingestion/vesselfinder.py:enrich",
+      "target": "function:ingestion/vesselfinder.py:fetch_pending",
+      "type": "calls",
+      "weight": 0.8,
+      "direction": "forward"
+    },
+    {
+      "source": "function:ingestion/vesselfinder.py:enrich",
+      "target": "function:ingestion/vesselfinder.py:enrich_vessel",
+      "type": "calls",
+      "weight": 0.8,
+      "direction": "forward"
+    },
+    {
+      "source": "function:ingestion/vesselfinder.py:enrich_vessel",
+      "target": "function:ingestion/vesselfinder.py:fetch_masterdata",
+      "type": "calls",
+      "weight": 0.8,
+      "direction": "forward"
+    },
+    {
+      "source": "function:ingestion/vesselfinder.py:enrich_vessel",
+      "target": "function:ingestion/vesselfinder.py:update_registry",
+      "type": "calls",
+      "weight": 0.8,
+      "direction": "forward"
+    },
+    {
+      "source": "function:ingestion/vesselfinder.py:enrich_vessel",
+      "target": "function:ingestion/vesselfinder.py:mark_status",
+      "type": "calls",
+      "weight": 0.8,
+      "direction": "forward"
+    },
+    {
+      "source": "function:ingestion/vesselfinder.py:main",
+      "target": "function:ingestion/vesselfinder.py:enrich",
+      "type": "calls",
+      "weight": 0.8,
+      "direction": "forward"
+    },
+    {
+      "source": "function:ingestion/vesselfinder.py:main",
+      "target": "function:ingestion/vesselfinder.py:probe",
+      "type": "calls",
+      "weight": 0.8,
+      "direction": "forward"
+    },
+    {
+      "source": "file:viz/tui.py",
+      "target": "class:viz/tui.py:TankerFlowApp",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:viz/tui.py",
+      "target": "function:viz/tui.py:TankerFlowApp.refresh_data",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:viz/tui.py",
+      "target": "class:viz/tui.py:_MinAgoFormatter",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:viz/tui.py",
+      "target": "class:viz/tui.py:_HourAgoFormatter",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:viz/tui.py",
+      "target": "class:viz/tui.py:_XAxisPlot",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "file:viz/tui.py",
+      "target": "class:viz/tui.py:_Settings",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "class:viz/tui.py:TankerFlowApp",
+      "target": "function:viz/tui.py:TankerFlowApp.refresh_data",
+      "type": "contains",
+      "weight": 1.0,
+      "direction": "forward"
+    },
+    {
+      "source": "config:pyproject.toml",
+      "target": "file:ingestion/aisstream.py",
+      "type": "configures",
+      "weight": 0.6,
+      "direction": "forward"
+    },
+    {
+      "source": "config:pyproject.toml",
+      "target": "file:viz/tui.py",
+      "type": "configures",
+      "weight": 0.6,
+      "direction": "forward"
+    },
+    {
+      "source": "config:pyproject.toml",
+      "target": "file:config.py",
+      "type": "configures",
+      "weight": 0.6,
+      "direction": "forward"
+    },
+    {
+      "source": "config:alembic.ini",
+      "target": "file:db/migrations/env.py",
+      "type": "configures",
+      "weight": 0.6,
+      "direction": "forward"
+    },
+    {
+      "source": "config:Makefile",
+      "target": "file:ingestion/aisstream.py",
+      "type": "triggers",
+      "weight": 0.6,
+      "direction": "forward"
+    },
+    {
+      "source": "config:Makefile",
+      "target": "file:ingestion/vesselfinder.py",
+      "type": "triggers",
+      "weight": 0.6,
+      "direction": "forward"
+    },
+    {
+      "source": "config:Makefile",
+      "target": "file:viz/tui.py",
+      "type": "triggers",
+      "weight": 0.6,
+      "direction": "forward"
+    },
+    {
+      "source": "config:Makefile",
+      "target": "file:viz/app.py",
+      "type": "triggers",
+      "weight": 0.6,
+      "direction": "forward"
+    },
+    {
+      "source": "config:Makefile",
+      "target": "file:db/seed/import_terminal_zones.py",
+      "type": "triggers",
+      "weight": 0.6,
+      "direction": "forward"
+    },
+    {
+      "source": "config:Makefile",
+      "target": "service:docker-compose.yml",
+      "type": "configures",
+      "weight": 0.6,
+      "direction": "forward"
+    },
+    {
+      "source": "document:CLAUDE.md",
+      "target": "file:ingestion/aisstream.py",
+      "type": "documents",
+      "weight": 0.5,
+      "direction": "forward"
+    },
+    {
+      "source": "document:CLAUDE.md",
+      "target": "file:ingestion/models.py",
+      "type": "documents",
+      "weight": 0.5,
+      "direction": "forward"
+    },
+    {
+      "source": "document:CLAUDE.md",
+      "target": "file:config.py",
+      "type": "documents",
+      "weight": 0.5,
+      "direction": "forward"
+    },
+    {
+      "source": "config:.gitignore",
+      "target": "file:config.py",
+      "type": "related",
+      "weight": 0.3,
+      "direction": "forward"
+    },
+    {
+      "source": "config:.python-version",
+      "target": "config:pyproject.toml",
+      "type": "related",
+      "weight": 0.4,
+      "direction": "forward"
+    },
+    {
+      "source": "config:pyrightconfig.json",
+      "target": "config:pyproject.toml",
+      "type": "related",
+      "weight": 0.4,
+      "direction": "forward"
+    },
+    {
+      "source": "file:viz/tui.py",
+      "target": "file:ingestion/aisstream.py",
+      "type": "related",
+      "weight": 0.5,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/__init__.py",
+      "target": "file:ingestion/aisstream.py",
+      "type": "related",
+      "weight": 0.4,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/__init__.py",
+      "target": "file:ingestion/models.py",
+      "type": "related",
+      "weight": 0.4,
+      "direction": "forward"
+    },
+    {
+      "source": "schema:db/init/schema.sql",
+      "target": "table:db/init/schema.sql:ais_fixes",
+      "type": "defines_schema",
+      "weight": 0.8,
+      "direction": "forward"
+    },
+    {
+      "source": "schema:db/init/schema.sql",
+      "target": "table:db/init/schema.sql:vessel_state",
+      "type": "defines_schema",
+      "weight": 0.8,
+      "direction": "forward"
+    },
+    {
+      "source": "schema:db/init/schema.sql",
+      "target": "table:db/init/schema.sql:vessel_registry",
+      "type": "defines_schema",
+      "weight": 0.8,
+      "direction": "forward"
+    },
+    {
+      "source": "schema:db/init/schema.sql",
+      "target": "table:db/init/schema.sql:terminals",
+      "type": "defines_schema",
+      "weight": 0.8,
+      "direction": "forward"
+    },
+    {
+      "source": "schema:db/init/schema.sql",
+      "target": "table:db/init/schema.sql:terminal_zones",
+      "type": "defines_schema",
+      "weight": 0.8,
+      "direction": "forward"
+    },
+    {
+      "source": "schema:db/init/schema.sql",
+      "target": "table:db/init/schema.sql:port_events",
+      "type": "defines_schema",
+      "weight": 0.8,
+      "direction": "forward"
+    },
+    {
+      "source": "schema:db/init/schema.sql",
+      "target": "table:db/init/schema.sql:ingestion_heartbeat",
+      "type": "defines_schema",
+      "weight": 0.8,
+      "direction": "forward"
+    },
+    {
+      "source": "schema:db/init/schema.sql",
+      "target": "table:db/init/schema.sql:fixes_per_minute",
+      "type": "defines_schema",
+      "weight": 0.8,
+      "direction": "forward"
+    },
+    {
+      "source": "schema:db/init/schema.sql",
+      "target": "table:db/init/schema.sql:fixes_per_hour",
+      "type": "defines_schema",
+      "weight": 0.8,
+      "direction": "forward"
+    },
+    {
+      "source": "table:db/init/schema.sql:fixes_per_minute",
+      "target": "table:db/init/schema.sql:ais_fixes",
+      "type": "aggregates",
+      "weight": 0.7,
+      "direction": "forward"
+    },
+    {
+      "source": "table:db/init/schema.sql:fixes_per_hour",
+      "target": "table:db/init/schema.sql:ais_fixes",
+      "type": "aggregates",
+      "weight": 0.7,
+      "direction": "forward"
+    },
+    {
+      "source": "table:db/init/schema.sql:terminal_zones",
+      "target": "table:db/init/schema.sql:terminals",
+      "type": "references",
+      "weight": 0.8,
+      "direction": "forward"
+    },
+    {
+      "source": "table:db/init/schema.sql:port_events",
+      "target": "table:db/init/schema.sql:terminal_zones",
+      "type": "references",
+      "weight": 0.6,
+      "direction": "forward"
+    },
+    {
+      "source": "file:db/seed/import_terminal_zones.py",
+      "target": "table:db/init/schema.sql:terminal_zones",
+      "type": "writes_to",
+      "weight": 0.7,
+      "direction": "forward"
+    },
+    {
+      "source": "file:db/seed/import_terminal_zones.py",
+      "target": "table:db/init/schema.sql:terminals",
+      "type": "reads_from",
+      "weight": 0.6,
+      "direction": "forward"
+    },
+    {
+      "source": "file:db/seed/import_terminal_zones.py",
+      "target": "file:config.py",
+      "type": "imports",
+      "weight": 0.7,
+      "direction": "forward"
+    },
+    {
+      "source": "config:db/seed/terminals.sql",
+      "target": "table:db/init/schema.sql:terminals",
+      "type": "writes_to",
+      "weight": 0.7,
+      "direction": "forward"
+    },
+    {
+      "source": "config:qgis/terminal_names.csv",
+      "target": "table:db/init/schema.sql:terminals",
+      "type": "references",
+      "weight": 0.5,
+      "direction": "forward"
+    },
+    {
+      "source": "config:qgis/terminal_names.csv",
+      "target": "file:db/seed/import_terminal_zones.py",
+      "type": "references",
+      "weight": 0.4,
+      "direction": "forward"
+    },
+    {
+      "source": "document:qgis/README.md",
+      "target": "table:db/init/schema.sql:terminal_zones",
+      "type": "documents",
+      "weight": 0.5,
+      "direction": "forward"
+    },
+    {
+      "source": "document:qgis/README.md",
+      "target": "file:db/seed/import_terminal_zones.py",
+      "type": "documents",
+      "weight": 0.5,
+      "direction": "forward"
+    },
+    {
+      "source": "document:README.md",
+      "target": "schema:db/init/schema.sql",
+      "type": "documents",
+      "weight": 0.5,
+      "direction": "forward"
+    },
+    {
+      "source": "document:README.md",
+      "target": "table:db/init/schema.sql:ais_fixes",
+      "type": "documents",
+      "weight": 0.5,
+      "direction": "forward"
+    },
+    {
+      "source": "document:README.md",
+      "target": "table:db/init/schema.sql:vessel_registry",
+      "type": "documents",
+      "weight": 0.5,
+      "direction": "forward"
+    },
+    {
+      "source": "document:README.md",
+      "target": "table:db/init/schema.sql:terminals",
+      "type": "documents",
+      "weight": 0.5,
+      "direction": "forward"
+    },
+    {
+      "source": "document:README.md",
+      "target": "table:db/init/schema.sql:terminal_zones",
+      "type": "documents",
+      "weight": 0.5,
+      "direction": "forward"
+    },
+    {
+      "source": "document:README.md",
+      "target": "table:db/init/schema.sql:port_events",
+      "type": "documents",
+      "weight": 0.5,
+      "direction": "forward"
+    },
+    {
+      "source": "file:ingestion/aisstream.py",
+      "target": "table:db/init/schema.sql:ais_fixes",
+      "type": "writes_to",
+      "weight": 0.7
+    },
+    {
+      "source": "file:ingestion/aisstream.py",
+      "target": "table:db/init/schema.sql:vessel_registry",
+      "type": "writes_to",
+      "weight": 0.7
+    },
+    {
+      "source": "file:ingestion/aisstream.py",
+      "target": "table:db/init/schema.sql:vessel_state",
+      "type": "writes_to",
+      "weight": 0.7
+    },
+    {
+      "source": "file:ingestion/aisstream.py",
+      "target": "table:db/init/schema.sql:ingestion_heartbeat",
+      "type": "writes_to",
+      "weight": 0.7
+    },
+    {
+      "source": "file:ingestion/vesselfinder.py",
+      "target": "table:db/init/schema.sql:vessel_registry",
+      "type": "reads_from",
+      "weight": 0.7
+    },
+    {
+      "source": "file:ingestion/vesselfinder.py",
+      "target": "table:db/init/schema.sql:vessel_registry",
+      "type": "writes_to",
+      "weight": 0.7
+    },
+    {
+      "source": "service:docker-compose.yml",
+      "target": "schema:db/init/schema.sql",
+      "type": "configures",
+      "weight": 0.6
+    },
+    {
+      "source": "document:CLAUDE.md",
+      "target": "schema:db/init/schema.sql",
+      "type": "documents",
+      "weight": 0.5
+    },
+    {
+      "source": "file:viz/tui.py",
+      "target": "schema:db/init/schema.sql",
+      "type": "related",
+      "weight": 0.5
+    },
+    {
+      "source": "document:README.md",
+      "target": "file:ingestion/aisstream.py",
+      "type": "documents",
+      "weight": 0.5
+    },
+    {
+      "source": "document:README.md",
+      "target": "file:ingestion/vesselfinder.py",
+      "type": "documents",
+      "weight": 0.5
+    },
+    {
+      "source": "file:viz/static/index.html",
+      "target": "file:viz/app.py",
+      "type": "related",
+      "weight": 0.6
+    },
+    {
+      "source": "file:viz/tui.py",
+      "target": "table:db/init/schema.sql:ais_fixes",
+      "type": "reads_from",
+      "weight": 0.7
+    },
+    {
+      "source": "file:viz/tui.py",
+      "target": "table:db/init/schema.sql:ingestion_heartbeat",
+      "type": "reads_from",
+      "weight": 0.7
+    },
+    {
+      "source": "file:viz/tui.py",
+      "target": "table:db/init/schema.sql:fixes_per_minute",
+      "type": "reads_from",
+      "weight": 0.7
+    },
+    {
+      "source": "file:viz/app.py",
+      "target": "table:db/init/schema.sql:ais_fixes",
+      "type": "reads_from",
+      "weight": 0.7
+    },
+    {
+      "source": "file:viz/app.py",
+      "target": "table:db/init/schema.sql:terminal_zones",
+      "type": "reads_from",
+      "weight": 0.7
+    },
+    {
+      "source": "file:viz/app.py",
+      "target": "table:db/init/schema.sql:vessel_registry",
+      "type": "reads_from",
+      "weight": 0.7
+    },
+    {
+      "source": "document:db/migrations/README",
+      "target": "file:db/migrations/env.py",
+      "type": "documents",
+      "weight": 0.5,
+      "direction": "forward"
+    },
+    {
+      "source": "config:db/migrations/script.py.mako",
+      "target": "file:db/migrations/env.py",
+      "type": "configures",
+      "weight": 0.6,
+      "direction": "forward"
+    },
+    {
+      "source": "config:alembic.ini",
+      "target": "config:db/migrations/script.py.mako",
+      "type": "configures",
+      "weight": 0.6,
+      "direction": "forward"
+    },
+    {
+      "source": "file:viz/tui.py",
+      "target": "table:db/init/schema.sql:fixes_per_hour",
+      "type": "reads_from",
+      "weight": 0.7,
+      "direction": "forward"
+    },
+    {
+      "source": "file:db/migrations/env.py",
+      "target": "config:alembic.ini",
+      "type": "depends_on",
+      "weight": 0.6,
+      "direction": "forward"
+    },
+    {
+      "source": "config:Makefile",
+      "target": "config:db/seed/terminals.sql",
+      "type": "triggers",
+      "weight": 0.6,
+      "direction": "forward"
+    },
+    {
+      "source": "config:pyproject.toml",
+      "target": "file:viz/app.py",
+      "type": "configures",
+      "weight": 0.6,
+      "direction": "forward"
+    }
+  ],
+  "layers": [
+    {
+      "id": "layer:configuration-and-infrastructure",
+      "name": "Configuration & Infrastructure",
+      "description": "Project configuration, Docker services, Makefile automation, and development tooling",
+      "nodeIds": [
+        "config:.gitignore",
+        "config:.python-version",
+        "config:Makefile",
+        "config:alembic.ini",
+        "service:docker-compose.yml",
+        "config:pyproject.toml",
+        "config:pyrightconfig.json",
+        "file:config.py"
+      ]
+    },
+    {
+      "id": "layer:data-ingestion",
+      "name": "Data Ingestion",
+      "description": "AIS WebSocket ingestion, VesselFinder API enrichment, and Pydantic data models for validating raw vessel position data",
+      "nodeIds": [
+        "file:ingestion/aisstream.py",
+        "file:ingestion/models.py",
+        "file:ingestion/vesselfinder.py",
+        "file:ingestion/__init__.py"
+      ]
+    },
+    {
+      "id": "layer:database-and-schema",
+      "name": "Database & Schema",
+      "description": "TimescaleDB schema definition, hypertables, continuous aggregates, Alembic migrations, and seed data for terminals and zones",
+      "nodeIds": [
+        "schema:db/init/schema.sql",
+        "table:db/init/schema.sql:ais_fixes",
+        "table:db/init/schema.sql:vessel_state",
+        "table:db/init/schema.sql:vessel_registry",
+        "table:db/init/schema.sql:terminals",
+        "table:db/init/schema.sql:terminal_zones",
+        "table:db/init/schema.sql:port_events",
+        "table:db/init/schema.sql:ingestion_heartbeat",
+        "table:db/init/schema.sql:fixes_per_minute",
+        "table:db/init/schema.sql:fixes_per_hour",
+        "file:db/migrations/env.py",
+        "config:db/migrations/script.py.mako",
+        "document:db/migrations/README",
+        "file:db/seed/import_terminal_zones.py",
+        "config:db/seed/terminals.sql"
+      ]
+    },
+    {
+      "id": "layer:monitoring-and-visualization",
+      "name": "Monitoring & Visualization",
+      "description": "FastAPI web API, Textual TUI dashboard, and web frontend for real-time monitoring of ingestion health and vessel activity",
+      "nodeIds": [
+        "file:viz/app.py",
+        "file:viz/tui.py",
+        "file:viz/static/index.html"
+      ]
+    },
+    {
+      "id": "layer:reference-data-and-documentation",
+      "name": "Reference Data & Documentation",
+      "description": "QGIS terminal zone reference data, CSV terminal names, and project documentation",
+      "nodeIds": [
+        "document:CLAUDE.md",
+        "document:README.md",
+        "document:qgis/README.md",
+        "config:qgis/terminal_names.csv"
+      ]
+    }
+  ],
+  "tour": [
+    {
+      "order": 1,
+      "title": "Project Purpose & Architecture",
+      "description": "Start here to understand what tanker-flow is building: a leading indicator for the Henry Hub/TTF natural gas spread derived from live LNG carrier positions. The README walks through the full data flow from AIS ingestion to laden ton-miles aggregation, and the QGIS README documents which terminal zones have been digitised so far.",
+      "nodeIds": [
+        "document:README.md",
+        "document:qgis/README.md"
+      ]
+    },
+    {
+      "order": 2,
+      "title": "Infrastructure & Configuration",
+      "description": "Before any data flows, these files define how the project is wired together. config.py loads credentials and the three AIS bounding boxes (US Gulf, NW Europe, US Atlantic) from environment variables via pydantic-settings. docker-compose.yml and the Makefile handle the TimescaleDB/PostGIS container lifecycle and provide the daily-driver commands for running ingestion and the viz layer.",
+      "nodeIds": [
+        "file:config.py",
+        "service:docker-compose.yml",
+        "config:Makefile"
+      ]
+    },
+    {
+      "order": 3,
+      "title": "Database Schema: The Source of Truth",
+      "description": "schema.sql is the authoritative definition of every table in the system \u2014 it doubles as the Docker init script, so a fresh 'make reset' recreates the whole schema from it. Pay close attention to ais_fixes (the append-only hypertable that stores every raw position fix), vessel_registry (one row per MMSI, enriched with LNG-carrier and FSRU flags), terminals (40 reference terminals), and terminal_zones (PostGIS polygons that will drive zone classification). The Alembic env.py wires future schema changes into this foundation.",
+      "nodeIds": [
+        "schema:db/init/schema.sql",
+        "table:db/init/schema.sql:ais_fixes",
+        "table:db/init/schema.sql:vessel_registry",
+        "table:db/init/schema.sql:terminals",
+        "table:db/init/schema.sql:terminal_zones",
+        "table:db/init/schema.sql:port_events",
+        "file:db/migrations/env.py"
+      ]
+    },
+    {
+      "order": 4,
+      "title": "AIS Ingestion: The Real-Time Heartbeat",
+      "description": "aisstream.py is the core of the system \u2014 an async WebSocket loop that subscribes to AISstream, filters for tanker types 80-89, and upserts raw fixes into ais_fixes, vessel_state, vessel_registry, and ingestion_heartbeat every few seconds. models.py sits alongside it providing the Pydantic validation layer, including the Go-timestamp parsing quirk that trips up naive ISO parsers. Reading these two files together shows exactly what data arrives and how it is validated before hitting the database.",
+      "nodeIds": [
+        "file:ingestion/aisstream.py",
+        "file:ingestion/models.py"
+      ]
+    },
+    {
+      "order": 5,
+      "title": "Vessel Masterdata Enrichment",
+      "description": "VesselFinder enrichment runs as a separate batch job rather than inline with the WebSocket loop. vesselfinder.py queries vessel_registry for rows where enriched_at IS NULL, calls the VesselFinder masterdata API, and writes back 15+ fields including the is_lng_carrier and is_fsru flags that later pipeline steps will use to filter the fix stream to genuine LNG carriers.",
+      "nodeIds": [
+        "file:ingestion/vesselfinder.py",
+        "table:db/init/schema.sql:vessel_registry"
+      ]
+    },
+    {
+      "order": 6,
+      "title": "Terminal Zone Reference Data",
+      "description": "import_terminal_zones.py seeds the PostGIS terminal_zones table from a QGIS GeoPackage, translating hand-drawn berth and anchorage polygons into the database rows that will power zone entry/exit detection in the (planned) port_events pipeline. This is the bridge between the spatial analysis done in QGIS and the live ingestion system.",
+      "nodeIds": [
+        "file:db/seed/import_terminal_zones.py",
+        "table:db/init/schema.sql:terminal_zones",
+        "table:db/init/schema.sql:terminals"
+      ]
+    },
+    {
+      "order": 7,
+      "title": "Monitoring & Visualization",
+      "description": "Two interfaces let you observe the live system. tui.py is a Textual terminal dashboard that fires 7 concurrent asyncpg queries every 2 seconds to show ingestion rates and vessel activity without leaving the terminal. app.py is a FastAPI backend that serves vessel positions, terminal zone polygons, and AIS bounding boxes as GeoJSON, consumed by index.html \u2014 a Leaflet single-page map that gives a geographic view of what the ingestion pipeline is seeing in real time.",
+      "nodeIds": [
+        "file:viz/tui.py",
+        "file:viz/app.py",
+        "file:viz/static/index.html"
+      ]
+    }
+  ]
+}
