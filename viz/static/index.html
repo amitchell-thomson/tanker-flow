@@ -22,6 +22,25 @@
       font-size: 14px;
     }
     #reset-btn:hover { background: #34495e; }
+    #layer-controls {
+      position: absolute;
+      top: 10px;
+      left: 50px;
+      z-index: 1000;
+      display: flex;
+      gap: 8px;
+    }
+    .layer-btn {
+      padding: 6px 12px;
+      background: #2c3e50;
+      color: #ecf0f1;
+      border: 1px solid #7f8c8d;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .layer-btn.active { border-color: #3498db; color: #3498db; }
+    .layer-btn:hover { background: #34495e; }
     #status {
       position: absolute;
       bottom: 10px;
@@ -40,6 +59,11 @@
 <body>
   <div id="map"></div>
   <button id="reset-btn" onclick="resetView()">Show all vessels</button>
+  <div id="layer-controls">
+    <button class="layer-btn active" id="btn-zones"     onclick="toggleLayer('zones')">Terminal zones</button>
+    <button class="layer-btn active" id="btn-boxes"     onclick="toggleLayer('boxes')">AIS boxes</button>
+    <button class="layer-btn active" id="btn-vessels"   onclick="toggleLayer('vessels')">Vessels</button>
+  </div>
   <div id="status">Loading...</div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
@@ -49,9 +73,25 @@
       maxZoom: 18,
     }).addTo(map);
 
-    const vesselLayer = L.layerGroup().addTo(map);
+    const vesselLayer  = L.layerGroup().addTo(map);
+    const zonesLayer   = L.layerGroup().addTo(map);
+    const boxesLayer   = L.layerGroup().addTo(map);
     let trackLayer = null;
     const markers = {};
+
+    const layers = { vessels: vesselLayer, zones: zonesLayer, boxes: boxesLayer };
+
+    function toggleLayer(name) {
+      const btn = document.getElementById('btn-' + name);
+      const layer = layers[name];
+      if (map.hasLayer(layer)) {
+        map.removeLayer(layer);
+        btn.classList.remove('active');
+      } else {
+        map.addLayer(layer);
+        btn.classList.add('active');
+      }
+    }
 
     function setStatus(msg) {
       document.getElementById('status').textContent = msg;
@@ -126,7 +166,30 @@
       setStatus(`${Object.keys(markers).length} vessels — click a vessel to inspect`);
     }
 
+    async function loadTerminalZones() {
+      const geojson = await fetch('/api/terminal-zones').then(r => r.json());
+      L.geoJSON(geojson, {
+        style: f => f.properties.zone_type === 'berth'
+          ? { color: '#e67e22', fillColor: '#e67e22', fillOpacity: 0.25, weight: 1.5 }
+          : { color: '#3498db', fillColor: '#3498db', fillOpacity: 0.12, weight: 1, dashArray: '4 3' },
+        onEachFeature: (f, layer) => {
+          const p = f.properties;
+          const label = p.sub_zone > 0 ? ` (${p.zone_type} ${p.sub_zone})` : ` (${p.zone_type})`;
+          layer.bindTooltip(p.terminal_name + label, { sticky: true });
+        },
+      }).addTo(zonesLayer);
+    }
+
+    async function loadBoundingBoxes() {
+      const geojson = await fetch('/api/bounding-boxes').then(r => r.json());
+      L.geoJSON(geojson, {
+        style: { color: '#95a5a6', fillOpacity: 0, weight: 1, dashArray: '6 4' },
+      }).addTo(boxesLayer);
+    }
+
     loadVessels();
+    loadTerminalZones();
+    loadBoundingBoxes();
   </script>
 </body>
 </html>

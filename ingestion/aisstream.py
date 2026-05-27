@@ -8,7 +8,7 @@ import asyncpg
 import websockets
 from rich.logging import RichHandler
 
-from config import settings
+from config import AIS_BOUNDING_BOXES, settings
 
 from .models import AISMessage, PositionReport, ShipStaticData
 
@@ -22,10 +22,6 @@ logger = logging.getLogger(__name__)
 
 SILENCE_THRESHOLD_SECONDS = 45
 
-BOUNDING_BOXES = [
-    [[25.0, -98.0], [31.0, -88.0]],
-    [[51.0, -5.0], [58.0, 9.0]],
-]
 
 TANKER_TYPES = set(range(80, 90))
 
@@ -33,7 +29,7 @@ TANKER_TYPES = set(range(80, 90))
 def build_subscribe_payload(api_key: str):
     return {
         "APIKey": api_key,
-        "BoundingBoxes": BOUNDING_BOXES,
+        "BoundingBoxes": AIS_BOUNDING_BOXES,
         "FilterMessageTypes": ["PositionReport", "ShipStaticData"],
     }
 
