@@ -63,6 +63,7 @@
     <button class="layer-btn active" id="btn-zones"     onclick="toggleLayer('zones')">Terminal zones</button>
     <button class="layer-btn active" id="btn-boxes"     onclick="toggleLayer('boxes')">AIS boxes</button>
     <button class="layer-btn active" id="btn-vessels"   onclick="toggleLayer('vessels')">Vessels</button>
+    <button class="layer-btn active" id="btn-unknown"   onclick="toggleLayer('unknown')">Unknown vessels</button>
   </div>
   <div id="status">Loading...</div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -74,12 +75,13 @@
     }).addTo(map);
 
     const vesselLayer  = L.layerGroup().addTo(map);
+    const unknownLayer = L.layerGroup().addTo(map);
     const zonesLayer   = L.layerGroup().addTo(map);
     const boxesLayer   = L.layerGroup().addTo(map);
     let trackLayer = null;
     const markers = {};
 
-    const layers = { vessels: vesselLayer, zones: zonesLayer, boxes: boxesLayer };
+    const layers = { vessels: vesselLayer, unknown: unknownLayer, zones: zonesLayer, boxes: boxesLayer };
 
     function toggleLayer(name) {
       const btn = document.getElementById('btn-' + name);
@@ -105,22 +107,41 @@
       setStatus('Fetching vessels...');
       const vessels = await fetch('/api/vessels').then(r => r.json());
       vessels.forEach(v => {
-        const marker = L.circleMarker([v.lat, v.lon], {
-          radius: 6,
-          color: '#e67e22',
-          fillColor: '#e67e22',
-          fillOpacity: 0.85,
-          weight: 1.5,
-        });
+        const isUnknown = !v.vessel_name;
+        const color = v.is_fsru ? '#e74c3c'
+                    : v.is_lng_carrier ? '#ff5fa2'
+                    : isUnknown ? '#7f8c8d'
+                    : '#e67e22';
+        let marker;
+        if (v.is_fsru) {
+          const icon = L.divIcon({
+            className: 'fsru-icon',
+            html: `<div style="width:12px;height:12px;background:${color};border:1.5px solid ${color};opacity:0.85;"></div>`,
+            iconSize: [12, 12],
+            iconAnchor: [6, 6],
+          });
+          marker = L.marker([v.lat, v.lon], { icon });
+        } else {
+          marker = L.circleMarker([v.lat, v.lon], {
+            radius: 6,
+            color: color,
+            fillColor: color,
+            fillOpacity: 0.85,
+            weight: 1.5,
+            bubblingMouseEvents: false,
+          });
+        }
         const name = v.vessel_name || 'Unknown';
         const sog = v.sog != null ? v.sog.toFixed(1) + ' kn' : '?';
         marker.bindPopup(
           `<b>${name}</b><br>MMSI: ${v.mmsi}` +
+          (v.imo ? `<br>IMO: ${v.imo}` : '') +
+          (v.vf_vessel_type ? `<br>Type: ${v.vf_vessel_type}` : '') +
           (v.flag ? `<br>Flag: ${v.flag}` : '') +
           `<br>SOG: ${sog}<br>${formatTime(v.fix_ts)}`
         );
         marker.on('click', () => selectVessel(v.mmsi, name));
-        marker.addTo(vesselLayer);
+        marker.addTo(isUnknown ? unknownLayer : vesselLayer);
         markers[v.mmsi] = marker;
       });
       setStatus(`${vessels.length} vessels — click a vessel to inspect`);
@@ -131,7 +152,11 @@
 
       Object.entries(markers).forEach(([m, mk]) => {
         const active = String(m) === String(mmsi);
-        mk.setStyle({ opacity: active ? 1 : 0.12, fillOpacity: active ? 0.85 : 0.12 });
+        if (mk.setStyle) {
+          mk.setStyle({ opacity: active ? 1 : 0.12, fillOpacity: active ? 0.85 : 0.12 });
+        } else {
+          mk.setOpacity(active ? 1 : 0.12);
+        }
       });
 
       if (trackLayer) { map.removeLayer(trackLayer); trackLayer = null; }
@@ -141,7 +166,7 @@
 
       const coords = history.map(h => [h.lat, h.lon]);
       trackLayer = L.layerGroup();
-      L.polyline(coords, { color: '#3498db', weight: 2, opacity: 0.8 }).addTo(trackLayer);
+      L.polyline(coords, { color: '#3498db', weight: 2, opacity: 0.8, bubblingMouseEvents: false }).addTo(trackLayer);
       history.forEach((h, i) => {
         const isNewest = i === 0;
         L.circleMarker([h.lat, h.lon], {
@@ -150,6 +175,7 @@
           fillColor: isNewest ? '#2ecc71' : '#3498db',
           fillOpacity: 0.7,
           weight: 1,
+          bubblingMouseEvents: false,
         }).addTo(trackLayer);
       });
       trackLayer.addTo(map);
@@ -159,8 +185,15 @@
       setStatus(`${name} — last ${history.length} fixes`);
     }
 
+    map.on('click', () => {
+      if (trackLayer) resetView();
+    });
+
     function resetView() {
-      Object.values(markers).forEach(mk => mk.setStyle({ opacity: 1, fillOpacity: 0.85 }));
+      Object.values(markers).forEach(mk => {
+        if (mk.setStyle) mk.setStyle({ opacity: 1, fillOpacity: 0.85 });
+        else mk.setOpacity(1);
+      });
       if (trackLayer) { map.removeLayer(trackLayer); trackLayer = null; }
       document.getElementById('reset-btn').style.display = 'none';
       setStatus(`${Object.keys(markers).length} vessels — click a vessel to inspect`);

@@ -36,7 +36,7 @@ async def vessels(pool: asyncpg.Pool = Depends(get_pool)):
         """
         SELECT DISTINCT ON (f.mmsi)
             f.mmsi, f.lat, f.lon, f.fix_ts, f.sog, f.nav_status,
-            v.vessel_name, v.flag
+            v.vessel_name, v.flag, v.imo, v.is_lng_carrier, v.is_fsru, v.vf_vessel_type
         FROM ais_fixes f
         LEFT JOIN vessel_registry v USING (mmsi)
         WHERE f.lat IS NOT NULL AND f.lon IS NOT NULL
