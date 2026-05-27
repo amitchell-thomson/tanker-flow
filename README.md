@@ -47,9 +47,11 @@ EIA API             ──► data/eia.py ────────────�
 
 ## Ingestion
 
-`ingestion/aisstream.py` subscribes to two AISstream WebSocket bounding boxes (US Gulf, NW Europe) and writes `PositionReport` and `ShipStaticData` messages for vessel types 80–89 (tankers). Maintains a connection pool with 30s/60s reconnect backoff.
+`ingestion/aisstream.py` subscribes to seven AISstream WebSocket bounding boxes (US Gulf, US Atlantic, Iberian Atlantic, NW Europe, Baltic, W Mediterranean, E Mediterranean) and writes `PositionReport` and `ShipStaticData` messages for vessel types 80–89 (tankers). Maintains a connection pool with 30s/60s reconnect backoff.
 
-`ingestion/vesselfinder.py` enriches `vessel_registry` with masterdata from the VesselFinder API — vessel type, DWT, gas capacity, owner/manager. Runs as a one-shot batch, rate-limited to one request per second.
+`ingestion/dynamic_enrichment.py` watches incoming fixes during ingestion and queues an MMSI for VesselFinder lookup the first time it appears inside a `terminal_zones` polygon — enrichment is zone-gated, not lazy, so pending rows outside terminals are noise rather than backlog.
+
+`ingestion/vesselfinder.py` enriches `vessel_registry` with masterdata from the VesselFinder API — vessel type, DWT, gas capacity, owner/manager, `is_lng_carrier`, `is_fsru`. Runs as a one-shot batch (default `--terminal-only`), rate-limited to one request per second. Vessels with `imo = 0` are sub-IMO and marked `vf_enrichment_status = 'no_imo'` without an API call.
 
 ---
 
@@ -84,5 +86,3 @@ make viz             # Start FastAPI monitoring web app (localhost:8000)
 | `pipeline/signal.py` | Aggregates `port_events` into laden ton-miles in transit by zone pair |
 | `data/eia.py` | Pulls US natural gas storage data from the EIA API (Henry Hub fundamentals) |
 | `analysis/` | Spread prediction model and exploratory notebooks |
-| US Atlantic AIS box | Third bounding box for Cove Point / Elba Island (`usatlantic` zone) not yet wired into `aisstream.py` |
-| Vessel enrichment | `vessel_registry` populated (4,441 vessels) but VesselFinder enrichment not yet run — no `is_lng_carrier` flags set |
