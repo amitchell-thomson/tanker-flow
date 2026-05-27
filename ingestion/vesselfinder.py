@@ -27,7 +27,7 @@ async def fetch_pending(pool: asyncpg.Pool) -> list[asyncpg.Record]:
         return await conn.fetch(
             """
             SELECT mmsi, imo FROM vessel_registry
-            WHERE imo IS NOT NULL
+            WHERE imo IS NOT NULL AND imo != 0
             AND (vf_enrichment_status IS NULL OR vf_enrichment_status = 'error')
             ORDER BY mmsi
             """
@@ -43,25 +43,27 @@ async def update_registry(
     await conn.execute(
         """
         UPDATE vessel_registry SET
-            vf_vessel_type    = $1,
-            year_built        = $2,
-            builder           = $3,
-            owner             = $4,
-            manager           = $5,
-            length_m          = $6,
-            beam_m            = $7,
-            gross_tonnage     = $8,
-            net_tonnage       = $9,
-            dwt               = $10,
-            design_draught    = $11,
-            teu               = $12,
-            crude_capacity    = $13,
-            gas_capacity_m3   = $14,
+            flag              = $1,
+            vf_vessel_type    = $2,
+            year_built        = $3,
+            builder           = $4,
+            owner             = $5,
+            manager           = $6,
+            length_m          = $7,
+            beam_m            = $8,
+            gross_tonnage     = $9,
+            net_tonnage       = $10,
+            dwt               = $11,
+            design_draught    = $12,
+            teu               = $13,
+            crude_capacity    = $14,
+            gas_capacity_m3   = $15,
             enriched_at       = now(),
-            vf_enrichment_status = $15,
+            vf_enrichment_status = $16,
             updated_at        = now()
-        WHERE mmsi = $16
+        WHERE mmsi = $17
         """,
+        data.FLAG,
         data.TYPE,
         data.BUILT,
         data.BUILDER,
@@ -150,7 +152,7 @@ async def enrich_vessel(
     logger.info(f"MMSI={mmsi} IMO={imo}: enriched ({data.NAME}, {data.TYPE})")
 
 
-async def enrich() -> None:
+async def enrich(limit: int | None = None) -> None:
     pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=3)
     logger.info("DB pool created")
 
@@ -160,6 +162,10 @@ async def enrich() -> None:
     if not pending:
         await pool.close()
         return
+
+    if limit is not None:
+        pending = pending[:limit]
+        logger.info(f"Limiting to {limit} vessels")
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         for i, row in enumerate(pending, 1):
@@ -205,13 +211,19 @@ def main():
         metavar="IMO",
         help="Fetch a single IMO and print the response without writing to the DB",
     )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        metavar="N",
+        help="Enrich at most N vessels (useful for testing)",
+    )
     args = parser.parse_args()
 
     try:
         if args.probe:
             asyncio.run(probe(args.probe))
         else:
-            asyncio.run(enrich())
+            asyncio.run(enrich(limit=args.limit))
     except KeyboardInterrupt:
         logger.info("Stopped.")
 
