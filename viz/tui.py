@@ -5,9 +5,10 @@ from datetime import datetime, timezone
 
 import asyncpg
 from pydantic_settings import BaseSettings
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.theme import Theme
 from textual.widgets import DataTable, Label, Static
 from textual_hires_canvas import Canvas as _HiResCanvas
@@ -45,6 +46,39 @@ class _Settings(BaseSettings):
 
 
 settings = _Settings()  # type: ignore
+
+
+# Zone classification — must match config.AIS_BOUNDING_BOXES and terminals.zone values.
+# Order matters only if boxes overlap; current boxes don't.
+_ZONES: list[tuple[str, float, float, float, float]] = [
+    # (zone_name, lat_min, lat_max, lon_min, lon_max)
+    ("usgulf", 27.0, 30.5, -98.0, -88.5),
+    ("usatlantic", 31.5, 39.0, -82.0, -75.5),
+    ("iberian", 36.5, 44.0, -10.0, -2.5),
+    ("nweurope", 50.5, 54.5, -6.0, 10.0),
+    ("baltic", 53.5, 55.0, 13.0, 15.0),
+    ("wmed", 36.0, 46.0, -2.0, 15.0),
+    ("emed", 37.0, 41.5, 22.5, 26.5),
+]
+
+_ZONE_COLORS: dict[str, str] = {
+    "usgulf": "bright_magenta",
+    "usatlantic": "bright_red",
+    "iberian": "bright_yellow",
+    "nweurope": "bright_green",
+    "baltic": "bright_cyan",
+    "wmed": "bright_blue",
+    "emed": "white",
+}
+
+_ZONE_CASE_SQL = (
+    "CASE\n"
+    + "\n".join(
+        f"  WHEN lat BETWEEN {lat_min} AND {lat_max} AND lon BETWEEN {lon_min} AND {lon_max} THEN '{name}'"
+        for name, lat_min, lat_max, lon_min, lon_max in _ZONES
+    )
+    + "\nEND"
+)
 
 
 class _MinAgoFormatter(AxisFormatter):
@@ -115,6 +149,33 @@ class _XAxisPlot(PlotWidget):
             canvas.set_pixel(r.width + 1, y, char=" ", style="")
 
 
+class _MiniPlot(PlotWidget):
+    """PlotWidget stripped of all axes — just the canvas, for grid tiles."""
+
+    def on_mount(self) -> None:
+        self.margin_top = 0
+        self.margin_bottom = 0
+        self.margin_left = 0
+        super().on_mount()
+
+    def _render_plot(self) -> None:
+        super()._render_plot()
+        try:
+            canvas = self.query_one("#plot", _HiResCanvas)
+        except Exception:
+            return
+        if not canvas._canvas_size:
+            return
+        r = self._scale_rectangle
+        # Erase the rectangle box and tick marks the parent draws on the canvas.
+        for x in range(r.width + 2):
+            canvas.set_pixel(x, 0, char=" ", style="")
+            canvas.set_pixel(x, r.height + 1, char=" ", style="")
+        for y in range(r.height + 2):
+            canvas.set_pixel(0, y, char=" ", style="")
+            canvas.set_pixel(r.width + 1, y, char=" ", style="")
+
+
 class TankerFlowApp(App):
     BINDINGS = [Binding("q", "quit", "Quit")]
 
@@ -126,24 +187,57 @@ class TankerFlowApp(App):
     #status > Static {
         padding: 0 1;
     }
-    #sparkline-container {
+    #charts-row {
         height: 1fr;
+    }
+    #sparkline-container {
+        width: 1fr;
         border: round #888888;
     }
-    #sparkline-label {
-        height: 1;
+    #zone-grid-top {
+        height: 2fr;
+    }
+    .zone-grid-row {
+        height: 1fr;
+    }
+    .zone-tile {
+        width: 1fr;
+        height: 1fr;
         border: none;
-        color: ansi_bright_magenta;
+    }
+    #tile-nweurope {
+        width: 1fr;
+        height: 1fr;
+        border: none;
+    }
+    .zone-tile-label {
+        height: 2;
+        border: none;
         padding: 0 1;
     }
-    #longterm-container {
+    _MiniPlot {
         height: 1fr;
+        border: none;
+        padding: 0;
+    }
+    #longterm-container {
+        width: 1fr;
         border: round #888888;
     }
     #longterm-label {
-        height: 1;
+        height: 2;
         border: none;
         color: ansi_bright_cyan;
+        padding: 0 1;
+    }
+    #vessels-container {
+        width: 1fr;
+        border: round #888888;
+    }
+    #vessels-label {
+        height: 2;
+        border: none;
+        color: ansi_bright_yellow;
         padding: 0 1;
     }
     _XAxisPlot {
@@ -151,9 +245,36 @@ class TankerFlowApp(App):
         border: none;
         padding-right: 1;
     }
-    #fixes-table {
-        height: 10;
+    #tables-row {
+        height: 1.05fr;
+    }
+    #terminal-container {
+        width: 1fr;
         border: round #888888;
+    }
+    #terminal-label {
+        height: 1;
+        border: none;
+        color: ansi_bright_green;
+        padding: 0 1;
+    }
+    #terminal-table {
+        height: 1fr;
+        border: none;
+    }
+    #enrich-container {
+        width: 1fr;
+        border: round #888888;
+    }
+    #enrich-label {
+        height: 1;
+        border: none;
+        color: ansi_bright_yellow;
+        padding: 0 1;
+    }
+    #enrich-table {
+        height: 1fr;
+        border: none;
     }
     """
 
@@ -161,30 +282,59 @@ class TankerFlowApp(App):
         super().__init__()
         self._pool: asyncpg.Pool | None = None
 
+    def _zone_tile(self, zone: str) -> ComposeResult:
+        tile_id = f"tile-{zone}"
+        with Vertical(id=tile_id, classes="zone-tile"):
+            yield Label("", id=f"label-{zone}", classes="zone-tile-label")
+            yield _MiniPlot(id=f"chart-{zone}", allow_pan_and_zoom=False)
+
     def compose(self) -> ComposeResult:
         yield Static("Connecting to database...", id="status", markup=True)
-        with Vertical(id="sparkline-container"):
-            yield Label("Fixes/min — peak: 0, mean: 0", id="sparkline-label")
-            yield _XAxisPlot(id="chart", allow_pan_and_zoom=False)
-        with Vertical(id="longterm-container"):
-            yield Label("Fixes/hour — peak: 0, mean: 0", id="longterm-label")
-            yield _XAxisPlot(id="longterm-chart", allow_pan_and_zoom=False)
-        yield DataTable(id="fixes-table")
+        with Horizontal(id="charts-row"):
+            with Vertical(id="sparkline-container"):
+                with Vertical(id="zone-grid-top"):
+                    with Horizontal(classes="zone-grid-row"):
+                        for z in ("usgulf", "usatlantic", "iberian"):
+                            yield from self._zone_tile(z)
+                    with Horizontal(classes="zone-grid-row"):
+                        for z in ("baltic", "wmed", "emed"):
+                            yield from self._zone_tile(z)
+                yield from self._zone_tile("nweurope")
+            with Vertical(id="longterm-container"):
+                yield Label("Fixes/hour — peak: 0, mean: 0", id="longterm-label")
+                yield _XAxisPlot(id="longterm-chart", allow_pan_and_zoom=False)
+            with Vertical(id="vessels-container"):
+                yield Label("Ingest lag (server − fix) — …", id="vessels-label")
+                yield _XAxisPlot(id="vessels-chart", allow_pan_and_zoom=False)
+        with Horizontal(id="tables-row"):
+            with Vertical(id="terminal-container"):
+                yield Label("Terminal activity (last 1h)", id="terminal-label")
+                yield DataTable(id="terminal-table")
+            with Vertical(id="enrich-container"):
+                yield Label("Dynamic enrichment — pending: 0", id="enrich-label")
+                yield DataTable(id="enrich-table")
 
     async def on_mount(self) -> None:
         self.register_theme(_THEME)
         self.theme = "tanker"
 
-        table = self.query_one("#fixes-table", DataTable)
-        table.add_columns(
-            "Time (UTC)",
+        terminal_table = self.query_one("#terminal-table", DataTable)
+        terminal_table.add_columns(
+            "Zone",
+            "Terminal",
+            "Fixes (1h)",
+            "Newest fix",
+        )
+
+        enrich_table = self.query_one("#enrich-table", DataTable)
+        enrich_table.add_columns(
+            "Enriched (UTC)",
             "MMSI",
+            "IMO",
             "Vessel Name",
-            "Gas Cap (m³)",
+            "VF Type",
+            "Status",
             "LNG",
-            "Lat",
-            "Lon",
-            "Speed (kn)",
         )
 
         try:
@@ -195,9 +345,14 @@ class TankerFlowApp(App):
             self.query_one("#status", Static).update(f"⚠ DB unreachable: {e}")
             return
 
-        self.query_one("#chart", _XAxisPlot).set_x_formatter(_MinAgoFormatter())
-        self.query_one("#longterm-chart", _XAxisPlot).set_x_formatter(_HourAgoFormatter())
+        self.query_one("#longterm-chart", _XAxisPlot).set_x_formatter(
+            _HourAgoFormatter()
+        )
+        self.query_one("#vessels-chart", _XAxisPlot).set_x_formatter(_MinAgoFormatter())
         self.set_interval(2, self.refresh_data)
+        # Terminal staleness is a heavy PostGIS query (~1.3s); refresh slowly.
+        self.set_interval(30, self.refresh_terminal_panel)
+        asyncio.create_task(self.refresh_terminal_panel())
 
     async def on_unmount(self) -> None:
         if self._pool:
@@ -207,68 +362,110 @@ class TankerFlowApp(App):
         if not self._pool:
             return
 
-        chart = self.query_one("#chart", _XAxisPlot)
-        plot_width = chart._scale_rectangle.width or max(chart.size.width - 12, 1)
-        minutes_back = max(60, min(plot_width * 2, 1440))
+        # Use nweurope tile (widest) to determine fetch window — the small tiles
+        # would otherwise pin us to too-short a history.
+        chart = self.query_one("#chart-nweurope", _MiniPlot)
+        plot_width = chart._scale_rectangle.width or max(chart.size.width - 2, 1)
+        minutes_back = max(60, min(plot_width * 4, 1440))
 
         lt_chart = self.query_one("#longterm-chart", _XAxisPlot)
-        lt_plot_width = lt_chart._scale_rectangle.width or max(lt_chart.size.width - 12, 1)
+        lt_plot_width = lt_chart._scale_rectangle.width or max(
+            lt_chart.size.width - 12, 1
+        )
         hours_back = max(24, min(lt_plot_width * 2, 24 * 90))
 
+        vessels_chart = self.query_one("#vessels-chart", _XAxisPlot)
+        v_plot_width = vessels_chart._scale_rectangle.width or max(
+            vessels_chart.size.width - 12, 1
+        )
+        v_minutes_back = max(60, min(v_plot_width * 4, 1440))
+
         try:
-            total, last60s, last5m, bucket_rows, lt_bucket_rows, fix_rows, hb_row = (
-                await asyncio.gather(
-                    self._pool.fetchval("SELECT COUNT(*) FROM ais_fixes"),
-                    self._pool.fetchval(
-                        "SELECT COUNT(*) FROM ais_fixes WHERE fix_ts > now() - INTERVAL '60 seconds'"
-                    ),
-                    self._pool.fetchval(
-                        "SELECT COUNT(*) FROM ais_fixes WHERE fix_ts > now() - INTERVAL '5 minutes'"
-                    ),
-                    self._pool.fetch(
-                        """
-                        SELECT bucket, cnt
-                        FROM fixes_per_minute
-                        WHERE bucket > now() - $1 * INTERVAL '1 minute'
-                        ORDER BY bucket ASC
+            (
+                total,
+                last60s,
+                last5m,
+                zone_bucket_rows,
+                lt_bucket_rows,
+                lag_bucket_rows,
+                hb_row,
+                enrich_status_rows,
+                enrich_recent_rows,
+            ) = await asyncio.gather(
+                self._pool.fetchval("SELECT COUNT(*) FROM ais_fixes"),
+                self._pool.fetchval(
+                    "SELECT COUNT(*) FROM ais_fixes WHERE fix_ts > now() - INTERVAL '60 seconds'"
+                ),
+                self._pool.fetchval(
+                    "SELECT COUNT(*) FROM ais_fixes WHERE fix_ts > now() - INTERVAL '5 minutes'"
+                ),
+                self._pool.fetch(
+                    f"""
+                        SELECT
+                          time_bucket('1 minute', fix_ts) AS bucket,
+                          {_ZONE_CASE_SQL} AS zone,
+                          COUNT(*) AS cnt
+                        FROM ais_fixes
+                        WHERE fix_ts > now() - $1 * INTERVAL '1 minute'
+                        GROUP BY bucket, zone
                         """,
-                        minutes_back,
-                    ),
-                    self._pool.fetch(
-                        """
+                    minutes_back,
+                ),
+                self._pool.fetch(
+                    """
                         SELECT bucket, cnt
                         FROM fixes_per_hour
                         WHERE bucket > now() - $1 * INTERVAL '1 hour'
                         ORDER BY bucket ASC
                         """,
-                        hours_back,
-                    ),
-                    self._pool.fetch(
-                        """
-                        SELECT
-                            f.fix_ts,
-                            f.mmsi,
-                            v.vessel_name,
-                            v.gas_capacity_m3,
-                            v.is_lng_carrier,
-                            f.lat,
-                            f.lon,
-                            f.sog
-                        FROM ais_fixes f
-                        JOIN vessel_registry v USING (mmsi)
-                        ORDER BY f.fix_ts DESC
-                        LIMIT 5
-                        """
-                    ),
-                    self._pool.fetchrow(
-                        """
+                    hours_back,
+                ),
+                self._pool.fetch(
+                    """
+                        SELECT time_bucket('1 minute', server_ts) AS bucket,
+                               AVG(EXTRACT(EPOCH FROM (server_ts - fix_ts))) AS mean_s,
+                               percentile_cont(0.95) WITHIN GROUP (
+                                   ORDER BY EXTRACT(EPOCH FROM (server_ts - fix_ts))
+                               ) AS p95_s
+                        FROM ais_fixes
+                        WHERE server_ts > now() - $1 * INTERVAL '1 minute'
+                          AND source = 'aisstream'
+                        GROUP BY bucket
+                        ORDER BY bucket ASC
+                        """,
+                    v_minutes_back,
+                ),
+                self._pool.fetchrow(
+                    """
                         SELECT status,
                                EXTRACT(EPOCH FROM (now() - last_heartbeat))::int AS age_s
                         FROM ingestion_heartbeat
                         WHERE source = 'aisstream'
                         """
-                    ),
-                )
+                ),
+                self._pool.fetch(
+                    """
+                        SELECT COALESCE(vf_enrichment_status, 'unenriched') AS status,
+                               COUNT(*) AS cnt
+                        FROM vessel_registry
+                        GROUP BY 1
+                        """
+                ),
+                self._pool.fetch(
+                    """
+                        SELECT enriched_at, mmsi, imo, vessel_name, vf_vessel_type,
+                               vf_enrichment_status, is_lng_carrier
+                        FROM vessel_registry
+                        WHERE enriched_at IS NOT NULL
+                        ORDER BY enriched_at DESC
+                        LIMIT (
+                          SELECT COUNT(DISTINCT t.terminal_id)
+                          FROM terminals t
+                          JOIN terminal_zones tz USING (terminal_id)
+                          WHERE t.in_signal_scope
+                        )
+                        """
+                ),
             )
         except Exception:
             now = datetime.now(timezone.utc).strftime("%H:%M:%S")
@@ -300,23 +497,43 @@ class TankerFlowApp(App):
             f"{dot} {hb_label} | Total: {total:,} | Last 60s: {last60s} | Last 5m: {last5m} | {now_str} UTC"
         )
 
-        # Short-term chart (fixes/min, last ~24h)
-        data = [float(row["cnt"]) for row in bucket_rows]
-        while len(data) < minutes_back:
-            data.insert(0, 0.0)
-        data = data[-minutes_back:]
+        # Per-zone fixes/min chart — pivot rows into a series per zone, zero-filled.
+        zone_series: dict[str, list[float]] = {
+            name: [0.0] * minutes_back for name, *_ in _ZONES
+        }
+        now_floor = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        for row in zone_bucket_rows:
+            zone = row["zone"]
+            if zone is None or zone not in zone_series:
+                continue
+            mins_ago = int((now_floor - row["bucket"]).total_seconds() // 60)
+            idx = minutes_back - 1 - mins_ago
+            if 0 <= idx < minutes_back:
+                zone_series[zone][idx] = float(row["cnt"])
 
-        x = list(range(1 - len(data), 1))
-        y_max = max(data) or 1
-        chart.clear()
-        chart.set_ylimits(ymin=0, ymax=y_max)
-        chart.plot(x, data, line_style="bright_magenta", hires_mode=HiResMode.BRAILLE)
+        x = list(range(1 - minutes_back, 1))
+        for zone_name, *_ in _ZONES:
+            series = zone_series[zone_name]
+            tile_chart = self.query_one(f"#chart-{zone_name}", _MiniPlot)
+            tile_chart.clear()
+            tile_chart.set_ylimits(ymin=0, ymax=max(series) or 1)
+            tile_chart.plot(
+                x,
+                series,
+                line_style=_ZONE_COLORS[zone_name],
+                hires_mode=HiResMode.BRAILLE,
+            )
 
-        peak = int(max(data))
-        avg = round(sum(data) / len(data))
-        self.query_one("#sparkline-label", Label).update(
-            f"Fixes/min (last {minutes_back}m) — peak: {peak}, mean: {avg}"
-        )
+            now_v = int(series[-1]) if series else 0
+            peak_v = int(max(series)) if series else 0
+            mean_v = round(sum(series) / len(series)) if series else 0
+            zone_color = _ZONE_COLORS[zone_name]
+            label_content = Text()
+            label_content.append(zone_name, style=zone_color)
+            label_content.append(f"  {minutes_back}m", style="dim")
+            label_content.append("\n")
+            label_content.append(f"now {now_v}  pk {peak_v}  μ {mean_v}", style="dim")
+            self.query_one(f"#label-{zone_name}", Label).update(label_content)
 
         # Long-term chart (fixes/hour, up to 90 days)
         lt_data = [float(row["cnt"]) for row in lt_bucket_rows]
@@ -328,7 +545,9 @@ class TankerFlowApp(App):
         lt_y_max = max(lt_data) or 1
         lt_chart.clear()
         lt_chart.set_ylimits(ymin=0, ymax=lt_y_max)
-        lt_chart.plot(lt_x, lt_data, line_style="bright_cyan", hires_mode=HiResMode.BRAILLE)
+        lt_chart.plot(
+            lt_x, lt_data, line_style="bright_cyan", hires_mode=HiResMode.BRAILLE
+        )
 
         lt_peak = int(max(lt_data))
         lt_avg = round(sum(lt_data) / len(lt_data))
@@ -337,22 +556,111 @@ class TankerFlowApp(App):
             f"Fixes/hour (last {days_back}d) — peak: {lt_peak:,}, mean: {lt_avg:,}"
         )
 
-        table = self.query_one("#fixes-table", DataTable)
-        table.clear()
-        for row in fix_rows:
-            table.add_row(
-                row["fix_ts"].strftime("%H:%M:%S"),
+        # Ingest lag (server_ts − fix_ts), per-minute mean and p95, in seconds.
+        mean_series = [0.0] * v_minutes_back
+        p95_series = [0.0] * v_minutes_back
+        now_floor_v = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        for row in lag_bucket_rows:
+            mins_ago = int((now_floor_v - row["bucket"]).total_seconds() // 60)
+            idx = v_minutes_back - 1 - mins_ago
+            if 0 <= idx < v_minutes_back:
+                mean_series[idx] = float(row["mean_s"] or 0.0)
+                p95_series[idx] = float(row["p95_s"] or 0.0)
+
+        v_x = list(range(1 - v_minutes_back, 1))
+        v_y_max = max(max(p95_series), max(mean_series)) or 1
+        vessels_chart.clear()
+        vessels_chart.set_ylimits(ymin=0, ymax=v_y_max)
+        vessels_chart.plot(
+            v_x, p95_series, line_style="bright_red", hires_mode=HiResMode.BRAILLE
+        )
+        vessels_chart.plot(
+            v_x, mean_series, line_style="bright_yellow", hires_mode=HiResMode.BRAILLE
+        )
+
+        v_mean_now = mean_series[-1]
+        v_p95_now = p95_series[-1]
+        v_p95_peak = max(p95_series)
+        lag_label = Text()
+        lag_label.append(f"Ingest lag (last {v_minutes_back}m) — ")
+        lag_label.append("● mean", style="bright_yellow")
+        lag_label.append(f": {v_mean_now:.1f}s · ")
+        lag_label.append("● p95", style="bright_red")
+        lag_label.append(": ")
+        lag_label.append(f"{v_p95_now:.1f}s", style="bright_red")
+        lag_label.append(f" (peak {v_p95_peak:.1f}s)")
+        self.query_one("#vessels-label", Label).update(lag_label)
+
+        # Dynamic enrichment panel
+        status_counts = {row["status"]: row["cnt"] for row in enrich_status_rows}
+        ok = status_counts.get("ok", 0)
+        no_imo = status_counts.get("no_imo", 0)
+        not_found = status_counts.get("not_found", 0)
+        error = status_counts.get("error", 0)
+        unenriched = status_counts.get("unenriched", 0)
+        self.query_one("#enrich-label", Label).update(
+            f"Dynamic enrichment — ok: {ok:,} | no_imo: {no_imo:,} | "
+            f"not_found: {not_found:,} | error: {error:,} | unenriched: {unenriched:,}"
+        )
+
+        enrich_table = self.query_one("#enrich-table", DataTable)
+        enrich_table.clear()
+        for row in enrich_recent_rows:
+            enrich_table.add_row(
+                row["enriched_at"].strftime("%H:%M:%S"),
                 str(row["mmsi"]),
+                str(row["imo"]) if row["imo"] else "—",
                 row["vessel_name"] or "—",
-                f"{row['gas_capacity_m3']:,}"
-                if row["gas_capacity_m3"] is not None
-                else "—",
+                row["vf_vessel_type"] or "—",
+                row["vf_enrichment_status"] or "—",
                 "✓"
                 if row["is_lng_carrier"]
                 else ("—" if row["is_lng_carrier"] is None else ""),
-                f"{row['lat']:.4f}" if row["lat"] is not None else "—",
-                f"{row['lon']:.4f}" if row["lon"] is not None else "—",
-                f"{row['sog']:.1f}" if row["sog"] is not None else "—",
+            )
+
+    async def refresh_terminal_panel(self) -> None:
+        """Per-terminal staleness — heavy PostGIS join, runs on a slow timer."""
+        if not self._pool:
+            return
+        try:
+            rows = await self._pool.fetch(
+                """
+                SELECT t.terminal_name, t.zone,
+                       EXTRACT(EPOCH FROM (now() - MAX(f.fix_ts)))::int AS age_s,
+                       COUNT(*) AS fixes_1h
+                FROM terminals t
+                JOIN terminal_zones tz USING (terminal_id)
+                LEFT JOIN ais_fixes f
+                  ON f.fix_ts > now() - INTERVAL '1 hour'
+                 AND ST_Within(ST_SetSRID(ST_Point(f.lon, f.lat), 4326), tz.geom)
+                WHERE t.in_signal_scope
+                GROUP BY t.terminal_id, t.terminal_name, t.zone
+                ORDER BY t.zone, t.terminal_name
+                """
+            )
+        except Exception:
+            return
+
+        table = self.query_one("#terminal-table", DataTable)
+        table.clear()
+        for row in rows:
+            age_s = row["age_s"]
+            fixes_1h = row["fixes_1h"]
+            zone = row["zone"] or "—"
+            zone_color = _ZONE_COLORS.get(zone, "white")
+            if age_s is None:
+                age_label = "[dim]>1h[/dim]"
+            elif age_s < 60:
+                age_label = f"[green]{age_s}s[/green]"
+            elif age_s < 600:
+                age_label = f"[yellow]{age_s // 60}m{age_s % 60:02d}s[/yellow]"
+            else:
+                age_label = f"[red]{age_s // 60}m[/red]"
+            table.add_row(
+                f"[{zone_color}]{zone}[/]",
+                row["terminal_name"],
+                f"{fixes_1h:,}" if fixes_1h else "—",
+                age_label,
             )
 
 
