@@ -1,4 +1,4 @@
-.PHONY: up down psql logs reset seed-terminals seed-zones viz ingest enrich
+.PHONY: up down db-ui psql logs reset seed-terminals seed-zones viz ingest enrich
 
 up:
 	docker compose up -d
@@ -35,10 +35,7 @@ ingest:
 	kill $$INGEST_PID 2>/dev/null || true
 
 enrich:
-	uv run python -m ingestion.vesselfinder
-
-enrich-test:
-	uv run python -m ingestion.vesselfinder --probe $(IMO)
+	uv run python -m ingestion.vesselfinder --terminal-only
 
 viz:
 	uv run uvicorn viz.app:app --host 127.0.0.1 --port 8000 --reload
