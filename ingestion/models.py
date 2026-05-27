@@ -97,7 +97,7 @@ class VesselFinderMasterdata(BaseModel):
     DWT: Optional[int] = None
     TEU: Optional[int] = None
     CRUDE: Optional[int] = None
-    GAS: Optional[int] = None  # field name unconfirmed — verify against a real LNG response
+    GAS: Optional[int] = None
 
 
 class VesselFinderResponse(BaseModel):

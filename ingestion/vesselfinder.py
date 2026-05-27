@@ -22,16 +22,29 @@ VF_API_BASE = "https://api.vesselfinder.com/masterdata"
 RATE_LIMIT_DELAY = 1.0  # seconds between requests
 
 
-async def fetch_pending(pool: asyncpg.Pool) -> list[asyncpg.Record]:
+PENDING_ALL = """
+    SELECT mmsi, imo FROM vessel_registry
+    WHERE imo IS NOT NULL AND imo != 0
+      AND (vf_enrichment_status IS NULL OR vf_enrichment_status = 'error')
+    ORDER BY mmsi
+"""
+
+PENDING_TERMINAL_ONLY = """
+    SELECT DISTINCT vr.mmsi, vr.imo
+    FROM vessel_registry vr
+    JOIN ais_fixes af ON af.mmsi = vr.mmsi
+    JOIN terminal_zones tz
+      ON ST_Within(ST_SetSRID(ST_Point(af.lon, af.lat), 4326), tz.geom)
+    WHERE vr.imo IS NOT NULL AND vr.imo != 0
+      AND (vr.vf_enrichment_status IS NULL OR vr.vf_enrichment_status = 'error')
+    ORDER BY vr.mmsi
+"""
+
+
+async def fetch_pending(pool: asyncpg.Pool, terminal_only: bool = False) -> list[asyncpg.Record]:
+    query = PENDING_TERMINAL_ONLY if terminal_only else PENDING_ALL
     async with pool.acquire() as conn:
-        return await conn.fetch(
-            """
-            SELECT mmsi, imo FROM vessel_registry
-            WHERE imo IS NOT NULL AND imo != 0
-            AND (vf_enrichment_status IS NULL OR vf_enrichment_status = 'error')
-            ORDER BY mmsi
-            """
-        )
+        return await conn.fetch(query)
 
 
 async def update_registry(
@@ -58,6 +71,12 @@ async def update_registry(
             teu               = $13,
             crude_capacity    = $14,
             gas_capacity_m3   = $15,
+            is_lng_carrier    = COALESCE($2 = 'LNG Tanker', FALSE),
+            -- 'Offshore Support Vessel' is a broad VF bucket (AHTS, PSV, FSRU, ...).
+            -- Safe here only because aisstream filters to AIS type 80-89 (tankers) upstream,
+            -- so the only OSVs reaching enrichment are vessels self-reporting as tankers — in
+            -- practice, FSRUs. Revisit if TANKER_TYPES in aisstream.py is ever widened.
+            is_fsru           = COALESCE($2 = 'Offshore Support Vessel', FALSE),
             enriched_at       = now(),
             vf_enrichment_status = $16,
             updated_at        = now()
@@ -126,37 +145,45 @@ async def enrich_vessel(
     mmsi: int,
     imo: int,
 ) -> None:
+    """Fetch + persist masterdata for one vessel, then sleep RATE_LIMIT_DELAY.
+
+    The trailing sleep belongs here so every caller (batch and dynamic worker) honours the
+    VesselFinder rate limit without having to remember to sleep themselves.
+    """
     try:
-        data = await fetch_masterdata(client, imo)
-    except httpx.HTTPStatusError as e:
-        logger.warning(
-            f"MMSI={mmsi} IMO={imo}: HTTP {e.response.status_code} — marking error"
-        )
+        try:
+            data = await fetch_masterdata(client, imo)
+        except httpx.HTTPStatusError as e:
+            logger.warning(
+                f"MMSI={mmsi} IMO={imo}: HTTP {e.response.status_code} — marking error"
+            )
+            async with pool.acquire() as conn:
+                await mark_status(conn, mmsi, "error")
+            return
+        except Exception as e:
+            logger.warning(f"MMSI={mmsi} IMO={imo}: request failed ({e}) — marking error")
+            async with pool.acquire() as conn:
+                await mark_status(conn, mmsi, "error")
+            return
+
+        if data is None:
+            logger.info(f"MMSI={mmsi} IMO={imo}: not found in VesselFinder")
+            async with pool.acquire() as conn:
+                await mark_status(conn, mmsi, "not_found")
+            return
+
         async with pool.acquire() as conn:
-            await mark_status(conn, mmsi, "error")
-        return
-    except Exception as e:
-        logger.warning(f"MMSI={mmsi} IMO={imo}: request failed ({e}) — marking error")
-        async with pool.acquire() as conn:
-            await mark_status(conn, mmsi, "error")
-        return
-
-    if data is None:
-        logger.info(f"MMSI={mmsi} IMO={imo}: not found in VesselFinder")
-        async with pool.acquire() as conn:
-            await mark_status(conn, mmsi, "not_found")
-        return
-
-    async with pool.acquire() as conn:
-        await update_registry(conn, mmsi, data, "ok")
-    logger.info(f"MMSI={mmsi} IMO={imo}: enriched ({data.NAME}, {data.TYPE})")
+            await update_registry(conn, mmsi, data, "ok")
+        logger.info(f"MMSI={mmsi} IMO={imo}: enriched ({data.NAME}, {data.TYPE})")
+    finally:
+        await asyncio.sleep(RATE_LIMIT_DELAY)
 
 
-async def enrich(limit: int | None = None) -> None:
+async def enrich(limit: int | None = None, terminal_only: bool = False) -> None:
     pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=3)
     logger.info("DB pool created")
 
-    pending = await fetch_pending(pool)
+    pending = await fetch_pending(pool, terminal_only=terminal_only)
     logger.info(f"{len(pending)} vessels pending enrichment")
 
     if not pending:
@@ -172,8 +199,6 @@ async def enrich(limit: int | None = None) -> None:
             mmsi, imo = row["mmsi"], row["imo"]
             logger.info(f"[{i}/{len(pending)}] MMSI={mmsi} IMO={imo}")
             await enrich_vessel(pool, client, mmsi, imo)
-            if i < len(pending):
-                await asyncio.sleep(RATE_LIMIT_DELAY)
 
     await pool.close()
     logger.info("Enrichment complete")
@@ -217,13 +242,18 @@ def main():
         metavar="N",
         help="Enrich at most N vessels (useful for testing)",
     )
+    parser.add_argument(
+        "--terminal-only",
+        action="store_true",
+        help="Only enrich vessels with fixes inside a terminal zone polygon",
+    )
     args = parser.parse_args()
 
     try:
         if args.probe:
             asyncio.run(probe(args.probe))
         else:
-            asyncio.run(enrich(limit=args.limit))
+            asyncio.run(enrich(limit=args.limit, terminal_only=args.terminal_only))
     except KeyboardInterrupt:
         logger.info("Stopped.")
 
