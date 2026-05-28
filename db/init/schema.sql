@@ -74,14 +74,22 @@ CREATE TABLE terminals (
     flow_direction  VARCHAR(10)  NOT NULL CHECK (flow_direction IN ('export','import')),
     in_signal_scope BOOLEAN      NOT NULL DEFAULT TRUE,
     is_fsru         BOOLEAN      NOT NULL DEFAULT FALSE,
+    zone            TEXT         CHECK (zone IN ('usgulf','usatlantic','nweurope','baltic','iberian','wmed','emed')),
+    fsru_host_mmsi  BIGINT,      -- For FSRU terminals: the MMSI of the resident FSRU vessel
     notes           TEXT
 );
 
--- LNG terminal zones: polygons imported from QGIS, used for port event detection
+-- LNG terminal zones: polygons imported from QGIS, used for port event detection.
+-- zone_type values:
+--   'berth'     — vessel is alongside the terminal, cargo ops possible
+--   'anchorage' — designated anchor area where vessels queue before berthing
+--   'approach'  — macro envelope containing anchorage + channel + berth;
+--                 covers the transit between anchorage and berth so the visit
+--                 envelope stays open during channel transit
 CREATE TABLE terminal_zones (
     id              SERIAL PRIMARY KEY,
     terminal_id     INTEGER      NOT NULL REFERENCES terminals(terminal_id),
-    zone_type       VARCHAR(20)  NOT NULL CHECK (zone_type IN ('berth','anchorage')),
+    zone_type       VARCHAR(20)  NOT NULL CHECK (zone_type IN ('berth','anchorage','approach')),
     sub_zone        SMALLINT     NOT NULL DEFAULT 0,
     is_provisional  BOOLEAN      NOT NULL DEFAULT TRUE,
     source          VARCHAR(30),
@@ -94,22 +102,30 @@ CREATE TABLE terminal_zones (
 CREATE INDEX idx_terminal_zones_geom     ON terminal_zones USING GIST (geom);
 CREATE INDEX idx_terminal_zones_terminal ON terminal_zones (terminal_id);
 
--- Port events: derived from ais_fixes, recomputable
+-- Port events: derived from ais_fixes, recomputable.
+-- cold_start = TRUE on the synthetic zone_entry + moored/anchored emitted when
+-- a vessel's first observed fix is already inside a polygon (no preceding
+-- transit observed).
 CREATE TABLE port_events (
     id              BIGSERIAL        PRIMARY KEY,
     mmsi            BIGINT           NOT NULL,
     event_type      TEXT             NOT NULL,
     zone            TEXT             NOT NULL,
+    terminal_id     INTEGER          REFERENCES terminals(terminal_id),
     event_time      TIMESTAMPTZ      NOT NULL,
+    lat             REAL,
+    lon             REAL,
     laden_flag      BOOLEAN,
+    cold_start      BOOLEAN          NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ      DEFAULT now(),
     CONSTRAINT valid_event_type CHECK (
         event_type IN ('zone_entry','anchored','moored','departed','zone_exit')
     ),
-    CONSTRAINT valid_zone CHECK (zone IN ('usgulf','nweurope'))
+    CONSTRAINT valid_zone CHECK (zone IN ('usgulf','usatlantic','nweurope','baltic','iberian','wmed','emed'))
 );
 
 CREATE INDEX ON port_events (mmsi, event_time DESC);
+CREATE INDEX ON port_events (terminal_id, event_time DESC);
 CREATE INDEX ON port_events (zone, event_type, event_time DESC);
 
 

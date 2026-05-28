@@ -10,8 +10,8 @@ Derives a leading Henry Hub / TTF spread signal from live LNG carrier positions.
 AISstream WebSocket ──► ingestion/aisstream.py ──► ais_fixes        (TimescaleDB hypertable)
 VesselFinder API    ──► ingestion/vesselfinder.py ► vessel_registry  (masterdata enrichment)
                                                     terminals         (40 LNG terminals)
-                                                    terminal_zones    (berth + anchorage polygons)
-ais_fixes           ──► pipeline/port_events.py ──► port_events      [not yet implemented]
+                                                    terminal_zones    (berth + anchorage + approach polygons)
+ais_fixes           ──► pipeline/port_events.py ──► port_events      (per-visit state machine)
 port_events         ──► pipeline/signal.py ────────► laden_ton_miles  [not yet implemented]
 EIA API             ──► data/eia.py ───────────────► Henry Hub fundamentals [not yet implemented]
 ```
@@ -38,8 +38,8 @@ EIA API             ──► data/eia.py ────────────�
 - **`vessel_state`** — voyage-specific fields (draught, destination, ETA) from `ShipStaticData` messages.
 - **`vessel_registry`** — one row per MMSI, enriched with VesselFinder masterdata. `is_lng_carrier` and `is_fsru` flags drive vessel filtering.
 - **`terminals`** — 40 LNG export/import terminals with scope and type metadata.
-- **`terminal_zones`** — berth and anchorage polygons (MultiPolygon/4326) linked to terminals. Drawn in QGIS, imported via `make seed-zones`. See `qgis/README.md` for coverage.
-- **`port_events`** — derived table (recomputable from `ais_fixes`). Zone entries, anchorings, moorings, departures.
+- **`terminal_zones`** — berth, anchorage, and approach polygons (MultiPolygon/4326) linked to terminals. Drawn in QGIS, imported via `make seed-zones`. The `approach` macro-zone contains anchorage + channel + berth as one envelope so a single port visit stays "open" while the vessel transits between them. See `qgis/README.md` for coverage.
+- **`port_events`** — derived table, recomputable from `ais_fixes` via `make port-events`. One row per per-vessel transition: `zone_entry → [anchored] → [moored → departed] → zone_exit`. Carries `terminal_id`, `lat`/`lon` (for great-circle ton-miles downstream), `laden_flag` (forward-filled draught vs `design_draught`), and `cold_start` (vessel already in a polygon at first observation).
 - **`ingestion_heartbeat`** — one row per ingestion source, upserted every 10s for health monitoring.
 - **`fixes_per_minute` / `fixes_per_hour`** — TimescaleDB continuous aggregates for the monitoring TUI.
 
@@ -72,6 +72,9 @@ make seed-zones      # Import terminal zone polygons from QGIS GeoPackage (upser
 make ingest          # Run AIS ingestion + monitoring TUI
 make enrich          # Run VesselFinder enrichment batch
 
+# Pipeline
+make port-events     # Recompute port_events from ais_fixes + terminal_zones (idempotent)
+
 # Viz
 make viz             # Start FastAPI monitoring web app (localhost:8000)
 ```
@@ -82,7 +85,6 @@ make viz             # Start FastAPI monitoring web app (localhost:8000)
 
 | Component | Description |
 |---|---|
-| `pipeline/port_events.py` | State machine: classifies `ais_fixes` against `terminal_zones` to produce `port_events` |
 | `pipeline/signal.py` | Aggregates `port_events` into laden ton-miles in transit by zone pair |
 | `data/eia.py` | Pulls US natural gas storage data from the EIA API (Henry Hub fundamentals) |
 | `analysis/` | Spread prediction model and exploratory notebooks |

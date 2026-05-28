@@ -1,0 +1,561 @@
+"""Per-vessel port-event state machine.
+
+Pure logic — no DB, no asyncpg. Consumes a stream of (Fix, zones) tuples for a
+single MMSI in chronological order and yields Event records. The caller is
+responsible for the spatial join that produces the `zones` array per fix.
+
+Three-layer resolution (per fix), from `Plan: pipeline/port_events.py`:
+  1. Berth override — any zone_type='berth' candidate wins, overriding stickiness.
+  2. Stickiness    — if a visit envelope is open for terminal A and any candidate
+                     matches A, stay with A.
+  3. Cold entry    — pick the candidate with the most-specific zone_type;
+                     tiebreak by nearest berth centroid.
+
+Event timestamps are back-dated to the moment of transition (first qualifying
+fix), not the moment of dwell-confirmation.
+"""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+
+
+ZONE_TYPE_SPECIFICITY = {"berth": 0, "anchorage": 1, "approach": 2}
+
+
+def _candidate_terminals(zones: tuple[tuple[int, str, int], ...]) -> frozenset[int]:
+    return frozenset(tid for tid, _, _ in zones)
+
+
+class State(Enum):
+    TRANSIT = "transit"
+    IN_ENVELOPE = "in_envelope"
+    ANCHORED = "anchored"
+    MOORED = "moored"
+    DEPARTED = "departed"
+
+
+@dataclass(frozen=True)
+class Fix:
+    fix_ts: datetime
+    lat: float
+    lon: float
+    sog: float | None
+    nav_status: int | None
+    # Candidate (terminal_id, zone_type, sub_zone) tuples for this fix. Empty
+    # means the fix is in open ocean (matched no polygon).
+    zones: tuple[tuple[int, str, int], ...]
+
+
+@dataclass(frozen=True)
+class Event:
+    event_type: str
+    event_time: datetime
+    terminal_id: int
+    lat: float
+    lon: float
+    cold_start: bool = False
+    # Every terminal_id whose polygon contained the originating fix. Used by
+    # reattribute_overlaps to detect "earlier event was in a region also
+    # covered by the moored terminal's polygons" without a separate PostGIS
+    # query. For events that fire without an originating fix (e.g., zone_exit
+    # emitted when no candidate matches), this is just {terminal_id}.
+    candidate_terminal_ids: frozenset[int] = frozenset()
+
+
+@dataclass(frozen=True)
+class Thresholds:
+    anchored_min_dwell: timedelta = timedelta(minutes=30)
+    anchored_max_sog: float = 1.0
+    moored_min_dwell: timedelta = timedelta(minutes=30)
+    moored_max_sog: float = 0.5
+    departed_min_dwell: timedelta = timedelta(minutes=15)
+    departed_min_sog: float = 1.0
+
+
+# Caller-supplied callback: given a list of candidate terminal_ids and the fix's
+# lat/lon, return the terminal_id whose nearest berth centroid is closest. Lets
+# the state machine stay DB-free while keeping berth geometry where it lives.
+NearestBerthFn = Callable[[list[int], float, float], int]
+
+
+@dataclass
+class _Walker:
+    """Mutable per-vessel state. Encapsulated so walk() stays a generator."""
+
+    thresholds: Thresholds
+    nearest_berth: NearestBerthFn
+
+    state: State = State.TRANSIT
+    terminal_id: int | None = None
+
+    # Pending-transition tracking: when we observe a fix that *could* be the
+    # start of a transition, record (candidate_state, first_qualifying_ts).
+    # On a fix that breaks the qualification, drop the pending transition.
+    # On a fix that meets dwell_min, finalize and emit the event back-dated to
+    # first_qualifying_ts.
+    pending_state: State | None = None
+    pending_since: datetime | None = None
+    pending_lat: float | None = None
+    pending_lon: float | None = None
+    pending_candidates: frozenset[int] = field(default_factory=frozenset)
+
+    events: list[Event] = field(default_factory=list)
+
+    def _envelope_start_idx(self) -> int:
+        """Index of the most recent zone_entry in self.events (the current envelope's first event)."""
+        for i in range(len(self.events) - 1, -1, -1):
+            if self.events[i].event_type == "zone_entry":
+                return i
+        return 0
+
+    def _can_reattribute_envelope_to(self, new_tid: int) -> bool:
+        """True iff every event in the current envelope had new_tid in its
+        candidate_terminal_ids. If so, the earlier events were ambiguous and
+        the vessel was in a region also covering new_tid."""
+        start = self._envelope_start_idx()
+        return all(
+            new_tid in self.events[i].candidate_terminal_ids
+            for i in range(start, len(self.events))
+        )
+
+    def _rewrite_envelope_to(self, new_tid: int) -> None:
+        start = self._envelope_start_idx()
+        for i in range(start, len(self.events)):
+            ev = self.events[i]
+            self.events[i] = Event(
+                event_type=ev.event_type,
+                event_time=ev.event_time,
+                terminal_id=new_tid,
+                lat=ev.lat,
+                lon=ev.lon,
+                cold_start=ev.cold_start,
+                candidate_terminal_ids=ev.candidate_terminal_ids,
+            )
+
+    def emit(
+        self,
+        event_type: str,
+        event_time: datetime,
+        terminal_id: int,
+        lat: float,
+        lon: float,
+        cold_start: bool = False,
+        candidate_terminal_ids: frozenset[int] | None = None,
+    ) -> None:
+        self.events.append(
+            Event(
+                event_type=event_type,
+                event_time=event_time,
+                terminal_id=terminal_id,
+                lat=lat,
+                lon=lon,
+                cold_start=cold_start,
+                candidate_terminal_ids=candidate_terminal_ids
+                if candidate_terminal_ids is not None
+                else frozenset({terminal_id}),
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # Resolution: pick (terminal_id, zone_type) for a fix from its zones[]
+    # ------------------------------------------------------------------
+
+    def resolve(
+        self, zones: tuple[tuple[int, str, int], ...], lat: float, lon: float
+    ) -> tuple[int, str] | None:
+        if not zones:
+            return None
+
+        # Layer 1: berth override.
+        berths = [(tid, zt) for tid, zt, _ in zones if zt == "berth"]
+        if berths:
+            # Multiple berths in one fix is exceedingly rare; tiebreak by
+            # nearest-berth among the berth-matching terminals.
+            tids = sorted({tid for tid, _ in berths})
+            if len(tids) == 1:
+                return tids[0], "berth"
+            return self.nearest_berth(tids, lat, lon), "berth"
+
+        # Most-specific zone_type per terminal in the candidate set.
+        best_per_terminal: dict[int, str] = {}
+        for tid, zt, _ in zones:
+            if (
+                tid not in best_per_terminal
+                or ZONE_TYPE_SPECIFICITY[zt]
+                < ZONE_TYPE_SPECIFICITY[best_per_terminal[tid]]
+            ):
+                best_per_terminal[tid] = zt
+
+        # Layer 2: stickiness.
+        if self.terminal_id is not None and self.terminal_id in best_per_terminal:
+            return self.terminal_id, best_per_terminal[self.terminal_id]
+
+        # Layer 3: cold entry. Pick the terminal with the most-specific match;
+        # tiebreak by nearest berth.
+        best_specificity = min(
+            ZONE_TYPE_SPECIFICITY[zt] for zt in best_per_terminal.values()
+        )
+        tied = sorted(
+            tid
+            for tid, zt in best_per_terminal.items()
+            if ZONE_TYPE_SPECIFICITY[zt] == best_specificity
+        )
+        chosen = tied[0] if len(tied) == 1 else self.nearest_berth(tied, lat, lon)
+        return chosen, best_per_terminal[chosen]
+
+    # ------------------------------------------------------------------
+    # Pending-transition helpers
+    # ------------------------------------------------------------------
+
+    def start_pending(self, target: State, fix: Fix) -> None:
+        self.pending_state = target
+        self.pending_since = fix.fix_ts
+        self.pending_lat = fix.lat
+        self.pending_lon = fix.lon
+
+    def clear_pending(self) -> None:
+        self.pending_state = None
+        self.pending_since = None
+        self.pending_lat = None
+        self.pending_lon = None
+        self.pending_candidates = frozenset()
+
+    def dwell_satisfied(self, fix: Fix, min_dwell: timedelta) -> bool:
+        return (
+            self.pending_since is not None
+            and (fix.fix_ts - self.pending_since) >= min_dwell
+        )
+
+    # ------------------------------------------------------------------
+    # Per-fix step
+    # ------------------------------------------------------------------
+
+    def step(self, fix: Fix, is_first_fix: bool) -> None:
+        resolved = self.resolve(fix.zones, fix.lat, fix.lon)
+
+        # Cold-start only fires when the very first observed fix is already
+        # inside a berth or anchorage — the entry happened before our data.
+        # First-fix-in-approach is a normal envelope entry (vessel was just
+        # arriving when we started observing).
+        if (
+            is_first_fix
+            and resolved is not None
+            and resolved[1] in ("berth", "anchorage")
+        ):
+            self._cold_start(fix, resolved)
+            return
+
+        if resolved is None:
+            self._step_open_ocean(fix)
+            return
+
+        new_tid, zt = resolved
+
+        # Berth override may force a terminal switch mid-envelope. But if the
+        # earlier events in this envelope had the new terminal in their
+        # candidate set (i.e., the vessel was always in a region that covers
+        # both terminals), rewrite them to the new terminal and keep the
+        # envelope open — no spurious zone_exit/zone_entry pair. Otherwise,
+        # close the old envelope and open a fresh one.
+        if (
+            zt == "berth"
+            and self.terminal_id is not None
+            and new_tid != self.terminal_id
+        ):
+            if self._can_reattribute_envelope_to(new_tid):
+                self._rewrite_envelope_to(new_tid)
+                self.terminal_id = new_tid
+                self.state = State.IN_ENVELOPE
+                self.clear_pending()
+            else:
+                self.emit("zone_exit", fix.fix_ts, self.terminal_id, fix.lat, fix.lon)
+                self.state = State.TRANSIT
+                self.terminal_id = None
+                self.clear_pending()
+
+        if self.terminal_id is None:
+            self.terminal_id = new_tid
+            self.state = State.IN_ENVELOPE
+            self.emit(
+                "zone_entry",
+                fix.fix_ts,
+                new_tid,
+                fix.lat,
+                fix.lon,
+                candidate_terminal_ids=_candidate_terminals(fix.zones),
+            )
+            self.clear_pending()
+
+        # We're inside terminal_id's envelope. Drive substate transitions.
+        self._step_in_envelope(fix, zt)
+
+    def _cold_start(self, fix: Fix, resolved: tuple[int, str]) -> None:
+        tid, zt = resolved
+        self.terminal_id = tid
+        candidates = _candidate_terminals(fix.zones)
+        self.emit(
+            "zone_entry",
+            fix.fix_ts,
+            tid,
+            fix.lat,
+            fix.lon,
+            cold_start=True,
+            candidate_terminal_ids=candidates,
+        )
+        sog = fix.sog or 0.0
+        if zt == "berth" and sog < self.thresholds.moored_max_sog:
+            self.state = State.MOORED
+            self.emit(
+                "moored",
+                fix.fix_ts,
+                tid,
+                fix.lat,
+                fix.lon,
+                cold_start=True,
+                candidate_terminal_ids=candidates,
+            )
+        elif zt == "anchorage" and sog < self.thresholds.anchored_max_sog:
+            self.state = State.ANCHORED
+            self.emit(
+                "anchored",
+                fix.fix_ts,
+                tid,
+                fix.lat,
+                fix.lon,
+                cold_start=True,
+                candidate_terminal_ids=candidates,
+            )
+        else:
+            self.state = State.IN_ENVELOPE
+
+    def _step_open_ocean(self, fix: Fix) -> None:
+        if self.terminal_id is None:
+            return
+        # Fix outside ALL polygons of the current terminal — visit envelope
+        # closes. (AIS dropouts don't fire this because they produce no fix at
+        # all; only an actual fix outside can close the envelope.)
+        self.emit("zone_exit", fix.fix_ts, self.terminal_id, fix.lat, fix.lon)
+        self.state = State.TRANSIT
+        self.terminal_id = None
+        self.clear_pending()
+
+    def _step_in_envelope(self, fix: Fix, zt: str) -> None:
+        t = self.thresholds
+        sog = fix.sog if fix.sog is not None else 0.0
+        assert self.terminal_id is not None
+
+        # MOORED -> DEPARTED watchdog (vessel left the berth)
+        if self.state == State.MOORED:
+            if zt != "berth" and sog > t.departed_min_sog:
+                if self.pending_state != State.DEPARTED:
+                    self.start_pending(State.DEPARTED, fix)
+                elif self.dwell_satisfied(fix, t.departed_min_dwell):
+                    self.state = State.DEPARTED
+                    self.emit(
+                        "departed",
+                        self.pending_since,  # type: ignore[arg-type]
+                        self.terminal_id,
+                        self.pending_lat,  # type: ignore[arg-type]
+                        self.pending_lon,  # type: ignore[arg-type]
+                    )
+                    self.clear_pending()
+            else:
+                # AIS dropout or transient noise — stay MOORED.
+                self.clear_pending()
+            return
+
+        # In ANCHORED or IN_ENVELOPE — both can transition to MOORED on berth.
+        if self.state in (State.IN_ENVELOPE, State.ANCHORED):
+            if zt == "berth" and sog < t.moored_max_sog:
+                if self.pending_state != State.MOORED:
+                    self.start_pending(State.MOORED, fix)
+                elif self.dwell_satisfied(fix, t.moored_min_dwell):
+                    self.state = State.MOORED
+                    self.emit(
+                        "moored",
+                        self.pending_since,  # type: ignore[arg-type]
+                        self.terminal_id,
+                        self.pending_lat,  # type: ignore[arg-type]
+                        self.pending_lon,  # type: ignore[arg-type]
+                    )
+                    self.clear_pending()
+                return
+
+            # IN_ENVELOPE only: can also transition to ANCHORED on anchorage.
+            if (
+                self.state == State.IN_ENVELOPE
+                and zt == "anchorage"
+                and sog < t.anchored_max_sog
+            ):
+                if self.pending_state != State.ANCHORED:
+                    self.start_pending(State.ANCHORED, fix)
+                    self.pending_candidates = _candidate_terminals(fix.zones)
+                elif self.dwell_satisfied(fix, t.anchored_min_dwell):
+                    self.state = State.ANCHORED
+                    self.emit(
+                        "anchored",
+                        self.pending_since,  # type: ignore[arg-type]
+                        self.terminal_id,
+                        self.pending_lat,  # type: ignore[arg-type]
+                        self.pending_lon,  # type: ignore[arg-type]
+                        candidate_terminal_ids=self.pending_candidates,
+                    )
+                    self.clear_pending()
+                return
+
+            # Fix doesn't qualify any pending transition — clear it.
+            self.clear_pending()
+            return
+
+        # DEPARTED — wait for a fix outside any of this terminal's polygons to
+        # fire zone_exit. That happens in _step_open_ocean above; here we just
+        # absorb fixes that re-enter (e.g., vessel circles back).
+        if self.state == State.DEPARTED:
+            self.clear_pending()
+
+
+def walk(
+    fixes: Iterator[Fix],
+    nearest_berth: NearestBerthFn,
+    thresholds: Thresholds | None = None,
+) -> list[Event]:
+    """Run the state machine over a single vessel's chronological fixes.
+
+    Returns the emitted events in order. Cold-end (vessel still moored at end of
+    stream) leaves the moored event open — no synthetic departed/zone_exit.
+    """
+    walker = _Walker(thresholds=thresholds or Thresholds(), nearest_berth=nearest_berth)
+    first = True
+    for fix in fixes:
+        walker.step(fix, is_first_fix=first)
+        first = False
+    return walker.events
+
+
+# ----------------------------------------------------------------------
+# Post-walk passes
+# ----------------------------------------------------------------------
+
+
+def reattribute_overlaps(events: list[Event]) -> list[Event]:
+    """For each moored event at terminal B, rewrite preceding zone_entry/
+    anchored events in the same envelope to B if their originating fix also
+    lay inside one of B's polygons (i.e., the regions overlap).
+
+    The overlap check uses each event's `candidate_terminal_ids` — the set of
+    every terminal whose polygons contained the originating fix. If B is in
+    that set, then A and B's polygons both contain the earlier fix's location.
+    """
+    if not events:
+        return events
+
+    result = list(events)
+    open_start: int | None = None
+    for i, ev in enumerate(result):
+        if ev.event_type == "zone_entry":
+            open_start = i
+        elif ev.event_type == "zone_exit" and open_start is not None:
+            _reattribute_envelope(result, open_start, i)
+            open_start = None
+    if open_start is not None:
+        _reattribute_envelope(result, open_start, len(result) - 1)
+    return result
+
+
+def _reattribute_envelope(events: list[Event], start: int, end: int) -> None:
+    moored_idx = next(
+        (j for j in range(start, end + 1) if events[j].event_type == "moored"),
+        None,
+    )
+    if moored_idx is None:
+        return
+    moored_tid = events[moored_idx].terminal_id
+    for j in range(start, moored_idx):
+        ev = events[j]
+        if ev.terminal_id == moored_tid:
+            continue
+        if moored_tid in ev.candidate_terminal_ids:
+            events[j] = Event(
+                event_type=ev.event_type,
+                event_time=ev.event_time,
+                terminal_id=moored_tid,
+                lat=ev.lat,
+                lon=ev.lon,
+                cold_start=ev.cold_start,
+                candidate_terminal_ids=ev.candidate_terminal_ids,
+            )
+
+
+# ----------------------------------------------------------------------
+# DFA validation
+# ----------------------------------------------------------------------
+
+
+_ALLOWED_NEXT = {
+    None: {"zone_entry"},
+    "zone_entry": {"anchored", "moored", "zone_exit"},
+    "anchored": {"moored", "zone_exit"},
+    "moored": {"departed", "zone_exit"},
+    "departed": {
+        "zone_exit",
+        "zone_entry",
+    },  # vessel can circle back into another visit
+    "zone_exit": {"zone_entry"},
+}
+
+
+def validate_sequence(events: list[Event]) -> None:
+    """Raise if the per-vessel event sequence violates the envelope DFA."""
+    prev: str | None = None
+    for ev in events:
+        allowed = _ALLOWED_NEXT[prev]
+        if ev.event_type not in allowed:
+            raise AssertionError(
+                f"invalid event sequence at {ev.event_time}: "
+                f"{prev} -> {ev.event_type} (allowed: {sorted(allowed)})"
+            )
+        prev = ev.event_type
+
+
+# ----------------------------------------------------------------------
+# Tiny utility: nearest-berth-by-centroid callback factory
+# ----------------------------------------------------------------------
+
+
+def make_nearest_berth(
+    centroids_by_terminal: dict[int, list[tuple[float, float]]],
+) -> NearestBerthFn:
+    """Build a NearestBerthFn from a precomputed mapping
+    terminal_id -> list of (lat, lon) berth-polygon centroids.
+
+    Uses each terminal's *closest* berth sub_zone to the fix, not just one.
+    """
+
+    def f(candidates: list[int], lat: float, lon: float) -> int:
+        def min_dist(tid: int) -> float:
+            return min(
+                _haversine_nm(lat, lon, blat, blon)
+                for blat, blon in centroids_by_terminal[tid]
+            )
+
+        return min(candidates, key=min_dist)
+
+    return f
+
+
+def _haversine_nm(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in nautical miles."""
+    r_nm = 3440.065  # earth radius in nm
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlam = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dphi / 2) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
+    )
+    return 2 * r_nm * math.asin(math.sqrt(a))

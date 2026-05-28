@@ -1,4 +1,4 @@
-.PHONY: up down db-ui psql logs reset seed-terminals seed-zones viz ingest enrich
+.PHONY: up down db-ui psql logs reset seed-terminals seed-zones viz ingest enrich port-events
 
 up:
 	docker compose up -d
@@ -39,3 +39,6 @@ enrich:
 
 viz:
 	uv run uvicorn viz.app:app --host 127.0.0.1 --port 8000 --reload
+
+port-events:
+	uv run python -m pipeline.port_events
