@@ -116,6 +116,7 @@ CREATE TABLE port_events (
     lat             REAL,
     lon             REAL,
     laden_flag      BOOLEAN,
+    laden_source    TEXT             CHECK (laden_source IN ('draught', 'flow_direction')),
     cold_start      BOOLEAN          NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ      DEFAULT now(),
     CONSTRAINT valid_event_type CHECK (

@@ -76,12 +76,12 @@ def test_golden_path_emits_full_envelope():
 
     types = [(e.event_type, e.event_time) for e in events]
     assert types == [
-        ("zone_entry", at(0)),       # first fix in approach
-        ("anchorage_entry", at(10)), # vessel crosses into anchorage polygon
-        ("anchored", at(10)),        # dwell-confirmed (back-dated)
+        ("zone_entry", at(0)),  # first fix in approach
+        ("anchorage_entry", at(10)),  # vessel crosses into anchorage polygon
+        ("anchored", at(10)),  # dwell-confirmed (back-dated)
         ("anchorage_exit", at(50)),  # vessel leaves anchorage for the channel
-        ("moored", at(70)),          # dwell-confirmed at berth (back-dated)
-        ("departed", at(110)),       # first qualifying out-of-berth fix
+        ("moored", at(70)),  # dwell-confirmed at berth (back-dated)
+        ("departed", at(110)),  # first qualifying out-of-berth fix
         ("zone_exit", at(140)),
     ]
 
@@ -134,13 +134,16 @@ def test_shared_anchorage_then_berth_at_other_terminal():
     # every event in the current envelope had GP in candidate_terminal_ids
     # (the shared anchorage), so the envelope is rewritten to GP in place.
     types = [e.event_type for e in events]
-    assert types == [
-        "zone_entry",
-        "anchorage_entry",
-        "anchored",
-        "anchorage_exit",   # fires when vessel leaves shared anchorage for GP-only approach
-        "moored",
-    ]
+    assert (
+        types
+        == [
+            "zone_entry",
+            "anchorage_entry",
+            "anchored",
+            "anchorage_exit",  # fires when vessel leaves shared anchorage for GP-only approach
+            "moored",
+        ]
+    )
     assert all(e.terminal_id == 2 for e in events)
     validate_sequence(events)
     # reattribute_overlaps is a no-op safety net after the inline rewrite.
@@ -389,7 +392,10 @@ def test_re_anchoring_emits_two_anchored_events():
     # Total queue time across both stints
     pairs = [e for e in events if e.event_type in ("anchorage_entry", "anchorage_exit")]
     total_queue = sum(
-        (pairs[i + 1].event_time - pairs[i].event_time for i in range(0, len(pairs), 2)),
+        (
+            pairs[i + 1].event_time - pairs[i].event_time
+            for i in range(0, len(pairs), 2)
+        ),
         timedelta(),
     )
     # First stint: 5 -> 50 = 45 min. Second stint: 100 -> 150 = 50 min. Total 95.

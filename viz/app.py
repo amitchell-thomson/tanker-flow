@@ -14,7 +14,9 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.pool = await asyncpg.create_pool(settings.database_url)
+    app.state.pool = await asyncpg.create_pool(
+        settings.database_url, min_size=1, max_size=5
+    )
     yield
     await app.state.pool.close()
 
@@ -35,14 +37,29 @@ async def index():
 async def vessels(pool: asyncpg.Pool = Depends(get_pool)):
     rows = await pool.fetch(
         """
-        SELECT DISTINCT ON (f.mmsi)
+        WITH latest_fix AS (
+            SELECT DISTINCT ON (mmsi)
+                mmsi, lat, lon, fix_ts, sog, nav_status
+            FROM ais_fixes
+            WHERE lat IS NOT NULL AND lon IS NOT NULL
+              AND fix_ts > now() - INTERVAL '48 hours'
+            ORDER BY mmsi, fix_ts DESC
+        ),
+        latest_draught AS (
+            SELECT DISTINCT ON (mmsi) mmsi, draught, state_ts
+            FROM vessel_state
+            WHERE draught IS NOT NULL AND draught > 0
+            ORDER BY mmsi, state_ts DESC
+        )
+        SELECT
             f.mmsi, f.lat, f.lon, f.fix_ts, f.sog, f.nav_status,
-            v.vessel_name, v.flag, v.imo, v.is_lng_carrier, v.is_fsru, v.vf_vessel_type
-        FROM ais_fixes f
+            v.vessel_name, v.flag, v.imo, v.is_lng_carrier, v.is_fsru,
+            v.vf_vessel_type, v.design_draught,
+            d.draught AS current_draught,
+            d.state_ts AS current_draught_ts
+        FROM latest_fix f
         LEFT JOIN vessel_registry v USING (mmsi)
-        WHERE f.lat IS NOT NULL AND f.lon IS NOT NULL
-          AND f.fix_ts > now() - INTERVAL '48 hours'
-        ORDER BY f.mmsi, f.fix_ts DESC
+        LEFT JOIN latest_draught d USING (mmsi)
         """
     )
     return [dict(r) for r in rows]

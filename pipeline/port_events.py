@@ -20,8 +20,9 @@ from rich.logging import RichHandler
 
 from config import settings
 
-from .laden import build_draught_lookup, laden_at
+from .laden import Side, build_draught_lookup, infer_laden
 from .state_machine import (
+    Event,
     Fix,
     make_nearest_berth,
     validate_sequence,
@@ -57,7 +58,9 @@ FROM terminal_zones
 WHERE zone_type = 'berth'
 """
 
-TERMINAL_ZONE_SQL = "SELECT terminal_id, zone FROM terminals WHERE zone IS NOT NULL"
+TERMINAL_METADATA_SQL = (
+    "SELECT terminal_id, zone, flow_direction FROM terminals WHERE zone IS NOT NULL"
+)
 
 FSRU_HOSTS_SQL = """
 SELECT terminal_id, fsru_host_mmsi
@@ -118,8 +121,9 @@ ORDER BY f.mmsi, f.fix_ts
 
 INSERT_SQL = """
 INSERT INTO port_events
-    (mmsi, event_type, zone, terminal_id, event_time, lat, lon, laden_flag, cold_start)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    (mmsi, event_type, zone, terminal_id, event_time, lat, lon,
+     laden_flag, laden_source, cold_start)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 """
 
 
@@ -135,8 +139,10 @@ async def run(pool: asyncpg.Pool) -> None:
         await conn.execute(TRUNCATE_SQL)
         in_scope = await conn.fetch(IN_SCOPE_MMSIS_SQL)
         berths = await conn.fetch(BERTH_CENTROIDS_SQL)
-        terminal_zone_map = {
-            r["terminal_id"]: r["zone"] for r in await conn.fetch(TERMINAL_ZONE_SQL)
+        terminal_rows = await conn.fetch(TERMINAL_METADATA_SQL)
+        terminal_zone_map = {r["terminal_id"]: r["zone"] for r in terminal_rows}
+        terminal_flow_map: dict[int, str] = {
+            r["terminal_id"]: r["flow_direction"] for r in terminal_rows
         }
         fsru_hosts = {
             r["fsru_host_mmsi"]: r["terminal_id"]
@@ -203,6 +209,7 @@ async def run(pool: asyncpg.Pool) -> None:
                                 buf,
                                 nearest_berth,
                                 terminal_zone_map,
+                                terminal_flow_map,
                                 design_draught,
                                 draught_lookup,
                                 summary,
@@ -217,6 +224,7 @@ async def run(pool: asyncpg.Pool) -> None:
                     buf,
                     nearest_berth,
                     terminal_zone_map,
+                    terminal_flow_map,
                     design_draught,
                     draught_lookup,
                     summary,
@@ -240,12 +248,54 @@ def _row_to_fix(row: asyncpg.Record) -> Fix:
     )
 
 
+def _classify_envelope_sides(events: list[Event]) -> list[Side]:
+    """For each event, return its position relative to the envelope's moored:
+    'pre' (before moored), 'moored' (the moored itself), 'post' (after moored),
+    or 'no_moored' (envelope contains no moored).
+
+    An envelope = events between successive zone_entry events (or from the
+    start / to the end of the list). Each envelope has 0 or 1 moored events.
+    """
+    sides: list[Side] = ["no_moored"] * len(events)
+    envelope_start = 0
+    for i, ev in enumerate(events):
+        is_last = i == len(events) - 1
+        envelope_ends_here = ev.event_type == "zone_exit" or is_last
+        next_starts_new = (
+            i + 1 < len(events) and events[i + 1].event_type == "zone_entry"
+        )
+        if envelope_ends_here or next_starts_new:
+            close_idx = i if envelope_ends_here else i
+            moored_idx = next(
+                (
+                    j
+                    for j in range(envelope_start, close_idx + 1)
+                    if events[j].event_type == "moored"
+                ),
+                None,
+            )
+            if moored_idx is None:
+                for j in range(envelope_start, close_idx + 1):
+                    sides[j] = "no_moored"
+            else:
+                for j in range(envelope_start, close_idx + 1):
+                    if j < moored_idx:
+                        sides[j] = "pre"
+                    elif j == moored_idx:
+                        sides[j] = "moored"
+                    else:
+                        sides[j] = "post"
+            envelope_start = i + 1
+    return sides
+
+
 async def _process_vessel(
     pool: asyncpg.Pool,
     mmsi: int,
     fixes: list[Fix],
     nearest_berth,
     terminal_zone_map: dict[int, str],
+    terminal_flow_map: dict[int, str],
     design_draught: dict[int, float | None],
     draught_lookup,
     summary: dict[str, Any],
@@ -266,10 +316,11 @@ async def _process_vessel(
         logger.error("MMSI %s: event sequence invalid: %s", mmsi, e)
         raise
 
+    sides = _classify_envelope_sides(events)
     rows = []
     has_moored = False
     has_departed = False
-    for ev in events:
+    for ev, side in zip(events, sides, strict=True):
         zone = terminal_zone_map.get(ev.terminal_id)
         if zone is None:
             # Terminal exists but has no zone assignment (e.g., out-of-scope
@@ -281,7 +332,14 @@ async def _process_vessel(
                 ev.terminal_id,
             )
             continue
-        laden = laden_at(mmsi, ev.event_time, design_draught.get(mmsi), draught_lookup)
+        laden, laden_source = infer_laden(
+            mmsi,
+            ev.event_time,
+            side,
+            terminal_flow_map.get(ev.terminal_id),
+            design_draught.get(mmsi),
+            draught_lookup,
+        )
         rows.append(
             (
                 mmsi,
@@ -292,6 +350,7 @@ async def _process_vessel(
                 ev.lat,
                 ev.lon,
                 laden,
+                laden_source,
                 ev.cold_start,
             )
         )
@@ -369,6 +428,7 @@ async def _emit_fsru_moored(
                     first["lat"],
                     first["lon"],
                     None,  # FSRUs: laden_flag NULL (they don't ballast in/out)
+                    None,  # laden_source NULL (no inference attempted)
                     True,  # cold_start = TRUE — they've been moored since before data
                 )
             )

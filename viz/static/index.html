@@ -239,12 +239,28 @@
         }
         const name = v.vessel_name || 'Unknown';
         const sog = v.sog != null ? v.sog.toFixed(1) + ' kn' : '?';
+        // Draught line: "Draught: cur / design m" with laden/ballast hint.
+        // Threshold is 0.85 × design — flagged in the colour of the value.
+        let draughtLine = '';
+        if (v.current_draught != null || v.design_draught != null) {
+          const cur = v.current_draught != null ? v.current_draught.toFixed(1) : '?';
+          const dsn = v.design_draught != null ? v.design_draught.toFixed(1) : '?';
+          let hint = '';
+          if (v.current_draught != null && v.design_draught != null) {
+            const ratio = v.current_draught / v.design_draught;
+            const laden = ratio >= 0.85;
+            hint = ` <span style="color:${laden ? '#16a085' : '#7f8c8d'};font-weight:600;">(${laden ? 'laden' : 'ballast'})</span>`;
+          }
+          draughtLine = `<br>Draught: ${cur} / ${dsn} m${hint}`;
+        }
         marker.bindPopup(
           `<b>${name}</b><br>MMSI: ${v.mmsi}`
           + (v.imo ? `<br>IMO: ${v.imo}` : '')
           + (v.vf_vessel_type ? `<br>Type: ${v.vf_vessel_type}` : '')
           + (v.flag ? `<br>Flag: ${v.flag}` : '')
-          + `<br>SOG: ${sog}<br>${fmtTimeFull(v.fix_ts)}`
+          + `<br>SOG: ${sog}`
+          + draughtLine
+          + `<br>${fmtTimeFull(v.fix_ts)}`
         );
         marker.on('click', () => selectVessel(v.mmsi, name));
         marker.addTo(isUnknown ? unknownLayer : vesselLayer);
