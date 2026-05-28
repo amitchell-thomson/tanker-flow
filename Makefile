@@ -29,7 +29,8 @@ seed-zones:
 	PYTHONPATH=. uv run python db/seed/import_terminal_zones.py
 
 ingest:
-	@uv run python -m ingestion.aisstream >/dev/null 2>&1 & \
+	@mkdir -p logs
+	@uv run python -m ingestion.aisstream >> logs/ingestion.log 2>&1 & \
 	INGEST_PID=$$!; \
 	uv run python -m viz.tui; \
 	kill $$INGEST_PID 2>/dev/null || true
