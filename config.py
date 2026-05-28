@@ -21,21 +21,28 @@ class Settings(BaseSettings):
 settings = Settings()  # type: ignore
 
 
-# AISstream bounding boxes — [[sw_lat, sw_lon], [ne_lat, ne_lon]]
-# Derived from terminal_zones extents with ~0.5° padding.
-AIS_BOUNDING_BOXES = [
+# Geographic zones: (name, lat_min, lat_max, lon_min, lon_max).
+# Source of truth for: AISstream subscription bboxes, in-process fix classification
+# at ingest time, and the TUI's per-zone breakdown. Padded ~0.5° around terminal extents.
+ZONES: list[tuple[str, float, float, float, float]] = [
     # US Gulf: Corpus Christi, Freeport, Calcasieu Pass, Golden Pass, Sabine Pass, Plaquemines
-    [[27.0, -98.0], [30.5, -88.5]],
+    ("usgulf", 27.0, 30.5, -98.0, -88.5),
     # US Atlantic: Elba Island (GA), Cove Point (MD)
-    [[31.5, -82.0], [39.0, -75.5]],
+    ("usatlantic", 31.5, 39.0, -82.0, -75.5),
     # Iberian Atlantic: Sines (PT), Huelva, Bilbao (ES)
-    [[36.5, -10.0], [44.0, -2.5]],
+    ("iberian", 36.5, 44.0, -10.0, -2.5),
     # NW Europe: South Hook, Isle of Grain, Dunkirk, Zeebrugge, Gate/Rotterdam, Eemshaven, Wilhelmshaven, Brunsbuttel
-    [[50.5, -6.0], [54.5, 10.0]],
+    ("nweurope", 50.5, 54.5, -6.0, 10.0),
     # Baltic: Mukran (DE), Swinoujscie (PL), Klaipeda FSRU (LT, ~55.74N 20.84E)
-    [[53.5, 13.0], [56.2, 21.5]],
+    ("baltic", 53.5, 56.2, 13.0, 21.5),
     # W Mediterranean: Cartagena, Sagunto, Barcelona (ES), Piombino (IT), Krk (HR)
-    [[36.0, -2.0], [46.0, 15.0]],
+    ("wmed", 36.0, 46.0, -2.0, 15.0),
     # E Mediterranean: Revithoussa, Alexandroupolis (GR)
-    [[37.0, 22.5], [41.5, 26.5]],
+    ("emed", 37.0, 41.5, 22.5, 26.5),
+]
+
+
+AIS_BOUNDING_BOXES = [
+    [[lat_min, lon_min], [lat_max, lon_max]]
+    for _, lat_min, lat_max, lon_min, lon_max in ZONES
 ]

@@ -140,6 +140,48 @@ CREATE TABLE ingestion_heartbeat (
     last_heartbeat  TIMESTAMPTZ      NOT NULL
 );
 
+-- Ingestion lifecycle events: append-only.
+-- event_type values: 'connect','subscribed','planned_reconnect','disconnect','error','final_flush'
+CREATE TABLE ingestion_events (
+    event_ts        TIMESTAMPTZ      NOT NULL DEFAULT now(),
+    source          TEXT             NOT NULL,
+    event_type      TEXT             NOT NULL,
+    detail          JSONB
+);
+SELECT create_hypertable('ingestion_events', 'event_ts');
+SELECT set_chunk_time_interval('ingestion_events', INTERVAL '7 days');
+CREATE INDEX ON ingestion_events (source, event_ts DESC);
+CREATE INDEX ON ingestion_events (source, event_type, event_ts DESC);
+
+-- Per-minute ingestion stats: one row per (source, bucket).
+-- Written by the in-process MinuteAggregator when a minute boundary is crossed.
+CREATE TABLE ingestion_stats_minute (
+    bucket                      TIMESTAMPTZ NOT NULL,
+    source                      TEXT        NOT NULL,
+    fix_count                   INTEGER     NOT NULL,
+    distinct_mmsi               INTEGER     NOT NULL,
+    mean_lag_s                  REAL,
+    p95_lag_s                   REAL,
+    max_raw_q                   INTEGER,
+    seconds_since_last_message  INTEGER,
+    current_connection_age_s    INTEGER,
+    PRIMARY KEY (source, bucket)
+);
+SELECT create_hypertable('ingestion_stats_minute', 'bucket');
+SELECT set_chunk_time_interval('ingestion_stats_minute', INTERVAL '7 days');
+
+-- Per-minute per-zone fix counts: one row per (source, bucket, zone).
+-- Drives the TUI's per-zone breakdown without re-scanning ais_fixes.
+CREATE TABLE ingestion_zone_minute (
+    bucket          TIMESTAMPTZ NOT NULL,
+    source          TEXT        NOT NULL,
+    zone            TEXT        NOT NULL,
+    fix_count       INTEGER     NOT NULL,
+    PRIMARY KEY (source, bucket, zone)
+);
+SELECT create_hypertable('ingestion_zone_minute', 'bucket');
+SELECT set_chunk_time_interval('ingestion_zone_minute', INTERVAL '7 days');
+
 
 -- Continuous aggregates for ingestion monitoring
 CREATE MATERIALIZED VIEW fixes_per_minute
