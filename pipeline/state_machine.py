@@ -93,6 +93,12 @@ class _Walker:
     state: State = State.TRANSIT
     terminal_id: int | None = None
 
+    # Set when the vessel's most recent fix was resolved to an anchorage
+    # polygon for the current terminal. Flips on every polygon-boundary cross
+    # and fires anchorage_entry / anchorage_exit events (raw — no dwell, no
+    # SOG filter; users can dedupe at query time).
+    in_anchorage: bool = False
+
     # Pending-transition tracking: when we observe a fix that *could* be the
     # start of a transition, record (candidate_state, first_qualifying_ts).
     # On a fix that breaks the qualification, drop the pending transition.
@@ -268,11 +274,27 @@ class _Walker:
             and new_tid != self.terminal_id
         ):
             if self._can_reattribute_envelope_to(new_tid):
+                # The current envelope's events were all ambiguous and the new
+                # terminal was in every candidate set — rewrite in place. The
+                # in_anchorage flag stays as-is because the new terminal's
+                # polygons cover the same point.
                 self._rewrite_envelope_to(new_tid)
                 self.terminal_id = new_tid
                 self.state = State.IN_ENVELOPE
                 self.clear_pending()
             else:
+                # Real terminal switch. Flush anchorage_exit before zone_exit
+                # so the DFA stays well-formed.
+                if self.in_anchorage:
+                    self.emit(
+                        "anchorage_exit",
+                        fix.fix_ts,
+                        self.terminal_id,
+                        fix.lat,
+                        fix.lon,
+                        candidate_terminal_ids=_candidate_terminals(fix.zones),
+                    )
+                    self.in_anchorage = False
                 self.emit("zone_exit", fix.fix_ts, self.terminal_id, fix.lat, fix.lon)
                 self.state = State.TRANSIT
                 self.terminal_id = None
@@ -290,6 +312,37 @@ class _Walker:
                 candidate_terminal_ids=_candidate_terminals(fix.zones),
             )
             self.clear_pending()
+
+        # Raw polygon-crossing events for the anchorage. Only tracked while
+        # the vessel is in IN_ENVELOPE or ANCHORED — once the vessel is
+        # MOORED or DEPARTED, anchorage polygon membership is irrelevant
+        # (the vessel is conceptually at the berth, and stray fixes in
+        # adjacent anchorage geometry from jitter or overlap would otherwise
+        # produce spurious anchorage_entry/exit events).
+        if self.state in (State.IN_ENVELOPE, State.ANCHORED):
+            if zt == "anchorage" and not self.in_anchorage:
+                self.emit(
+                    "anchorage_entry",
+                    fix.fix_ts,
+                    self.terminal_id,
+                    fix.lat,
+                    fix.lon,
+                    candidate_terminal_ids=_candidate_terminals(fix.zones),
+                )
+                self.in_anchorage = True
+            elif zt != "anchorage" and self.in_anchorage:
+                self.emit(
+                    "anchorage_exit",
+                    fix.fix_ts,
+                    self.terminal_id,
+                    fix.lat,
+                    fix.lon,
+                    candidate_terminal_ids=_candidate_terminals(fix.zones),
+                )
+                self.in_anchorage = False
+                if self.state == State.ANCHORED:
+                    self.state = State.IN_ENVELOPE
+                    self.clear_pending()
 
         # We're inside terminal_id's envelope. Drive substate transitions.
         self._step_in_envelope(fix, zt)
@@ -319,10 +372,15 @@ class _Walker:
                 cold_start=True,
                 candidate_terminal_ids=candidates,
             )
-        elif zt == "anchorage" and sog < self.thresholds.anchored_max_sog:
-            self.state = State.ANCHORED
+        elif zt == "anchorage":
+            # Cold-start in anchorage: mark the anchorage_entry too (the real
+            # crossing happened before our data window). If stationary enough,
+            # also fire the dwell-confirmed `anchored`; otherwise stay in
+            # IN_ENVELOPE and let the normal walk emit anchored if/when dwell
+            # is satisfied.
+            self.in_anchorage = True
             self.emit(
-                "anchored",
+                "anchorage_entry",
                 fix.fix_ts,
                 tid,
                 fix.lat,
@@ -330,6 +388,19 @@ class _Walker:
                 cold_start=True,
                 candidate_terminal_ids=candidates,
             )
+            if sog < self.thresholds.anchored_max_sog:
+                self.state = State.ANCHORED
+                self.emit(
+                    "anchored",
+                    fix.fix_ts,
+                    tid,
+                    fix.lat,
+                    fix.lon,
+                    cold_start=True,
+                    candidate_terminal_ids=candidates,
+                )
+            else:
+                self.state = State.IN_ENVELOPE
         else:
             self.state = State.IN_ENVELOPE
 
@@ -338,7 +409,11 @@ class _Walker:
             return
         # Fix outside ALL polygons of the current terminal — visit envelope
         # closes. (AIS dropouts don't fire this because they produce no fix at
-        # all; only an actual fix outside can close the envelope.)
+        # all; only an actual fix outside can close the envelope.) Flush
+        # anchorage_exit first if we were still inside the anchorage polygon.
+        if self.in_anchorage:
+            self.emit("anchorage_exit", fix.fix_ts, self.terminal_id, fix.lat, fix.lon)
+            self.in_anchorage = False
         self.emit("zone_exit", fix.fix_ts, self.terminal_id, fix.lat, fix.lon)
         self.state = State.TRANSIT
         self.terminal_id = None
@@ -498,8 +573,10 @@ def _reattribute_envelope(events: list[Event], start: int, end: int) -> None:
 
 _ALLOWED_NEXT = {
     None: {"zone_entry"},
-    "zone_entry": {"anchored", "moored", "zone_exit"},
-    "anchored": {"moored", "zone_exit"},
+    "zone_entry": {"anchorage_entry", "moored", "zone_exit"},
+    "anchorage_entry": {"anchored", "anchorage_exit"},
+    "anchored": {"anchorage_exit"},  # must exit anchorage before any other transition
+    "anchorage_exit": {"anchorage_entry", "moored", "zone_exit"},
     "moored": {"departed", "zone_exit"},
     "departed": {
         "zone_exit",

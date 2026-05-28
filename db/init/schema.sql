@@ -119,7 +119,10 @@ CREATE TABLE port_events (
     cold_start      BOOLEAN          NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ      DEFAULT now(),
     CONSTRAINT valid_event_type CHECK (
-        event_type IN ('zone_entry','anchored','moored','departed','zone_exit')
+        event_type IN (
+            'zone_entry','anchorage_entry','anchored','anchorage_exit',
+            'moored','departed','zone_exit'
+        )
     ),
     CONSTRAINT valid_zone CHECK (zone IN ('usgulf','usatlantic','nweurope','baltic','iberian','wmed','emed'))
 );
