@@ -19,6 +19,11 @@ dependencies = [
     "alembic>=1.18.4",
     "textual>=8.2.7",
     "textual-plot>=0.10.1",
+    "shapely>=2.0",
+    "scipy>=1.17.1",
+    "pillow>=12.2.0",
+    "matplotlib>=3.10.9",
+    "datashader>=0.19.1",
 ]
 
 [dependency-groups]
