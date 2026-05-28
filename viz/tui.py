@@ -48,18 +48,7 @@ class _Settings(BaseSettings):
 settings = _Settings()  # type: ignore
 
 
-# Zone classification — must match config.AIS_BOUNDING_BOXES and terminals.zone values.
-# Order matters only if boxes overlap; current boxes don't.
-_ZONES: list[tuple[str, float, float, float, float]] = [
-    # (zone_name, lat_min, lat_max, lon_min, lon_max)
-    ("usgulf", 27.0, 30.5, -98.0, -88.5),
-    ("usatlantic", 31.5, 39.0, -82.0, -75.5),
-    ("iberian", 36.5, 44.0, -10.0, -2.5),
-    ("nweurope", 50.5, 54.5, -6.0, 10.0),
-    ("baltic", 53.5, 56.2, 13.0, 21.5),
-    ("wmed", 36.0, 46.0, -2.0, 15.0),
-    ("emed", 37.0, 41.5, 22.5, 26.5),
-]
+from config import ZONES as _ZONES  # noqa: E402
 
 _ZONE_COLORS: dict[str, str] = {
     "usgulf": "bright_magenta",
@@ -70,15 +59,6 @@ _ZONE_COLORS: dict[str, str] = {
     "wmed": "bright_blue",
     "emed": "white",
 }
-
-_ZONE_CASE_SQL = (
-    "CASE\n"
-    + "\n".join(
-        f"  WHEN lat BETWEEN {lat_min} AND {lat_max} AND lon BETWEEN {lon_min} AND {lon_max} THEN '{name}'"
-        for name, lat_min, lat_max, lon_min, lon_max in _ZONES
-    )
-    + "\nEND"
-)
 
 
 class _MinAgoFormatter(AxisFormatter):
@@ -362,23 +342,12 @@ class TankerFlowApp(App):
         if not self._pool:
             return
 
-        # Use nweurope tile (widest) to determine fetch window — the small tiles
-        # would otherwise pin us to too-short a history.
-        chart = self.query_one("#chart-nweurope", _MiniPlot)
-        plot_width = chart._scale_rectangle.width or max(chart.size.width - 2, 1)
-        minutes_back = max(60, min(plot_width * 4, 1440))
+        minutes_back = 90
+        hours_back = 72
+        v_minutes_back = 90
 
         lt_chart = self.query_one("#longterm-chart", _XAxisPlot)
-        lt_plot_width = lt_chart._scale_rectangle.width or max(
-            lt_chart.size.width - 12, 1
-        )
-        hours_back = max(24, min(lt_plot_width * 2, 24 * 90))
-
         vessels_chart = self.query_one("#vessels-chart", _XAxisPlot)
-        v_plot_width = vessels_chart._scale_rectangle.width or max(
-            vessels_chart.size.width - 12, 1
-        )
-        v_minutes_back = max(60, min(v_plot_width * 4, 1440))
 
         try:
             (
@@ -400,14 +369,11 @@ class TankerFlowApp(App):
                     "SELECT COUNT(*) FROM ais_fixes WHERE fix_ts > now() - INTERVAL '5 minutes'"
                 ),
                 self._pool.fetch(
-                    f"""
-                        SELECT
-                          time_bucket('1 minute', fix_ts) AS bucket,
-                          {_ZONE_CASE_SQL} AS zone,
-                          COUNT(*) AS cnt
-                        FROM ais_fixes
-                        WHERE fix_ts > now() - $1 * INTERVAL '1 minute'
-                        GROUP BY bucket, zone
+                    """
+                        SELECT bucket, zone, fix_count AS cnt
+                        FROM ingestion_zone_minute
+                        WHERE source = 'aisstream'
+                          AND bucket > now() - $1 * INTERVAL '1 minute'
                         """,
                     minutes_back,
                 ),
@@ -422,15 +388,12 @@ class TankerFlowApp(App):
                 ),
                 self._pool.fetch(
                     """
-                        SELECT time_bucket('1 minute', server_ts) AS bucket,
-                               AVG(EXTRACT(EPOCH FROM (server_ts - fix_ts))) AS mean_s,
-                               percentile_cont(0.95) WITHIN GROUP (
-                                   ORDER BY EXTRACT(EPOCH FROM (server_ts - fix_ts))
-                               ) AS p95_s
-                        FROM ais_fixes
-                        WHERE server_ts > now() - $1 * INTERVAL '1 minute'
-                          AND source = 'aisstream'
-                        GROUP BY bucket
+                        SELECT bucket,
+                               mean_lag_s AS mean_s,
+                               p95_lag_s  AS p95_s
+                        FROM ingestion_stats_minute
+                        WHERE source = 'aisstream'
+                          AND bucket > now() - $1 * INTERVAL '1 minute'
                         ORDER BY bucket ASC
                         """,
                     v_minutes_back,
