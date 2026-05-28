@@ -5,32 +5,71 @@
   <title>Tanker Flow</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <style>
-    body { margin: 0; background: #1a1a2e; }
-    #map { height: 100vh; width: 100vw; }
+    body { margin: 0; background: #1a1a2e; font-family: -apple-system, BlinkMacSystemFont, sans-serif; color: #ecf0f1; }
+    #layout { display: flex; height: 100vh; width: 100vw; }
+    #map { flex: 1; height: 100vh; }
+    #events-panel {
+      width: 360px;
+      height: 100vh;
+      background: #1f2733;
+      border-left: 1px solid #2c3e50;
+      display: flex;
+      flex-direction: column;
+      font-size: 13px;
+    }
+    #events-header {
+      padding: 10px 12px;
+      border-bottom: 1px solid #2c3e50;
+      font-weight: 600;
+      font-size: 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    #events-count { color: #7f8c8d; font-weight: normal; font-size: 12px; }
+    #events-filters {
+      padding: 8px 12px;
+      border-bottom: 1px solid #2c3e50;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    #events-filters select {
+      background: #2c3e50;
+      color: #ecf0f1;
+      border: 1px solid #3a4a5a;
+      border-radius: 3px;
+      padding: 3px 6px;
+      font-size: 12px;
+    }
+    #events-list { flex: 1; overflow-y: auto; }
+    .event-row {
+      padding: 8px 12px;
+      border-bottom: 1px solid #2a3340;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .event-row:hover { background: #29333f; }
+    .event-row.selected { background: #2d3e50; border-left: 3px solid #3498db; padding-left: 9px; }
+    .event-row-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+    .event-vessel { font-weight: 600; color: #ecf0f1; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .event-time { color: #7f8c8d; font-size: 11px; font-family: monospace; white-space: nowrap; }
+    .event-row-bottom { display: flex; gap: 6px; align-items: center; font-size: 12px; }
+    .event-pill { padding: 1px 6px; border-radius: 3px; font-size: 11px; font-family: monospace; }
+    .event-terminal { color: #95a5a6; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .badge { padding: 1px 5px; border-radius: 2px; font-size: 10px; font-weight: 600; }
+    .badge-laden { background: #16a085; color: white; }
+    .badge-ballast { background: #34495e; color: #95a5a6; }
+    .badge-cold { background: #e67e22; color: white; }
+    .badge-fsru { background: #e74c3c; color: white; }
     #reset-btn {
       display: none;
       position: absolute;
       top: 10px;
-      right: 10px;
+      right: 370px;
       z-index: 1000;
-      padding: 8px 16px;
-      background: #2c3e50;
-      color: #ecf0f1;
-      border: 1px solid #7f8c8d;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 14px;
-    }
-    #reset-btn:hover { background: #34495e; }
-    #layer-controls {
-      position: absolute;
-      top: 10px;
-      left: 50px;
-      z-index: 1000;
-      display: flex;
-      gap: 8px;
-    }
-    .layer-btn {
       padding: 6px 12px;
       background: #2c3e50;
       color: #ecf0f1;
@@ -39,33 +78,96 @@
       cursor: pointer;
       font-size: 13px;
     }
+    #reset-btn:hover { background: #34495e; }
+    #layer-controls {
+      position: absolute;
+      top: 10px;
+      left: 50px;
+      z-index: 1000;
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .layer-btn {
+      padding: 5px 10px;
+      background: #2c3e50;
+      color: #ecf0f1;
+      border: 1px solid #7f8c8d;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 12px;
+    }
     .layer-btn.active { border-color: #3498db; color: #3498db; }
     .layer-btn:hover { background: #34495e; }
     #status {
       position: absolute;
       bottom: 10px;
-      left: 50%;
-      transform: translateX(-50%);
+      left: 10px;
       z-index: 1000;
-      padding: 4px 12px;
-      background: rgba(0,0,0,0.6);
+      padding: 4px 10px;
+      background: rgba(0,0,0,0.65);
       color: #bdc3c7;
       border-radius: 4px;
-      font-size: 12px;
+      font-size: 11px;
       font-family: monospace;
     }
+    /* Event-type color pills (also used as the map icon colors) */
+    .et-zone_entry      { background: #27ae60; color: white; }
+    .et-anchorage_entry { background: #2980b9; color: white; }
+    .et-anchored        { background: #1a5490; color: white; }
+    .et-anchorage_exit  { background: #5dade2; color: white; }
+    .et-moored          { background: #e67e22; color: white; }
+    .et-departed        { background: #d35400; color: white; }
+    .et-zone_exit       { background: #c0392b; color: white; }
   </style>
 </head>
 <body>
-  <div id="map"></div>
+  <div id="layout">
+    <div id="map"></div>
+    <div id="events-panel">
+      <div id="events-header">
+        <span>Port events</span>
+        <span id="events-count">…</span>
+      </div>
+      <div id="events-filters">
+        <select id="filter-zone">
+          <option value="">All zones</option>
+          <option value="usgulf">usgulf</option>
+          <option value="usatlantic">usatlantic</option>
+          <option value="nweurope">nweurope</option>
+          <option value="baltic">baltic</option>
+          <option value="iberian">iberian</option>
+          <option value="wmed">wmed</option>
+          <option value="emed">emed</option>
+        </select>
+        <select id="filter-event-type">
+          <option value="">All types</option>
+          <option value="zone_entry">zone_entry</option>
+          <option value="anchorage_entry">anchorage_entry</option>
+          <option value="anchored">anchored</option>
+          <option value="anchorage_exit">anchorage_exit</option>
+          <option value="moored">moored</option>
+          <option value="departed">departed</option>
+          <option value="zone_exit">zone_exit</option>
+        </select>
+        <select id="filter-since">
+          <option value="">All time</option>
+          <option value="6">last 6h</option>
+          <option value="24" selected>last 24h</option>
+          <option value="168">last 7d</option>
+        </select>
+      </div>
+      <div id="events-list">Loading…</div>
+    </div>
+  </div>
   <button id="reset-btn" onclick="resetView()">Show all vessels</button>
   <div id="layer-controls">
-    <button class="layer-btn active" id="btn-zones"     onclick="toggleLayer('zones')">Terminal zones</button>
-    <button class="layer-btn active" id="btn-boxes"     onclick="toggleLayer('boxes')">AIS boxes</button>
-    <button class="layer-btn active" id="btn-vessels"   onclick="toggleLayer('vessels')">Vessels</button>
-    <button class="layer-btn active" id="btn-unknown"   onclick="toggleLayer('unknown')">Unknown vessels</button>
+    <button class="layer-btn active" id="btn-zones"   onclick="toggleLayer('zones')">Terminal zones</button>
+    <button class="layer-btn active" id="btn-boxes"   onclick="toggleLayer('boxes')">AIS boxes</button>
+    <button class="layer-btn active" id="btn-vessels" onclick="toggleLayer('vessels')">Vessels</button>
+    <button class="layer-btn active" id="btn-unknown" onclick="toggleLayer('unknown')">Unknown vessels</button>
   </div>
-  <div id="status">Loading...</div>
+  <div id="status">Loading…</div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
     const map = L.map('map').setView([25, -30], 3);
@@ -79,132 +181,154 @@
     const zonesLayer   = L.layerGroup().addTo(map);
     const boxesLayer   = L.layerGroup().addTo(map);
     let trackLayer = null;
+    let eventMarkersLayer = null;
     const markers = {};
 
     const layers = { vessels: vesselLayer, unknown: unknownLayer, zones: zonesLayer, boxes: boxesLayer };
 
+    // Color (and CSS class suffix) per event_type. Stays in sync with the
+    // .et-* CSS classes above.
+    const EVENT_COLORS = {
+      zone_entry:      '#27ae60',
+      anchorage_entry: '#2980b9',
+      anchored:        '#1a5490',
+      anchorage_exit:  '#5dade2',
+      moored:          '#e67e22',
+      departed:        '#d35400',
+      zone_exit:       '#c0392b',
+    };
+
     function toggleLayer(name) {
       const btn = document.getElementById('btn-' + name);
       const layer = layers[name];
-      if (map.hasLayer(layer)) {
-        map.removeLayer(layer);
-        btn.classList.remove('active');
-      } else {
-        map.addLayer(layer);
-        btn.classList.add('active');
-      }
+      if (map.hasLayer(layer)) { map.removeLayer(layer); btn.classList.remove('active'); }
+      else { map.addLayer(layer); btn.classList.add('active'); }
     }
 
-    function setStatus(msg) {
-      document.getElementById('status').textContent = msg;
+    function setStatus(msg) { document.getElementById('status').textContent = msg; }
+    function fmtTimeShort(iso) {
+      const d = new Date(iso);
+      return d.toISOString().slice(5, 16).replace('T', ' ');
     }
+    function fmtTimeFull(iso) { return new Date(iso).toUTCString().replace(' GMT', ' UTC'); }
 
-    function formatTime(iso) {
-      return new Date(iso).toUTCString().replace(' GMT', ' UTC');
-    }
+    // ----------------------------------------------------------------
+    // Vessel display
+    // ----------------------------------------------------------------
 
     async function loadVessels() {
-      setStatus('Fetching vessels...');
+      setStatus('Fetching vessels…');
       const vessels = await fetch('/api/vessels').then(r => r.json());
       vessels.forEach(v => {
         const isUnknown = !v.vessel_name;
-        const color = v.is_fsru ? '#e74c3c'
-                    : v.is_lng_carrier ? '#ff5fa2'
-                    : isUnknown ? '#7f8c8d'
-                    : '#e67e22';
+        const color = v.is_fsru ? '#e74c3c' : v.is_lng_carrier ? '#ff5fa2'
+                    : isUnknown ? '#7f8c8d' : '#e67e22';
         let marker;
         if (v.is_fsru) {
           const icon = L.divIcon({
             className: 'fsru-icon',
             html: `<div style="width:12px;height:12px;background:${color};border:1.5px solid ${color};opacity:0.85;"></div>`,
-            iconSize: [12, 12],
-            iconAnchor: [6, 6],
+            iconSize: [12, 12], iconAnchor: [6, 6],
           });
           marker = L.marker([v.lat, v.lon], { icon });
         } else {
           marker = L.circleMarker([v.lat, v.lon], {
-            radius: 6,
-            color: color,
-            fillColor: color,
-            fillOpacity: 0.85,
-            weight: 1.5,
+            radius: 6, color, fillColor: color, fillOpacity: 0.85, weight: 1.5,
             bubblingMouseEvents: false,
           });
         }
         const name = v.vessel_name || 'Unknown';
         const sog = v.sog != null ? v.sog.toFixed(1) + ' kn' : '?';
         marker.bindPopup(
-          `<b>${name}</b><br>MMSI: ${v.mmsi}` +
-          (v.imo ? `<br>IMO: ${v.imo}` : '') +
-          (v.vf_vessel_type ? `<br>Type: ${v.vf_vessel_type}` : '') +
-          (v.flag ? `<br>Flag: ${v.flag}` : '') +
-          `<br>SOG: ${sog}<br>${formatTime(v.fix_ts)}`
+          `<b>${name}</b><br>MMSI: ${v.mmsi}`
+          + (v.imo ? `<br>IMO: ${v.imo}` : '')
+          + (v.vf_vessel_type ? `<br>Type: ${v.vf_vessel_type}` : '')
+          + (v.flag ? `<br>Flag: ${v.flag}` : '')
+          + `<br>SOG: ${sog}<br>${fmtTimeFull(v.fix_ts)}`
         );
         marker.on('click', () => selectVessel(v.mmsi, name));
         marker.addTo(isUnknown ? unknownLayer : vesselLayer);
         markers[v.mmsi] = marker;
       });
-      setStatus(`${vessels.length} vessels — click a vessel to inspect`);
+      setStatus(`${vessels.length} vessels — click any vessel or event to inspect`);
     }
 
     async function selectVessel(mmsi, name) {
-      setStatus(`Loading track for ${name} (${mmsi})...`);
-
-      Object.entries(markers).forEach(([m, mk]) => {
-        const active = String(m) === String(mmsi);
-        if (mk.setStyle) {
-          mk.setStyle({ opacity: active ? 1 : 0.12, fillOpacity: active ? 0.85 : 0.12 });
-        } else {
-          mk.setOpacity(active ? 1 : 0.12);
-        }
-      });
-
-      if (trackLayer) { map.removeLayer(trackLayer); trackLayer = null; }
-
+      setStatus(`Loading track for ${name} (${mmsi})…`);
+      dimAllExcept(mmsi);
+      clearTrackAndEvents();
       const history = await fetch(`/api/vessel/${mmsi}/history`).then(r => r.json());
       if (!history.length) { setStatus('No history found'); return; }
-
-      const coords = history.map(h => [h.lat, h.lon]);
-      trackLayer = L.layerGroup();
-      L.polyline(coords, { color: '#3498db', weight: 2, opacity: 0.8, bubblingMouseEvents: false }).addTo(trackLayer);
-      history.forEach((h, i) => {
-        const isNewest = i === 0;
-        L.circleMarker([h.lat, h.lon], {
-          radius: isNewest ? 5 : 3,
-          color: isNewest ? '#2ecc71' : '#3498db',
-          fillColor: isNewest ? '#2ecc71' : '#3498db',
-          fillOpacity: 0.7,
-          weight: 1,
-          bubblingMouseEvents: false,
-        }).addTo(trackLayer);
-      });
-      trackLayer.addTo(map);
-      map.fitBounds(L.latLngBounds(coords).pad(0.2));
-
+      drawTrack(history);
+      map.fitBounds(L.latLngBounds(history.map(h => [h.lat, h.lon])).pad(0.2));
       document.getElementById('reset-btn').style.display = 'block';
       setStatus(`${name} — last ${history.length} fixes`);
     }
 
-    map.on('click', () => {
-      if (trackLayer) resetView();
-    });
-
-    function resetView() {
+    function dimAllExcept(mmsi) {
+      Object.entries(markers).forEach(([m, mk]) => {
+        const active = String(m) === String(mmsi);
+        if (mk.setStyle) mk.setStyle({ opacity: active ? 1 : 0.12, fillOpacity: active ? 0.85 : 0.12 });
+        else mk.setOpacity(active ? 1 : 0.12);
+      });
+    }
+    function undim() {
       Object.values(markers).forEach(mk => {
         if (mk.setStyle) mk.setStyle({ opacity: 1, fillOpacity: 0.85 });
         else mk.setOpacity(1);
       });
-      if (trackLayer) { map.removeLayer(trackLayer); trackLayer = null; }
-      document.getElementById('reset-btn').style.display = 'none';
-      setStatus(`${Object.keys(markers).length} vessels — click a vessel to inspect`);
     }
+
+    function clearTrackAndEvents() {
+      if (trackLayer)        { map.removeLayer(trackLayer);        trackLayer = null; }
+      if (eventMarkersLayer) { map.removeLayer(eventMarkersLayer); eventMarkersLayer = null; }
+    }
+
+    function drawTrack(fixes) {
+      // `fixes` is expected in chronological order. /api/vessel/{mmsi}/history
+      // returns newest-first; we sort in case.
+      const sorted = fixes.slice().sort((a, b) => new Date(a.fix_ts) - new Date(b.fix_ts));
+      const coords = sorted.map(h => [h.lat, h.lon]);
+      trackLayer = L.layerGroup();
+      L.polyline(coords, { color: '#3498db', weight: 2, opacity: 0.8, bubblingMouseEvents: false }).addTo(trackLayer);
+      sorted.forEach((h, i) => {
+        const isNewest = i === sorted.length - 1;
+        L.circleMarker([h.lat, h.lon], {
+          radius: isNewest ? 5 : 2,
+          color: isNewest ? '#2ecc71' : '#3498db',
+          fillColor: isNewest ? '#2ecc71' : '#3498db',
+          fillOpacity: 0.7, weight: 1, bubblingMouseEvents: false,
+        }).addTo(trackLayer);
+      });
+      trackLayer.addTo(map);
+    }
+
+    map.on('click', () => { if (trackLayer) resetView(); });
+
+    function resetView() {
+      undim();
+      clearTrackAndEvents();
+      document.getElementById('reset-btn').style.display = 'none';
+      document.querySelectorAll('.event-row.selected').forEach(r => r.classList.remove('selected'));
+      setStatus(`${Object.keys(markers).length} vessels — click any vessel or event to inspect`);
+    }
+
+    // ----------------------------------------------------------------
+    // Terminal zones + AIS boxes
+    // ----------------------------------------------------------------
 
     async function loadTerminalZones() {
       const geojson = await fetch('/api/terminal-zones').then(r => r.json());
       L.geoJSON(geojson, {
-        style: f => f.properties.zone_type === 'berth'
-          ? { color: '#e67e22', fillColor: '#e67e22', fillOpacity: 0.25, weight: 1.5 }
-          : { color: '#3498db', fillColor: '#3498db', fillOpacity: 0.12, weight: 1, dashArray: '4 3' },
+        style: f => {
+          if (f.properties.zone_type === 'berth') {
+            return { color: '#e67e22', fillColor: '#e67e22', fillOpacity: 0.25, weight: 1.5 };
+          }
+          if (f.properties.zone_type === 'approach') {
+            return { color: '#16a085', fillColor: '#16a085', fillOpacity: 0.08, weight: 1, dashArray: '8 4' };
+          }
+          return { color: '#3498db', fillColor: '#3498db', fillOpacity: 0.12, weight: 1, dashArray: '4 3' };
+        },
         onEachFeature: (f, layer) => {
           const p = f.properties;
           const label = p.sub_zone > 0 ? ` (${p.zone_type} ${p.sub_zone})` : ` (${p.zone_type})`;
@@ -215,14 +339,117 @@
 
     async function loadBoundingBoxes() {
       const geojson = await fetch('/api/bounding-boxes').then(r => r.json());
-      L.geoJSON(geojson, {
-        style: { color: '#95a5a6', fillOpacity: 0, weight: 1, dashArray: '6 4' },
-      }).addTo(boxesLayer);
+      L.geoJSON(geojson, { style: { color: '#95a5a6', fillOpacity: 0, weight: 1, dashArray: '6 4' } }).addTo(boxesLayer);
     }
+
+    // ----------------------------------------------------------------
+    // Events panel
+    // ----------------------------------------------------------------
+
+    let lastEvents = [];
+
+    function eventQueryString() {
+      const params = new URLSearchParams();
+      const z = document.getElementById('filter-zone').value;
+      const e = document.getElementById('filter-event-type').value;
+      const s = document.getElementById('filter-since').value;
+      if (z) params.set('zone', z);
+      if (e) params.set('event_type', e);
+      if (s) params.set('since_hours', s);
+      params.set('limit', '200');
+      return params.toString();
+    }
+
+    async function loadEvents() {
+      const list = document.getElementById('events-list');
+      list.innerHTML = 'Loading…';
+      const events = await fetch('/api/port-events?' + eventQueryString()).then(r => r.json());
+      lastEvents = events;
+      document.getElementById('events-count').textContent = `${events.length}`;
+      list.innerHTML = '';
+      if (!events.length) { list.textContent = 'No matching events.'; return; }
+      events.forEach(ev => {
+        const row = document.createElement('div');
+        row.className = 'event-row';
+        row.dataset.id = ev.id;
+        const name = (ev.vessel_name || '').trim() || `MMSI ${ev.mmsi}`;
+        const terminal = ev.terminal_name || `terminal ${ev.terminal_id ?? '?'}`;
+        const badges = [];
+        if (ev.cold_start) badges.push('<span class="badge badge-cold">cold</span>');
+        if (ev.is_fsru) badges.push('<span class="badge badge-fsru">FSRU</span>');
+        if (ev.laden_flag === true) badges.push('<span class="badge badge-laden">laden</span>');
+        else if (ev.laden_flag === false) badges.push('<span class="badge badge-ballast">ballast</span>');
+        row.innerHTML = `
+          <div class="event-row-top">
+            <span class="event-vessel">${name}</span>
+            <span class="event-time">${fmtTimeShort(ev.event_time)}</span>
+          </div>
+          <div class="event-row-bottom">
+            <span class="event-pill et-${ev.event_type}">${ev.event_type}</span>
+            <span class="event-terminal">${terminal} · ${ev.zone}</span>
+            ${badges.join('')}
+          </div>
+        `;
+        row.addEventListener('click', () => selectEvent(ev, row));
+        list.appendChild(row);
+      });
+    }
+
+    async function selectEvent(ev, row) {
+      document.querySelectorAll('.event-row.selected').forEach(r => r.classList.remove('selected'));
+      row.classList.add('selected');
+      const name = (ev.vessel_name || '').trim() || `MMSI ${ev.mmsi}`;
+      setStatus(`Loading ${name} around ${ev.event_type}…`);
+      dimAllExcept(ev.mmsi);
+      clearTrackAndEvents();
+
+      const tsEnc = encodeURIComponent(ev.event_time);
+      const [track, siblings] = await Promise.all([
+        fetch(`/api/vessel/${ev.mmsi}/track-around?ts=${tsEnc}&hours=6`).then(r => r.json()),
+        fetch(`/api/vessel/${ev.mmsi}/events?ts=${tsEnc}&hours=6`).then(r => r.json()),
+      ]);
+
+      if (track.length) drawTrack(track);
+
+      // Draw event markers along the track; the clicked event is highlighted.
+      eventMarkersLayer = L.layerGroup();
+      siblings.forEach(s => {
+        const isClicked = s.event_type === ev.event_type
+          && new Date(s.event_time).getTime() === new Date(ev.event_time).getTime();
+        const color = EVENT_COLORS[s.event_type] || '#bdc3c7';
+        L.circleMarker([s.lat, s.lon], {
+          radius: isClicked ? 9 : 6,
+          color: isClicked ? '#ffffff' : color,
+          fillColor: color,
+          fillOpacity: 0.95,
+          weight: isClicked ? 2.5 : 1.5,
+          bubblingMouseEvents: false,
+        }).bindTooltip(
+          `<b>${s.event_type}</b><br>${s.terminal_name || ''} (${s.zone})<br>${fmtTimeFull(s.event_time)}`,
+          { sticky: true }
+        ).addTo(eventMarkersLayer);
+      });
+      eventMarkersLayer.addTo(map);
+
+      // Fit bounds to the union of track + event positions
+      const allCoords = track.map(t => [t.lat, t.lon]).concat(siblings.map(s => [s.lat, s.lon]));
+      if (allCoords.length) {
+        map.fitBounds(L.latLngBounds(allCoords).pad(0.25));
+      } else {
+        map.setView([ev.lat, ev.lon], 11);
+      }
+      document.getElementById('reset-btn').style.display = 'block';
+      setStatus(`${name} · ${ev.event_type} at ${ev.terminal_name || ev.zone} · ${siblings.length} events / ${track.length} fixes in ±6h`);
+    }
+
+    ['filter-zone', 'filter-event-type', 'filter-since'].forEach(id => {
+      document.getElementById(id).addEventListener('change', loadEvents);
+    });
 
     loadVessels();
     loadTerminalZones();
     loadBoundingBoxes();
+    loadEvents();
   </script>
 </body>
 </html>
