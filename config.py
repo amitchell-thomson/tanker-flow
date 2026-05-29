@@ -46,25 +46,3 @@ AIS_BOUNDING_BOXES = [
     [[lat_min, lon_min], [lat_max, lon_max]]
     for _, lat_min, lat_max, lon_min, lon_max in ZONES
 ]
-
-
-# AISstream caps concurrent connections per API key at 3 (4th gets HTTP 429).
-# More importantly, a single connection subscribed to all 7 bboxes triggers
-# heavy server-side throttling, decaying to ~600 fixes/min within hours, while
-# a 3-bbox subscription holds ~3300/min indefinitely. To cover all 7 zones we
-# split across 2 concurrent connections: the high-volume "main" 3 zones (no
-# decay) plus the low-volume "secondary" 4. See investigation in the README.
-MAIN_ZONES = ["nweurope", "usgulf", "wmed"]
-SECONDARY_ZONES = ["usatlantic", "iberian", "baltic", "emed"]
-
-
-def bboxes_for_zones(zone_names: list[str]) -> list:
-    by_name = {
-        name: (lat_min, lat_max, lon_min, lon_max)
-        for name, lat_min, lat_max, lon_min, lon_max in ZONES
-    }
-    return [
-        [[lat_min, lon_min], [lat_max, lon_max]]
-        for name in zone_names
-        for lat_min, lat_max, lon_min, lon_max in [by_name[name]]
-    ]

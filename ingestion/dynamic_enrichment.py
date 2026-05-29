@@ -4,9 +4,6 @@ from dataclasses import dataclass, field
 
 import asyncpg
 import httpx
-from shapely import wkb
-from shapely.geometry import Point
-from shapely.strtree import STRtree
 
 from .vesselfinder import enrich_vessel
 
@@ -14,54 +11,23 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class ZoneIndex:
-    """In-process spatial index over terminal_zones, replacing per-message ST_Within calls.
-
-    Why: the previous DB-round-trip-per-PositionReport was the dominant cost on the ingestion
-    hot path, causing TCP backpressure on the AISstream socket and (we suspect) provoking
-    server-side pruning of our vessel subscription. See investigation in the README.
-    """
-
-    tree: STRtree
-    polys: list
-
-    @classmethod
-    async def load(cls, pool: asyncpg.Pool) -> "ZoneIndex":
-        async with pool.acquire() as conn:
-            rows = await conn.fetch("SELECT ST_AsBinary(geom) AS wkb FROM terminal_zones")
-        polys = [wkb.loads(bytes(r["wkb"])) for r in rows]
-        return cls(tree=STRtree(polys), polys=polys)
-
-    def contains(self, lon: float, lat: float) -> bool:
-        p = Point(lon, lat)
-        for idx in self.tree.query(p):
-            if self.polys[idx].contains(p):
-                return True
-        return False
-
-
-@dataclass
 class EnrichmentState:
-    """Tracks which MMSIs are already enriched, queued for enrichment, and the work queue itself."""
+    """Tracks which MMSIs are already enriched, queued for enrichment, and the
+    work queue itself.
+
+    Originally this drove a passive discovery path: `maybe_queue()` watched
+    every fix for an unknown MMSI inside a terminal_zones polygon and queued
+    a VesselFinder lookup. With the move to server-side MMSI filtering on
+    `ingestion/aisstream.py`, unknown MMSIs no longer flow through us at
+    all, so the watch hook is gone — the worker remains so the existing
+    batch path (`ingestion/vesselfinder.py --terminal-only`) and any future
+    feed (e.g. a daily LNG-fleet refresh) can keep dropping MMSIs onto the
+    queue.
+    """
 
     known_mmsis: set[int] = field(default_factory=set)
     queued_mmsis: set[int] = field(default_factory=set)
     queue: asyncio.Queue = field(default_factory=asyncio.Queue)
-
-    def maybe_queue(
-        self,
-        zone_index: ZoneIndex,
-        mmsi: int,
-        lon: float,
-        lat: float,
-    ) -> None:
-        """Queue an MMSI for enrichment if unseen and its fix falls inside a terminal zone."""
-        if mmsi in self.known_mmsis or mmsi in self.queued_mmsis:
-            return
-        if zone_index.contains(lon, lat):
-            self.queue.put_nowait(mmsi)
-            self.queued_mmsis.add(mmsi)
-            logger.debug(f"Queued enrichment: MMSI={mmsi} inside terminal zone")
 
 
 async def load_known_mmsis(pool: asyncpg.Pool) -> set[int]:
