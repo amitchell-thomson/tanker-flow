@@ -266,9 +266,15 @@ _LAT_MERC = 85.0511287798
 # antialiased lines at any size) at ~W·H·32 bytes of transient RGBA memory.
 _DENSITY_MAXPX = 3000
 # Break a vessel's track (insert a NaN gap) when consecutive fixes are more
-# than this far apart in time, so an AIS dropout doesn't draw a straight line
-# across the ocean.
+# than this far apart in time, so a long AIS dropout doesn't draw a straight
+# line across the ocean.
 _TRACK_GAP = timedelta(hours=3)
+# Also break when the implied speed between consecutive fixes exceeds this
+# (knots). An AIS gap shorter than _TRACK_GAP can still teleport a vessel far
+# enough to streak a straight line across land; no LNG carrier exceeds ~21 kn,
+# so anything above this is a coverage hole, not real travel. Generous headroom
+# absorbs timestamp jitter on closely-spaced fixes.
+_MAX_KNOTS = 40.0
 
 # Render only the ingestion footprint — the union of the AIS bounding boxes —
 # rather than the whole globe, so every output pixel lands where the data is.
@@ -287,6 +293,19 @@ def _merc_y(lat: float) -> float:
 def _to_mercator(lat: float, lon: float) -> tuple[float, float]:
     """lat/lon° → Web Mercator x,y (radians)."""
     return math.radians(lon), _merc_y(lat)
+
+
+def _haversine_nm(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in nautical miles."""
+    r_nm = 3440.065  # earth radius in nm
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlam = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dphi / 2) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
+    )
+    return 2 * r_nm * math.asin(math.sqrt(a))
 
 
 # Cached source for the density layer: the parsed segment geometry (one
@@ -311,6 +330,8 @@ async def _density_source(pool: asyncpg.Pool) -> dict:
     ys: list[float] = []
     prev_mmsi: int | None = None
     prev_ts: datetime | None = None
+    prev_lat: float | None = None
+    prev_lon: float | None = None
     async with pool.acquire() as conn:
         async with conn.transaction():
             async for r in conn.cursor(
@@ -324,16 +345,27 @@ async def _density_source(pool: asyncpg.Pool) -> dict:
                 """
             ):
                 mmsi, lat, lon, ts = r["mmsi"], r["lat"], r["lon"], r["fix_ts"]
-                new_track = mmsi != prev_mmsi or (
-                    prev_ts is not None and ts - prev_ts > _TRACK_GAP
-                )
+                same_vessel = mmsi == prev_mmsi
+                # Break the line on a new vessel, a long time gap, or an
+                # implied speed only a coverage hole could produce — the last
+                # catches short gaps that still teleport the vessel over land,
+                # which the time gate alone lets streak across the plot.
+                new_track = not same_vessel
+                if same_vessel and prev_ts is not None:
+                    dt = ts - prev_ts
+                    if dt > _TRACK_GAP:
+                        new_track = True
+                    elif dt.total_seconds() > 0:
+                        dist_nm = _haversine_nm(prev_lat, prev_lon, lat, lon)
+                        if dist_nm / (dt.total_seconds() / 3600) > _MAX_KNOTS:
+                            new_track = True
                 if new_track and prev_mmsi is not None:
                     xs.append(math.nan)
                     ys.append(math.nan)
                 x, y = _to_mercator(lat, lon)
                 xs.append(x)
                 ys.append(y)
-                prev_mmsi, prev_ts = mmsi, ts
+                prev_mmsi, prev_ts, prev_lat, prev_lon = mmsi, ts, lat, lon
 
     df = pd.DataFrame({"x": xs, "y": ys}) if xs else None
 
