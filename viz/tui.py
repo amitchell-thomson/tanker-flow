@@ -50,6 +50,15 @@ settings = _Settings()  # type: ignore
 
 from config import ZONES as _ZONES  # noqa: E402
 
+
+def _classify_zone(lat: float, lon: float) -> str | None:
+    """Mirror of ingestion.metrics.classify_zone — duplicated here to avoid a
+    cross-package import dependency. First match wins."""
+    for name, lat_min, lat_max, lon_min, lon_max in _ZONES:
+        if lat_min <= lat <= lat_max and lon_min <= lon <= lon_max:
+            return name
+    return None
+
 _ZONE_COLORS: dict[str, str] = {
     "usgulf": "bright_magenta",
     "usatlantic": "bright_red",
@@ -280,17 +289,17 @@ class TankerFlowApp(App):
         height: 1fr;
         border: none;
     }
-    #enrich-container {
+    #stale-container {
         width: 1fr;
         border: round #888888;
     }
-    #enrich-label {
+    #stale-label {
         height: 1;
         border: none;
         color: ansi_bright_yellow;
         padding: 0 1;
     }
-    #enrich-table {
+    #stale-table {
         height: 1fr;
         border: none;
     }
@@ -300,10 +309,9 @@ class TankerFlowApp(App):
         super().__init__()
         self._pool: asyncpg.Pool | None = None
         self._view_mode_idx: int = 0
-        # Cache the lifetime COUNT(*) — full table scan on ais_fixes takes
-        # ~400ms on a growing hypertable and the status line doesn't need it
-        # fresh every 2s. Refreshed on a slower timer.
-        self._cached_total: int = 0
+        # Cached on a slow timer — watchlist coverage stats. The numbers don't
+        # change rapidly and the queries touch ais_fixes broadly.
+        self._watchlist_stats: tuple[int, int, int] | None = None  # (watched, reporting_30m, stale_2h)
 
     @property
     def _view_mode(self) -> tuple[int, int, int]:
@@ -344,9 +352,9 @@ class TankerFlowApp(App):
             with Vertical(id="terminal-container"):
                 yield Label("Terminal activity (last 1h)", id="terminal-label")
                 yield DataTable(id="terminal-table")
-            with Vertical(id="enrich-container"):
-                yield Label("Dynamic enrichment — pending: 0", id="enrich-label")
-                yield DataTable(id="enrich-table")
+            with Vertical(id="stale-container"):
+                yield Label("Stale LNG/FSRU vessels", id="stale-label")
+                yield DataTable(id="stale-table")
 
     async def on_mount(self) -> None:
         self.register_theme(_THEME)
@@ -360,15 +368,12 @@ class TankerFlowApp(App):
             "Newest fix",
         )
 
-        enrich_table = self.query_one("#enrich-table", DataTable)
-        enrich_table.add_columns(
-            "Enriched (UTC)",
+        stale_table = self.query_one("#stale-table", DataTable)
+        stale_table.add_columns(
+            "Vessel",
             "MMSI",
-            "IMO",
-            "Vessel Name",
-            "VF Type",
-            "Status",
-            "LNG",
+            "Last seen",
+            "Last zone",
         )
 
         try:
@@ -387,24 +392,98 @@ class TankerFlowApp(App):
         # Terminal staleness is a heavy PostGIS query (~1.3s); refresh slowly.
         self.set_interval(30, self.refresh_terminal_panel)
         asyncio.create_task(self.refresh_terminal_panel())
-        # Lifetime COUNT(*) on ais_fixes is the most expensive query
-        # (~400ms full scan); refresh every 30s.
-        self.set_interval(30, self.refresh_total_count)
-        asyncio.create_task(self.refresh_total_count())
+        # Watchlist coverage + stale-vessels table — slow timer, the numbers
+        # don't change rapidly and the queries are non-trivial.
+        self.set_interval(30, self.refresh_slow_stats)
+        asyncio.create_task(self.refresh_slow_stats())
 
     async def on_unmount(self) -> None:
         if self._pool:
             await self._pool.close()
 
-    async def refresh_total_count(self) -> None:
+    async def refresh_slow_stats(self) -> None:
+        """Watchlist coverage + stale-vessels table, on the 30s timer."""
         if not self._pool:
             return
         try:
-            self._cached_total = await self._pool.fetchval(
-                "SELECT COUNT(*) FROM ais_fixes"
+            row = await self._pool.fetchrow(
+                """
+                WITH wl AS (
+                    SELECT mmsi FROM vessel_registry
+                    WHERE (is_lng_carrier OR is_fsru) AND NOT excluded
+                )
+                SELECT
+                  (SELECT COUNT(*) FROM wl) AS watched,
+                  (SELECT COUNT(DISTINCT a.mmsi) FROM ais_fixes a JOIN wl USING (mmsi)
+                     WHERE a.fix_ts > now() - INTERVAL '30 minutes') AS reporting,
+                  (SELECT COUNT(*) FROM wl
+                     WHERE NOT EXISTS (
+                       SELECT 1 FROM ais_fixes a
+                       WHERE a.mmsi = wl.mmsi AND a.fix_ts > now() - INTERVAL '2 hours'
+                     )) AS stale_2h
+                """
             )
+            if row:
+                self._watchlist_stats = (
+                    row["watched"], row["reporting"], row["stale_2h"]
+                )
         except Exception:
             pass
+
+        # Refresh the stale-vessels table — most-recently-seen LNG/FSRUs that
+        # haven't reported lately. Skips never-seen (no rows in ais_fixes) and
+        # vessels active in the last 30 min (which aren't "stale").
+        try:
+            stale_rows = await self._pool.fetch(
+                """
+                WITH wl AS (
+                    SELECT mmsi, vessel_name FROM vessel_registry
+                    WHERE (is_lng_carrier OR is_fsru) AND NOT excluded
+                ),
+                last_fix AS (
+                    SELECT a.mmsi, MAX(a.fix_ts) AS ts
+                    FROM ais_fixes a JOIN wl USING (mmsi)
+                    WHERE a.fix_ts > now() - INTERVAL '30 days'
+                    GROUP BY a.mmsi
+                )
+                SELECT wl.mmsi, wl.vessel_name,
+                       EXTRACT(EPOCH FROM (now() - lf.ts))::int AS age_s,
+                       (SELECT lat FROM ais_fixes WHERE mmsi = wl.mmsi
+                        ORDER BY fix_ts DESC LIMIT 1) AS last_lat,
+                       (SELECT lon FROM ais_fixes WHERE mmsi = wl.mmsi
+                        ORDER BY fix_ts DESC LIMIT 1) AS last_lon
+                FROM wl JOIN last_fix lf USING (mmsi)
+                WHERE EXTRACT(EPOCH FROM (now() - lf.ts)) > 1800   -- > 30 min stale
+                ORDER BY lf.ts ASC
+                LIMIT 15
+                """
+            )
+        except Exception:
+            return
+
+        table = self.query_one("#stale-table", DataTable)
+        table.clear()
+        for r in stale_rows:
+            age_s = r["age_s"]
+            if age_s < 3600:
+                age_label = f"[yellow]{age_s // 60}m[/yellow]"
+            elif age_s < 86400:
+                age_label = f"[red]{age_s // 3600}h{(age_s % 3600) // 60}m[/red]"
+            else:
+                age_label = f"[red]{age_s // 86400}d[/red]"
+            zone = (
+                _classify_zone(r["last_lat"], r["last_lon"])
+                if r["last_lat"] is not None
+                else None
+            )
+            zone_color = _ZONE_COLORS.get(zone, "white") if zone else "dim"
+            zone_label = f"[{zone_color}]{zone}[/]" if zone else "[dim]—[/dim]"
+            table.add_row(
+                r["vessel_name"] or "—",
+                str(r["mmsi"]),
+                age_label,
+                zone_label,
+            )
 
     async def refresh_data(self) -> None:
         if not self._pool:
@@ -417,28 +496,22 @@ class TankerFlowApp(App):
 
         try:
             (
-                last60s,
-                last5m,
-                zone_bucket_rows,
+                zone_fix_rows,
                 lt_bucket_rows,
                 lag_bucket_rows,
                 hb_row,
-                enrich_status_rows,
-                enrich_recent_rows,
             ) = await asyncio.gather(
-                self._pool.fetchval(
-                    "SELECT COUNT(*) FROM ais_fixes WHERE fix_ts > now() - INTERVAL '60 seconds'"
-                ),
-                self._pool.fetchval(
-                    "SELECT COUNT(*) FROM ais_fixes WHERE fix_ts > now() - INTERVAL '5 minutes'"
-                ),
+                # Pull recent LNG/FSRU fixes; we aggregate (per-minute, per-zone
+                # distinct vessels) client-side. Volume is small (~10/min in
+                # MMSI-filtered mode), so client-side aggregation is cheaper
+                # than re-encoding the bbox CASE WHEN in SQL.
                 self._pool.fetch(
                     """
-                        SELECT bucket, zone, SUM(fix_count) AS cnt
-                        FROM ingestion_zone_minute
-                        WHERE source LIKE 'aisstream%'
-                          AND bucket > now() - $1 * INTERVAL '1 minute'
-                        GROUP BY bucket, zone
+                        SELECT mmsi, lat, lon,
+                               date_trunc('minute', fix_ts) AS bucket
+                        FROM ais_fixes
+                        WHERE fix_ts > now() - $1 * INTERVAL '1 minute'
+                          AND source = 'aisstream'
                         """,
                     minutes_back,
                 ),
@@ -472,29 +545,6 @@ class TankerFlowApp(App):
                         WHERE source = 'aisstream'
                         """
                 ),
-                self._pool.fetch(
-                    """
-                        SELECT COALESCE(vf_enrichment_status, 'unenriched') AS status,
-                               COUNT(*) AS cnt
-                        FROM vessel_registry
-                        GROUP BY 1
-                        """
-                ),
-                self._pool.fetch(
-                    """
-                        SELECT enriched_at, mmsi, imo, vessel_name, vf_vessel_type,
-                               vf_enrichment_status, is_lng_carrier
-                        FROM vessel_registry
-                        WHERE enriched_at IS NOT NULL
-                        ORDER BY enriched_at DESC
-                        LIMIT (
-                          SELECT COUNT(DISTINCT t.terminal_id)
-                          FROM terminals t
-                          JOIN terminal_zones tz USING (terminal_id)
-                          WHERE t.in_signal_scope
-                        )
-                        """
-                ),
             )
         except Exception:
             now = datetime.now(timezone.utc).strftime("%H:%M:%S")
@@ -522,23 +572,38 @@ class TankerFlowApp(App):
                 hb_label = f"{hb_status} ({age_str} ago)"
 
         now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        if self._watchlist_stats is None:
+            stats_label = "watchlist: loading…"
+        else:
+            watched, reporting, stale = self._watchlist_stats
+            stats_label = (
+                f"watching {watched} | "
+                f"[green]{reporting}[/green] reporting (30m) | "
+                f"[yellow]{stale}[/yellow] stale (>2h)"
+            )
         self.query_one("#status", Static).update(
-            f"{dot} {hb_label} | Total: {self._cached_total:,} | Last 60s: {last60s} | Last 5m: {last5m} | {now_str} UTC"
+            f"{dot} {hb_label} | {stats_label} | {now_str} UTC"
         )
 
-        # Per-zone fixes/min chart — pivot rows into a series per zone, zero-filled.
+        # Per-zone "distinct LNG vessels per minute" chart. ais_fixes is now
+        # exclusively LNG/FSRU vessels, so each row is signal-relevant; we
+        # aggregate to set-count of MMSIs per (minute, zone) client-side.
         zone_series: dict[str, list[float]] = {
             name: [0.0] * minutes_back for name, *_ in _ZONES
         }
+        zone_mmsi_sets: dict[tuple[str, int], set[int]] = {}
         now_floor = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-        for row in zone_bucket_rows:
-            zone = row["zone"]
+        for row in zone_fix_rows:
+            zone = _classify_zone(row["lat"], row["lon"])
             if zone is None or zone not in zone_series:
                 continue
             mins_ago = int((now_floor - row["bucket"]).total_seconds() // 60)
             idx = minutes_back - 1 - mins_ago
-            if 0 <= idx < minutes_back:
-                zone_series[zone][idx] = float(row["cnt"])
+            if not (0 <= idx < minutes_back):
+                continue
+            zone_mmsi_sets.setdefault((zone, idx), set()).add(row["mmsi"])
+        for (zone, idx), mmsis in zone_mmsi_sets.items():
+            zone_series[zone][idx] = float(len(mmsis))
 
         x = list(range(1 - minutes_back, 1))
         for zone_name, *_ in _ZONES:
@@ -636,32 +701,7 @@ class TankerFlowApp(App):
         lag_label.append(f" (peak {v_p95_peak:.1f}s)")
         self.query_one("#vessels-label", Label).update(lag_label)
 
-        # Dynamic enrichment panel
-        status_counts = {row["status"]: row["cnt"] for row in enrich_status_rows}
-        ok = status_counts.get("ok", 0)
-        no_imo = status_counts.get("no_imo", 0)
-        not_found = status_counts.get("not_found", 0)
-        error = status_counts.get("error", 0)
-        unenriched = status_counts.get("unenriched", 0)
-        self.query_one("#enrich-label", Label).update(
-            f"Dynamic enrichment — ok: {ok:,} | no_imo: {no_imo:,} | "
-            f"not_found: {not_found:,} | error: {error:,} | unenriched: {unenriched:,}"
-        )
-
-        enrich_table = self.query_one("#enrich-table", DataTable)
-        enrich_table.clear()
-        for row in enrich_recent_rows:
-            enrich_table.add_row(
-                row["enriched_at"].strftime("%H:%M:%S"),
-                str(row["mmsi"]),
-                str(row["imo"]) if row["imo"] else "—",
-                row["vessel_name"] or "—",
-                row["vf_vessel_type"] or "—",
-                row["vf_enrichment_status"] or "—",
-                "✓"
-                if row["is_lng_carrier"]
-                else ("—" if row["is_lng_carrier"] is None else ""),
-            )
+        # Stale-vessels label updated by refresh_slow_stats; nothing per-tick here.
 
     async def refresh_terminal_panel(self) -> None:
         """Per-terminal staleness — heavy PostGIS join, runs on a slow timer."""
