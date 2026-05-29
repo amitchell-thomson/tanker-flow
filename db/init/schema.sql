@@ -10,7 +10,7 @@ CREATE TABLE ais_fixes (
     lon             DOUBLE PRECISION,
     nav_status      SMALLINT,
     sog             REAL,
-    source          TEXT             NOT NULL  -- 'aisstream' | 'vesselfinder'
+    source          TEXT             NOT NULL  -- 'aisstream-mmsi-{1,2,3}' | 'vesselfinder'
 );
 
 SELECT create_hypertable('ais_fixes', 'fix_ts');
@@ -132,13 +132,6 @@ CREATE INDEX ON port_events (mmsi, event_time DESC);
 CREATE INDEX ON port_events (terminal_id, event_time DESC);
 CREATE INDEX ON port_events (zone, event_type, event_time DESC);
 
-
--- Ingestion health: one row per source, upserted on each heartbeat
-CREATE TABLE ingestion_heartbeat (
-    source          TEXT             PRIMARY KEY,
-    status          TEXT             NOT NULL,
-    last_heartbeat  TIMESTAMPTZ      NOT NULL
-);
 
 -- Ingestion lifecycle events: append-only.
 -- event_type values: 'connect','subscribed','planned_reconnect','disconnect','error','final_flush'

@@ -532,7 +532,7 @@ class TankerFlowApp(App):
                 zone_fix_rows,
                 lt_bucket_rows,
                 lag_bucket_rows,
-                hb_row,
+                conn_age_rows,
             ) = await asyncio.gather(
                 # Pull recent LNG/FSRU fixes; we aggregate (per-minute, per-zone
                 # distinct vessels) client-side. Volume is small (~10/min in
@@ -544,7 +544,7 @@ class TankerFlowApp(App):
                                date_trunc('minute', fix_ts) AS bucket
                         FROM ais_fixes
                         WHERE fix_ts > now() - $1 * INTERVAL '1 minute'
-                          AND source = 'aisstream'
+                          AND source LIKE 'aisstream%'
                         """,
                     minutes_back,
                 ),
@@ -570,12 +570,18 @@ class TankerFlowApp(App):
                         """,
                     v_minutes_back,
                 ),
-                self._pool.fetchrow(
+                # Per-connection liveness: most recent ingestion_stats_minute
+                # bucket per source. Each connection writes its own per-minute
+                # row (delta-tracked every ~2s), so an empty or stale source
+                # means that specific WebSocket has gone quiet.
+                self._pool.fetch(
                     """
-                        SELECT status,
-                               EXTRACT(EPOCH FROM (now() - last_heartbeat))::int AS age_s
-                        FROM ingestion_heartbeat
-                        WHERE source = 'aisstream'
+                        SELECT source,
+                               EXTRACT(EPOCH FROM (now() - MAX(bucket)))::int AS age_s
+                        FROM ingestion_stats_minute
+                        WHERE source LIKE 'aisstream%'
+                          AND bucket > now() - INTERVAL '15 minutes'
+                        GROUP BY source
                         """
                 ),
             )
@@ -584,25 +590,30 @@ class TankerFlowApp(App):
             self.query_one("#status", Static).update(f"⚠ DB error {now}")
             return
 
-        if hb_row is None:
-            dot = "[dim]●[/dim]"
-            hb_label = "no heartbeat"
+        # Liveness from per-source minute deltas. A source is "live" if its
+        # most recent bucket is the current or previous minute (age < 120s);
+        # "stale" if it's gone quiet but reported recently; "dead" if absent.
+        expected_sources = [f"aisstream-mmsi-{i + 1}" for i in range(3)]
+        ages: dict[str, int] = {row["source"]: row["age_s"] for row in conn_age_rows}
+        live = sum(1 for s in expected_sources if ages.get(s, 10**9) < 120)
+        stale = sum(
+            1
+            for s in expected_sources
+            if 120 <= ages.get(s, 10**9) < 600
+        )
+        dead = len(expected_sources) - live - stale
+        if live == len(expected_sources):
+            dot = "[green]●[/green]"
+            hb_label = f"live {live}/{len(expected_sources)}"
+        elif live + stale == len(expected_sources) and stale > 0:
+            dot = "[yellow]●[/yellow]"
+            hb_label = f"degraded {live}/{len(expected_sources)} (stale: {stale})"
+        elif live > 0:
+            dot = "[yellow]●[/yellow]"
+            hb_label = f"degraded {live}/{len(expected_sources)} (dead: {dead})"
         else:
-            age_s: int = hb_row["age_s"]
-            hb_status: str = hb_row["status"]
-            if hb_status == "connected" and age_s < 30:
-                dot = "[green]●[/green]"
-                hb_label = "live"
-            elif hb_status == "connected" and age_s < 120:
-                dot = "[yellow]●[/yellow]"
-                hb_label = f"stale {age_s}s"
-            elif hb_status == "connecting":
-                dot = "[yellow]●[/yellow]"
-                hb_label = "connecting"
-            else:
-                dot = "[red]●[/red]"
-                age_str = f"{age_s // 60}m" if age_s >= 60 else f"{age_s}s"
-                hb_label = f"{hb_status} ({age_str} ago)"
+            dot = "[red]●[/red]"
+            hb_label = "no connections live"
 
         now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
         if self._watchlist_stats is None:

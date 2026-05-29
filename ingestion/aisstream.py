@@ -29,7 +29,10 @@ logger = logging.getLogger(__name__)
 # of the 50 reporting is normal on a healthy connection. The watchdog should
 # only fire if the connection is genuinely dead.
 SILENCE_THRESHOLD_SECONDS = 300
-RAW_QUEUE_MAXSIZE = 10000
+# At ~150 fixes/min total across 3 connections (≈ <1 fix/s per connection), 1k
+# is several minutes of headroom for any transient parser stall — plenty for the
+# MMSI-filtered firehose, which is sparse by design.
+RAW_QUEUE_MAXSIZE = 1000
 FLUSH_INTERVAL_SECONDS = 0.5
 
 # Plan: subscribe to specific LNG-carrier + FSRU MMSIs across N parallel WebSockets
@@ -118,27 +121,6 @@ def chunk_mmsis(mmsis: list[int], num_chunks: int, cap: int) -> list[list[int]]:
     for i, m in enumerate(mmsis):
         chunks[i % num_chunks].append(m)
     return chunks
-
-
-async def _try_heartbeat(pool: asyncpg.Pool, status: str) -> None:
-    try:
-        await upsert_heartbeat(pool, status)
-    except Exception as e:
-        logger.warning(f"Heartbeat write failed ({status}): {e}")
-
-
-async def upsert_heartbeat(pool: asyncpg.Pool, status: str) -> None:
-    async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO ingestion_heartbeat (source, status, last_heartbeat)
-            VALUES ('aisstream', $1, now())
-            ON CONFLICT (source) DO UPDATE SET
-                status = EXCLUDED.status,
-                last_heartbeat = EXCLUDED.last_heartbeat
-            """,
-            status,
-        )
 
 
 def parse_message(
@@ -283,22 +265,22 @@ async def connect_and_drain(
 ) -> None:
     """One MMSI-filtered WebSocket lifecycle: subscribe + drain until disconnect.
 
-    Tasks: drain_socket, parser, flusher, watchdog, heartbeat_loop, planned_reconnect.
+    Tasks: drain_socket, parser, flusher, watchdog, planned_reconnect.
     No rotation — the MMSI filter is fixed for this connection's lifetime; a
-    fresh chunk is loaded from vessel_registry on each reconnect.
+    fresh chunk is loaded from vessel_registry on each reconnect. Liveness is
+    derived downstream from `ingestion_stats_minute` per source (see viz/tui.py)
+    rather than from a separate heartbeat table.
     """
     minute_agg = MinuteAggregator(source=source_name)
     payload = build_subscribe_payload(settings.aisstream_api_key, mmsis)
 
     logger.info(f"[{source_name}] Connecting to aisstream.io ({len(mmsis)} MMSIs)...")
-    await upsert_heartbeat(pool, "connecting")
     await record_event(
         pool, source_name, "connect", {"mmsi_count": len(mmsis)}
     )
     async with websockets.connect(url, ping_timeout=None) as ws:
         await ws.send(json.dumps(payload))
         logger.info(f"[{source_name}] Subscribed.")
-        await upsert_heartbeat(pool, "connected")
         await record_event(
             pool, source_name, "subscribed", {"mmsi_count": len(mmsis)}
         )
@@ -358,14 +340,6 @@ async def connect_and_drain(
                     )
                     await ws.close()
 
-        async def heartbeat_loop():
-            while True:
-                await asyncio.sleep(10)
-                try:
-                    await upsert_heartbeat(pool, "connected")
-                except Exception as e:
-                    logger.warning(f"Heartbeat write failed: {e}")
-
         async def planned_reconnect():
             """Force a fresh WS after RECONNECT_INTERVAL_SECONDS so the outer
             loop re-queries vessel_registry and picks up new MMSIs."""
@@ -385,7 +359,6 @@ async def connect_and_drain(
             asyncio.create_task(parser()),
             asyncio.create_task(flusher()),
             asyncio.create_task(watchdog()),
-            asyncio.create_task(heartbeat_loop()),
             asyncio.create_task(planned_reconnect()),
         ]
         try:
@@ -449,7 +422,6 @@ async def ingest():
                 logger.warning(
                     f"[{source_name}] Websocket closed: {e}. Reconnecting in 30s"
                 )
-                await _try_heartbeat(pool, "reconnecting")
                 await record_event(
                     pool, source_name, "error",
                     {"kind": "ConnectionClosed", "msg": str(e)},
@@ -459,7 +431,6 @@ async def ingest():
                 logger.warning(
                     f"[{source_name}] Unexpected error: {e}. Reconnecting in 60s"
                 )
-                await _try_heartbeat(pool, "reconnecting")
                 await record_event(
                     pool, source_name, "error",
                     {"kind": type(e).__name__, "msg": str(e)},
