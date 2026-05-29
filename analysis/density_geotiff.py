@@ -21,6 +21,7 @@ import asyncpg
 import datashader as ds
 import numpy as np
 import rasterio
+from rasterio.enums import Resampling
 from rasterio.transform import from_bounds
 
 # Make the repo root importable (config.py + viz/ live there) so we can reuse
@@ -115,6 +116,12 @@ def main() -> None:
     ) as dst:
         dst.write(grid, 1)
         dst.set_band_description(1, "overlapping LNG-carrier track-segment count")
+
+    # Internal overviews so QGIS pans/zooms smoothly without re-reading the
+    # full-res grid at every scale (essential for the high-px files).
+    factors = [f for f in (2, 4, 8, 16, 32) if min(width, height) // f >= 1]
+    with rasterio.open(args.out, "r+") as dst:
+        dst.build_overviews(factors, Resampling.average)
 
     nz = grid[grid > 0]
     print(f"wrote {args.out} ({width}×{height} px, EPSG:3857)")
