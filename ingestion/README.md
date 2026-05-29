@@ -70,6 +70,49 @@ Source labels in `ingestion_stats_minute`:
 Lifecycle events (`ingestion_events`) record each subscription change with the
 bbox set and window length in its `detail` JSONB.
 
+## Account-level throttle: cycle decay under cumulative load
+
+Rotation isn't a free lunch. Beyond the per-subscription throttle that the
+swap resets, AISstream appears to track an account-level credit pool with
+two distinct dynamics:
+
+- a per-subscription **burst capacity** — the spike at the start of each
+  rotation window
+- a per-account **refill rate** — the floor that cycles converge to under
+  sustained usage
+
+A pristine session (no recent heavy usage on the key) holds the burst
+capacity flat: ~3700/min on main, every cycle, for hours. A session run
+after the account has pulled tens of thousands of fixes/hour for many
+hours shows clear cycle-over-cycle decay until it stabilises near the
+refill rate. Observed once-per-cycle main throughput over a 65-minute
+run that started after ~14 hours of heavy testing:
+
+```
+cycle 1 first minute   3137/min      ← burst capacity, briefly available
+cycle 2                2183
+cycle 3                1677
+...
+cycle 7+               ~1050/min     ← steady-state refill rate
+```
+
+Within each cycle, main also decays ~15% over its 5-minute window —
+again, the burst-bucket draining faster than the refill replenishes it.
+
+The asymmetry between main and secondary is the diagnostic that fingers
+the throttle as the cause. Main pulls from one of the highest-volume
+geographic windows AISstream serves (nweurope alone is thousands of
+candidate vessels); it always saturates the per-subscription budget.
+Secondary's 4 zones combined deliver ~330 messages/min at source, well
+under any throttle threshold — those windows stay flat at ~325/min
+across all cycles regardless of how depleted the account is.
+
+So if you see `aisstream-main` drifting low for sustained periods, that
+is the account budget speaking, not the rotation breaking. The single
+lever that helps is **idle time**: extended periods without subscription
+activity refill the bucket. Frequent process restarts and short test
+runs both burn through it faster than they refill.
+
 ## What this means for the signal
 
 State transitions get back-dated. When a vessel berths, anchors, or departs,
