@@ -132,11 +132,15 @@ async def bounding_boxes():
 async def vessel_history(mmsi: int, pool: asyncpg.Pool = Depends(get_pool)):
     rows = await pool.fetch(
         """
+        WITH last_fix AS (
+            SELECT MAX(fix_ts) AS ts FROM ais_fixes WHERE mmsi = $1
+        )
         SELECT lat, lon, fix_ts, sog, nav_status
-        FROM ais_fixes
-        WHERE mmsi = $1 AND lat IS NOT NULL AND lon IS NOT NULL
+        FROM ais_fixes, last_fix
+        WHERE mmsi = $1
+          AND lat IS NOT NULL AND lon IS NOT NULL
+          AND fix_ts > last_fix.ts - INTERVAL '24 hours'
         ORDER BY fix_ts DESC
-        LIMIT 400
         """,
         mmsi,
     )
