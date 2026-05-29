@@ -111,6 +111,14 @@ class _XAxisPlot(PlotWidget):
     """
     )
 
+    def on_mount(self) -> None:
+        # PlotWidget defaults reserve 2 rows above and 3 below for axis labels.
+        # We only render x labels, which need a single row, so reclaim the
+        # other 4 rows for the plot area.
+        self.margin_top = 0
+        self.margin_bottom = 1
+        super().on_mount()
+
     def _render_plot(self) -> None:
         super()._render_plot()
         try:
@@ -130,12 +138,25 @@ class _XAxisPlot(PlotWidget):
 
 
 class _MiniPlot(PlotWidget):
-    """PlotWidget stripped of all axes — just the canvas, for grid tiles."""
+    """PlotWidget that renders only a left y-axis — top, bottom, right borders erased.
+
+    Used for the per-zone sparkline tiles. We keep the y-axis so each tile carries
+    its own scale (zones differ in magnitude by ~50×).
+    """
+
+    DEFAULT_CSS = (
+        PlotWidget.DEFAULT_CSS
+        + """
+    _MiniPlot > .plot--axis { color: #888888; }
+    _MiniPlot > .plot--tick { color: #888888; }
+    """
+    )
 
     def on_mount(self) -> None:
+        # Trim top/bottom margins to push the chart as close to the tile edges
+        # as possible; keep the default left margin so the y-axis has room.
         self.margin_top = 0
         self.margin_bottom = 0
-        self.margin_left = 0
         super().on_mount()
 
     def _render_plot(self) -> None:
@@ -147,17 +168,28 @@ class _MiniPlot(PlotWidget):
         if not canvas._canvas_size:
             return
         r = self._scale_rectangle
-        # Erase the rectangle box and tick marks the parent draws on the canvas.
+        # Erase top, bottom, and right borders. Keep the left column so the
+        # y-axis labels stay visible.
         for x in range(r.width + 2):
             canvas.set_pixel(x, 0, char=" ", style="")
             canvas.set_pixel(x, r.height + 1, char=" ", style="")
         for y in range(r.height + 2):
-            canvas.set_pixel(0, y, char=" ", style="")
             canvas.set_pixel(r.width + 1, y, char=" ", style="")
 
 
 class TankerFlowApp(App):
-    BINDINGS = [Binding("q", "quit", "Quit")]
+    BINDINGS = [
+        Binding("q", "quit", "Quit"),
+        Binding("z", "cycle_view", "View span"),
+    ]
+
+    # Each entry is (zone_minutes, longterm_hours, lag_minutes). 'z' cycles
+    # all three plots together between long-horizon overview and short-horizon
+    # detail of the most recent activity.
+    _VIEW_MODES = [
+        (90, 72, 90),  # default: 90m zones, 3d long-term, 90m lag
+        (15, 12, 15),  # zoomed-in
+    ]
 
     CSS = """
     #status {
@@ -171,11 +203,13 @@ class TankerFlowApp(App):
         height: 1fr;
     }
     #sparkline-container {
-        width: 1fr;
+        width: 2fr;
         border: round #888888;
+        padding: 0;
     }
-    #zone-grid-top {
-        height: 2fr;
+    #right-charts {
+        width: 1fr;
+        height: 1fr;
     }
     .zone-grid-row {
         height: 1fr;
@@ -184,11 +218,13 @@ class TankerFlowApp(App):
         width: 1fr;
         height: 1fr;
         border: none;
+        padding: 0;
     }
     #tile-nweurope {
         width: 1fr;
         height: 1fr;
         border: none;
+        padding: 0;
     }
     .zone-tile-label {
         height: 2;
@@ -202,20 +238,22 @@ class TankerFlowApp(App):
     }
     #longterm-container {
         width: 1fr;
+        height: 1fr;
         border: round #888888;
     }
     #longterm-label {
-        height: 2;
+        height: 1;
         border: none;
         color: ansi_bright_cyan;
         padding: 0 1;
     }
     #vessels-container {
         width: 1fr;
+        height: 1fr;
         border: round #888888;
     }
     #vessels-label {
-        height: 2;
+        height: 1;
         border: none;
         color: ansi_bright_yellow;
         padding: 0 1;
@@ -223,7 +261,7 @@ class TankerFlowApp(App):
     _XAxisPlot {
         height: 1fr;
         border: none;
-        padding-right: 1;
+        padding: 0 1 0 0;
     }
     #tables-row {
         height: 1.05fr;
@@ -261,6 +299,19 @@ class TankerFlowApp(App):
     def __init__(self) -> None:
         super().__init__()
         self._pool: asyncpg.Pool | None = None
+        self._view_mode_idx: int = 0
+        # Cache the lifetime COUNT(*) — full table scan on ais_fixes takes
+        # ~400ms on a growing hypertable and the status line doesn't need it
+        # fresh every 2s. Refreshed on a slower timer.
+        self._cached_total: int = 0
+
+    @property
+    def _view_mode(self) -> tuple[int, int, int]:
+        return self._VIEW_MODES[self._view_mode_idx]
+
+    def action_cycle_view(self) -> None:
+        self._view_mode_idx = (self._view_mode_idx + 1) % len(self._VIEW_MODES)
+        self.run_worker(self.refresh_data(), exclusive=False)
 
     def _zone_tile(self, zone: str) -> ComposeResult:
         tile_id = f"tile-{zone}"
@@ -272,20 +323,23 @@ class TankerFlowApp(App):
         yield Static("Connecting to database...", id="status", markup=True)
         with Horizontal(id="charts-row"):
             with Vertical(id="sparkline-container"):
-                with Vertical(id="zone-grid-top"):
-                    with Horizontal(classes="zone-grid-row"):
-                        for z in ("usgulf", "usatlantic", "iberian"):
-                            yield from self._zone_tile(z)
-                    with Horizontal(classes="zone-grid-row"):
-                        for z in ("baltic", "wmed", "emed"):
-                            yield from self._zone_tile(z)
+                # Top row: 4 secondary zones
+                with Horizontal(classes="zone-grid-row"):
+                    for z in ("usatlantic", "iberian", "baltic", "emed"):
+                        yield from self._zone_tile(z)
+                # Middle row: usgulf + wmed
+                with Horizontal(classes="zone-grid-row"):
+                    for z in ("usgulf", "wmed"):
+                        yield from self._zone_tile(z)
+                # Bottom: nweurope spans full width
                 yield from self._zone_tile("nweurope")
-            with Vertical(id="longterm-container"):
-                yield Label("Fixes/hour — peak: 0, mean: 0", id="longterm-label")
-                yield _XAxisPlot(id="longterm-chart", allow_pan_and_zoom=False)
-            with Vertical(id="vessels-container"):
-                yield Label("Ingest lag (server − fix) — …", id="vessels-label")
-                yield _XAxisPlot(id="vessels-chart", allow_pan_and_zoom=False)
+            with Vertical(id="right-charts"):
+                with Vertical(id="vessels-container"):
+                    yield Label("Ingest lag (server − fix) — …", id="vessels-label")
+                    yield _XAxisPlot(id="vessels-chart", allow_pan_and_zoom=False)
+                with Vertical(id="longterm-container"):
+                    yield Label("Fixes/hour — peak: 0, mean: 0", id="longterm-label")
+                    yield _XAxisPlot(id="longterm-chart", allow_pan_and_zoom=False)
         with Horizontal(id="tables-row"):
             with Vertical(id="terminal-container"):
                 yield Label("Terminal activity (last 1h)", id="terminal-label")
@@ -333,25 +387,36 @@ class TankerFlowApp(App):
         # Terminal staleness is a heavy PostGIS query (~1.3s); refresh slowly.
         self.set_interval(30, self.refresh_terminal_panel)
         asyncio.create_task(self.refresh_terminal_panel())
+        # Lifetime COUNT(*) on ais_fixes is the most expensive query
+        # (~400ms full scan); refresh every 30s.
+        self.set_interval(30, self.refresh_total_count)
+        asyncio.create_task(self.refresh_total_count())
 
     async def on_unmount(self) -> None:
         if self._pool:
             await self._pool.close()
 
+    async def refresh_total_count(self) -> None:
+        if not self._pool:
+            return
+        try:
+            self._cached_total = await self._pool.fetchval(
+                "SELECT COUNT(*) FROM ais_fixes"
+            )
+        except Exception:
+            pass
+
     async def refresh_data(self) -> None:
         if not self._pool:
             return
 
-        minutes_back = 90
-        hours_back = 72
-        v_minutes_back = 90
+        minutes_back, hours_back, v_minutes_back = self._view_mode
 
         lt_chart = self.query_one("#longterm-chart", _XAxisPlot)
         vessels_chart = self.query_one("#vessels-chart", _XAxisPlot)
 
         try:
             (
-                total,
                 last60s,
                 last5m,
                 zone_bucket_rows,
@@ -361,7 +426,6 @@ class TankerFlowApp(App):
                 enrich_status_rows,
                 enrich_recent_rows,
             ) = await asyncio.gather(
-                self._pool.fetchval("SELECT COUNT(*) FROM ais_fixes"),
                 self._pool.fetchval(
                     "SELECT COUNT(*) FROM ais_fixes WHERE fix_ts > now() - INTERVAL '60 seconds'"
                 ),
@@ -370,10 +434,11 @@ class TankerFlowApp(App):
                 ),
                 self._pool.fetch(
                     """
-                        SELECT bucket, zone, fix_count AS cnt
+                        SELECT bucket, zone, SUM(fix_count) AS cnt
                         FROM ingestion_zone_minute
-                        WHERE source = 'aisstream'
+                        WHERE source LIKE 'aisstream%'
                           AND bucket > now() - $1 * INTERVAL '1 minute'
+                        GROUP BY bucket, zone
                         """,
                     minutes_back,
                 ),
@@ -389,11 +454,12 @@ class TankerFlowApp(App):
                 self._pool.fetch(
                     """
                         SELECT bucket,
-                               mean_lag_s AS mean_s,
-                               p95_lag_s  AS p95_s
+                               SUM(mean_lag_s * fix_count) / NULLIF(SUM(fix_count), 0) AS mean_s,
+                               MAX(p95_lag_s) AS p95_s
                         FROM ingestion_stats_minute
-                        WHERE source = 'aisstream'
+                        WHERE source LIKE 'aisstream%'
                           AND bucket > now() - $1 * INTERVAL '1 minute'
+                        GROUP BY bucket
                         ORDER BY bucket ASC
                         """,
                     v_minutes_back,
@@ -457,7 +523,7 @@ class TankerFlowApp(App):
 
         now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
         self.query_one("#status", Static).update(
-            f"{dot} {hb_label} | Total: {total:,} | Last 60s: {last60s} | Last 5m: {last5m} | {now_str} UTC"
+            f"{dot} {hb_label} | Total: {self._cached_total:,} | Last 60s: {last60s} | Last 5m: {last5m} | {now_str} UTC"
         )
 
         # Per-zone fixes/min chart — pivot rows into a series per zone, zero-filled.
@@ -479,7 +545,10 @@ class TankerFlowApp(App):
             series = zone_series[zone_name]
             tile_chart = self.query_one(f"#chart-{zone_name}", _MiniPlot)
             tile_chart.clear()
-            tile_chart.set_ylimits(ymin=0, ymax=max(series) or 1)
+            # Pad ymin below 0 so a flat-zero series renders above the x-axis
+            # instead of being clipped into the bottom border.
+            y_max = max(series) or 1
+            tile_chart.set_ylimits(ymin=-y_max * 0.05, ymax=y_max)
             tile_chart.plot(
                 x,
                 series,
@@ -487,9 +556,14 @@ class TankerFlowApp(App):
                 hires_mode=HiResMode.BRAILLE,
             )
 
-            now_v = int(series[-1]) if series else 0
-            peak_v = int(max(series)) if series else 0
-            mean_v = round(sum(series) / len(series)) if series else 0
+            # The trailing minute is in-progress: MinuteAggregator only writes
+            # its row to ingestion_stats_minute once the next minute begins, so
+            # series[-1] is always 0 during the live minute. Read stats from
+            # the most-recently-completed minute slice instead.
+            complete = series[:-1] or [0.0]
+            now_v = int(complete[-1])
+            peak_v = int(max(complete))
+            mean_v = round(sum(complete) / len(complete))
             zone_color = _ZONE_COLORS[zone_name]
             label_content = Text()
             label_content.append(zone_name, style=zone_color)
@@ -507,7 +581,7 @@ class TankerFlowApp(App):
         lt_x = list(range(1 - len(lt_data), 1))
         lt_y_max = max(lt_data) or 1
         lt_chart.clear()
-        lt_chart.set_ylimits(ymin=0, ymax=lt_y_max)
+        lt_chart.set_ylimits(ymin=-lt_y_max * 0.05, ymax=lt_y_max)
         lt_chart.plot(
             lt_x, lt_data, line_style="bright_cyan", hires_mode=HiResMode.BRAILLE
         )
@@ -531,9 +605,17 @@ class TankerFlowApp(App):
                 p95_series[idx] = float(row["p95_s"] or 0.0)
 
         v_x = list(range(1 - v_minutes_back, 1))
-        v_y_max = max(max(p95_series), max(mean_series)) or 1
+        # Lag is always positive and rarely near zero — zoom the y-axis to the
+        # data range (with 10% padding) rather than anchoring to 0. The 0.0
+        # sentinels for missing buckets are filtered out.
+        nonzero_lags = [v for v in mean_series + p95_series if v > 0]
+        if nonzero_lags:
+            v_y_min = min(nonzero_lags) * 0.9
+            v_y_max = max(nonzero_lags) * 1.1
+        else:
+            v_y_min, v_y_max = 0.0, 1.0
         vessels_chart.clear()
-        vessels_chart.set_ylimits(ymin=0, ymax=v_y_max)
+        vessels_chart.set_ylimits(ymin=v_y_min, ymax=v_y_max)
         vessels_chart.plot(
             v_x, p95_series, line_style="bright_red", hires_mode=HiResMode.BRAILLE
         )
