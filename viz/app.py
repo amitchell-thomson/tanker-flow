@@ -296,54 +296,46 @@ def _to_mercator(lat: float, lon: float) -> tuple[float, float]:
 _density_source_cache: dict = {}
 
 
-async def _track_segments_df(conn: asyncpg.Connection):
-    """Stream every in-scope vessel's fixes in track order and build the
-    *segment* geometry (lines between consecutive fixes, not points). Moving
-    vessels accumulate brightness by distance travelled while dwell time at
-    berth/anchorage no longer piles into blobs — the dwell-bias that washed
-    out the old point-count heatmap. NaN rows break the line between vessels
-    and across AIS gaps so unrelated positions never connect. Returns a
-    DataFrame of Web-Mercator (radians) x/y columns, or None if no fixes.
-
-    Shared source of truth for the density layer — reused by the QGIS GeoTIFF
-    exporter (analysis/density_geotiff.py). Must run inside a transaction (the
-    server-side cursor requires one)."""
-    xs: list[float] = []
-    ys: list[float] = []
-    prev_mmsi: int | None = None
-    prev_ts: datetime | None = None
-    async with conn.transaction():
-        async for r in conn.cursor(
-            """
-            SELECT a.mmsi, a.lat, a.lon, a.fix_ts
-            FROM ais_fixes a
-            JOIN vessel_registry v USING (mmsi)
-            WHERE a.lat IS NOT NULL AND a.lon IS NOT NULL
-              AND (v.is_lng_carrier = TRUE OR v.is_fsru = TRUE)
-            ORDER BY a.mmsi, a.fix_ts
-            """
-        ):
-            mmsi, lat, lon, ts = r["mmsi"], r["lat"], r["lon"], r["fix_ts"]
-            new_track = mmsi != prev_mmsi or (
-                prev_ts is not None and ts - prev_ts > _TRACK_GAP
-            )
-            if new_track and prev_mmsi is not None:
-                xs.append(math.nan)
-                ys.append(math.nan)
-            x, y = _to_mercator(lat, lon)
-            xs.append(x)
-            ys.append(y)
-            prev_mmsi, prev_ts = mmsi, ts
-    return pd.DataFrame({"x": xs, "y": ys}) if xs else None
-
-
 async def _density_source(pool: asyncpg.Pool) -> dict:
     cached = _density_source_cache.get("v")
     if cached and time.time() - cached["ts"] < 3600:
         return cached
 
+    # Stream every in-scope vessel's fixes in track order and build the
+    # *segment* geometry (lines between consecutive fixes, not points). Moving
+    # vessels accumulate brightness by distance travelled while dwell time at
+    # berth/anchorage no longer piles into blobs — the dwell-bias that washed
+    # out the old point-count heatmap. NaN rows break the line between vessels
+    # and across AIS gaps so unrelated positions never connect.
+    xs: list[float] = []
+    ys: list[float] = []
+    prev_mmsi: int | None = None
+    prev_ts: datetime | None = None
     async with pool.acquire() as conn:
-        df = await _track_segments_df(conn)
+        async with conn.transaction():
+            async for r in conn.cursor(
+                """
+                SELECT a.mmsi, a.lat, a.lon, a.fix_ts
+                FROM ais_fixes a
+                JOIN vessel_registry v USING (mmsi)
+                WHERE a.lat IS NOT NULL AND a.lon IS NOT NULL
+                  AND (v.is_lng_carrier = TRUE OR v.is_fsru = TRUE)
+                ORDER BY a.mmsi, a.fix_ts
+                """
+            ):
+                mmsi, lat, lon, ts = r["mmsi"], r["lat"], r["lon"], r["fix_ts"]
+                new_track = mmsi != prev_mmsi or (
+                    prev_ts is not None and ts - prev_ts > _TRACK_GAP
+                )
+                if new_track and prev_mmsi is not None:
+                    xs.append(math.nan)
+                    ys.append(math.nan)
+                x, y = _to_mercator(lat, lon)
+                xs.append(x)
+                ys.append(y)
+                prev_mmsi, prev_ts = mmsi, ts
+
+    df = pd.DataFrame({"x": xs, "y": ys}) if xs else None
 
     # Reference normalisation: aggregate the whole footprint once and take the
     # p99 of the log-counts. Every tile reuses this scalar so brightness is

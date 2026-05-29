@@ -24,7 +24,6 @@ dependencies = [
     "pillow>=12.2.0",
     "matplotlib>=3.10.9",
     "datashader>=0.19.1",
-    "rasterio>=1.4",
 ]
 
 [dependency-groups]
