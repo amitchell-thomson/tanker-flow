@@ -9,7 +9,12 @@ import asyncpg
 import websockets
 from rich.logging import RichHandler
 
-from config import AIS_BOUNDING_BOXES, settings
+from config import (
+    MAIN_ZONES,
+    SECONDARY_ZONES,
+    bboxes_for_zones,
+    settings,
+)
 
 from datetime import datetime, timezone
 
@@ -33,7 +38,16 @@ logger = logging.getLogger(__name__)
 SILENCE_THRESHOLD_SECONDS = 45
 RAW_QUEUE_MAXSIZE = 10000
 FLUSH_INTERVAL_SECONDS = 0.5
-RECONNECT_INTERVAL_SECONDS = 1800
+# Subscription rotation: AISstream's throttle is keyed on the active subscription,
+# and each new subscription message resets the bucket on the new bbox set. So we
+# cycle between MAIN_ZONES (sustained ~3750/min) and SECONDARY_ZONES (fresh spike
+# of ~370/min) on a single WebSocket. Effective rate: ~3160/min covering all 7
+# zones, vs ~600/min if we stayed pinned to a 7-bbox subscription. See README.
+MAIN_WINDOW_S = 300
+SECONDARY_WINDOW_S = 60
+
+MAIN_SOURCE = "aisstream-main"
+SECONDARY_SOURCE = "aisstream-secondary"
 
 
 TANKER_TYPES = set(range(80, 90))
@@ -54,10 +68,10 @@ class IngestionState:
     state_buf: list[tuple] = field(default_factory=list)
 
 
-def build_subscribe_payload(api_key: str):
+def build_subscribe_payload(api_key: str, bboxes: list):
     return {
         "APIKey": api_key,
-        "BoundingBoxes": AIS_BOUNDING_BOXES,
+        "BoundingBoxes": bboxes,
         "FilterMessageTypes": ["PositionReport", "ShipStaticData"],
     }
 
@@ -221,63 +235,82 @@ async def flush_buffers(pool: asyncpg.Pool, ingest_state: IngestionState) -> Non
 
 async def connect_and_drain(
     url: str,
-    payload: dict,
     pool: asyncpg.Pool,
     ingest_state: IngestionState,
     enrich_state: EnrichmentState,
     zone_index: ZoneIndex,
-    minute_agg: MinuteAggregator,
 ) -> None:
-    """One websocket lifecycle: subscribe, fan out drain/parse/flush/heartbeat/watchdog tasks."""
+    """One websocket lifecycle with subscription rotation.
+
+    A single WebSocket alternates between MAIN_ZONES and SECONDARY_ZONES via
+    in-place subscription updates. Each swap resets the throttle bucket on the
+    new bbox set, so we harvest fresh spikes indefinitely while a single
+    persistent connection covers all 7 zones.
+    """
+    main_bboxes = bboxes_for_zones(MAIN_ZONES)
+    secondary_bboxes = bboxes_for_zones(SECONDARY_ZONES)
+
+    # Mutable rotation state. The parser/flusher always references rot["agg"]
+    # so messages get tagged to whichever subscription is currently active.
+    rot = {
+        "on_main": True,
+        "source": MAIN_SOURCE,
+        "agg": MinuteAggregator(source=MAIN_SOURCE),
+    }
+
     logger.info("Connecting to aisstream.io...")
     await upsert_heartbeat(pool, "connecting")
-    await record_event(pool, "aisstream", "connect")
+    await record_event(pool, MAIN_SOURCE, "connect")
     async with websockets.connect(url, ping_timeout=None) as ws:
-        await ws.send(json.dumps(payload))
-        logger.info("Subscribed. Receiving messages...")
+        await ws.send(json.dumps(build_subscribe_payload(settings.aisstream_api_key, main_bboxes)))
+        logger.info(f"Subscribed: {MAIN_ZONES}")
         await upsert_heartbeat(pool, "connected")
-        await record_event(pool, "aisstream", "subscribed")
-        minute_agg.note_connection_start()
+        await record_event(
+            pool, MAIN_SOURCE, "subscribed",
+            {"zones": MAIN_ZONES, "window_s": MAIN_WINDOW_S, "initial": True},
+        )
+        rot["agg"].note_connection_start()
 
         last_message_time = time.monotonic()
         raw_q: asyncio.Queue = asyncio.Queue(maxsize=RAW_QUEUE_MAXSIZE)
         last_logged_fixes = ingest_state.fix_inserts
 
         async def drain_socket():
-            """Pure: pull raw frames off the WS and onto the bounded queue. No DB, no parsing."""
+            """Pure: pull raw frames off the WS and onto the bounded queue."""
             nonlocal last_message_time
             async for raw in ws:
                 last_message_time = time.monotonic()
                 await raw_q.put(raw)
 
         async def parser():
-            """CPU-only consumer: parse, filter, accumulate into ingest_state buffers."""
+            """CPU-only: parse, filter, append to buffers, route stats to the
+            currently-active aggregator."""
             while True:
                 raw = await raw_q.get()
                 try:
                     parse_message(
-                        raw, ingest_state, enrich_state, zone_index, minute_agg
+                        raw, ingest_state, enrich_state, zone_index, rot["agg"]
                     )
                 finally:
                     raw_q.task_done()
 
         async def flusher():
-            """Periodically flush in-memory buffers to DB, plus an early flush at threshold."""
+            """Periodically flush in-memory buffers + active aggregator's minute stats."""
             nonlocal last_logged_fixes
             while True:
                 await asyncio.sleep(FLUSH_INTERVAL_SECONDS)
-                minute_agg.observe_q_depth(raw_q.qsize())
+                rot["agg"].observe_q_depth(raw_q.qsize())
                 try:
                     await flush_buffers(pool, ingest_state)
                 except Exception as e:
                     logger.warning(f"Flush failed: {e}")
                 try:
-                    await minute_agg.maybe_flush(pool)
+                    await rot["agg"].maybe_flush(pool)
                 except Exception as e:
                     logger.warning(f"Minute-stats flush failed: {e}")
                 if ingest_state.fix_inserts // 1000 > last_logged_fixes // 1000:
                     logger.info(
-                        f"fixes={ingest_state.fix_inserts}, "
+                        f"[{rot['source']}] fixes={ingest_state.fix_inserts}, "
                         f"registry={ingest_state.registry_upserts}, "
                         f"state={ingest_state.state_inserts}, "
                         f"raw_q={raw_q.qsize()}"
@@ -294,13 +327,12 @@ async def connect_and_drain(
                         f"No messages for {silence:.0f}s — triggering reconnect"
                     )
                     await record_event(
-                        pool, "aisstream", "watchdog_reconnect",
+                        pool, rot["source"], "watchdog_reconnect",
                         {"silence_s": int(silence)},
                     )
                     await ws.close()
 
         async def heartbeat_loop():
-            """Periodically refresh the DB heartbeat while connected."""
             while True:
                 await asyncio.sleep(10)
                 try:
@@ -308,23 +340,51 @@ async def connect_and_drain(
                 except Exception as e:
                     logger.warning(f"Heartbeat write failed: {e}")
 
-        async def planned_reconnect():
-            """Force a fresh WS after RECONNECT_INTERVAL_SECONDS.
+        async def rotation_loop():
+            """Cycle the subscription between main and secondary."""
+            while True:
+                window_s = MAIN_WINDOW_S if rot["on_main"] else SECONDARY_WINDOW_S
+                await asyncio.sleep(window_s)
 
-            Why: AISstream appears to silently degrade per-connection vessel coverage over
-            time (geometric decay from ~3000/min to ~1000/min over ~25 min on a stable
-            connection with no client-side backpressure). A fresh connection resets whatever
-            server-side state drives that. See investigation in the README.
-            """
-            await asyncio.sleep(RECONNECT_INTERVAL_SECONDS)
-            logger.info(
-                f"Planned reconnect after {RECONNECT_INTERVAL_SECONDS}s — closing ws"
-            )
-            await record_event(
-                pool, "aisstream", "planned_reconnect",
-                {"interval_s": RECONNECT_INTERVAL_SECONDS},
-            )
-            await ws.close()
+                # Flush the outgoing aggregator so its partial minute lands
+                # tagged with the right source before we swap.
+                try:
+                    await rot["agg"].force_flush(pool)
+                except Exception as e:
+                    logger.warning(f"Rotation flush failed: {e}")
+
+                # Swap subscription.
+                rot["on_main"] = not rot["on_main"]
+                if rot["on_main"]:
+                    rot["source"] = MAIN_SOURCE
+                    new_bboxes = main_bboxes
+                    zones = MAIN_ZONES
+                    new_window = MAIN_WINDOW_S
+                else:
+                    rot["source"] = SECONDARY_SOURCE
+                    new_bboxes = secondary_bboxes
+                    zones = SECONDARY_ZONES
+                    new_window = SECONDARY_WINDOW_S
+
+                rot["agg"] = MinuteAggregator(source=rot["source"])
+                rot["agg"].note_connection_start()
+
+                try:
+                    await ws.send(
+                        json.dumps(
+                            build_subscribe_payload(settings.aisstream_api_key, new_bboxes)
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(f"Subscription swap send failed: {e}")
+                    return
+                await record_event(
+                    pool, rot["source"], "subscribed",
+                    {"zones": zones, "window_s": new_window},
+                )
+                logger.info(
+                    f"Rotated → {rot['source']} ({len(new_bboxes)} bboxes, {new_window}s)"
+                )
 
         tasks = [
             asyncio.create_task(drain_socket()),
@@ -332,10 +392,9 @@ async def connect_and_drain(
             asyncio.create_task(flusher()),
             asyncio.create_task(watchdog()),
             asyncio.create_task(heartbeat_loop()),
-            asyncio.create_task(planned_reconnect()),
+            asyncio.create_task(rotation_loop()),
         ]
         try:
-            # If drain_socket exits (ws closed), unwind the rest.
             done, pending = await asyncio.wait(
                 tasks, return_when=asyncio.FIRST_COMPLETED
             )
@@ -343,16 +402,15 @@ async def connect_and_drain(
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            # Final flush so we don't lose what's already in the buffers on reconnect.
             try:
                 await flush_buffers(pool, ingest_state)
             except Exception as e:
                 logger.warning(f"Final flush on disconnect failed: {e}")
             try:
-                await minute_agg.force_flush(pool)
+                await rot["agg"].force_flush(pool)
             except Exception as e:
                 logger.warning(f"Minute-stats final flush failed: {e}")
-            await record_event(pool, "aisstream", "disconnect")
+            await record_event(pool, rot["source"], "disconnect")
 
 
 async def ingest():
@@ -368,24 +426,22 @@ async def ingest():
     logger.info(f"Loaded {len(zone_index.polys)} terminal zone polygons into STRtree")
 
     url = "wss://stream.aisstream.io/v0/stream"
-    payload = build_subscribe_payload(settings.aisstream_api_key)
-    ingest_state = IngestionState()
-    minute_agg = MinuteAggregator(source="aisstream")
 
     enrichment_task = asyncio.create_task(enrichment_worker(pool, enrich_state))
+
+    ingest_state = IngestionState()
 
     try:
         while True:
             try:
                 await connect_and_drain(
-                    url, payload, pool, ingest_state, enrich_state, zone_index,
-                    minute_agg,
+                    url, pool, ingest_state, enrich_state, zone_index,
                 )
             except websockets.ConnectionClosed as e:
                 logger.warning(f"Websocket closed: {e}. Reconnecting in 30s")
                 await _try_heartbeat(pool, "reconnecting")
                 await record_event(
-                    pool, "aisstream", "error",
+                    pool, MAIN_SOURCE, "error",
                     {"kind": "ConnectionClosed", "msg": str(e)},
                 )
                 await asyncio.sleep(30)
@@ -393,7 +449,7 @@ async def ingest():
                 logger.warning(f"Unexpected error: {e}. Reconnecting in 60s")
                 await _try_heartbeat(pool, "reconnecting")
                 await record_event(
-                    pool, "aisstream", "error",
+                    pool, MAIN_SOURCE, "error",
                     {"kind": type(e).__name__, "msg": str(e)},
                 )
                 await asyncio.sleep(60)
