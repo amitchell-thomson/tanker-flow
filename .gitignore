@@ -7,3 +7,4 @@ CLAUDE.md
 *.gpkg-shm
 *.gpkg-wal
 logs/
+*.tif
