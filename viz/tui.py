@@ -151,46 +151,6 @@ class _XAxisPlot(PlotWidget):
             canvas.set_pixel(r.width + 1, y, char=" ", style="")
 
 
-class _MiniPlot(PlotWidget):
-    """PlotWidget that renders only a left y-axis — top, bottom, right borders erased.
-
-    Used for the per-zone sparkline tiles. We keep the y-axis so each tile carries
-    its own scale (zones differ in magnitude by ~50×).
-    """
-
-    DEFAULT_CSS = (
-        PlotWidget.DEFAULT_CSS
-        + """
-    _MiniPlot > .plot--axis { color: #888888; }
-    _MiniPlot > .plot--tick { color: #888888; }
-    """
-    )
-
-    def on_mount(self) -> None:
-        # Trim top/bottom margins to push the chart as close to the tile edges
-        # as possible; keep the default left margin so the y-axis has room.
-        self.margin_top = 0
-        self.margin_bottom = 0
-        super().on_mount()
-
-    def _render_plot(self) -> None:
-        super()._render_plot()
-        try:
-            canvas = self.query_one("#plot", _HiResCanvas)
-        except Exception:
-            return
-        if not canvas._canvas_size:
-            return
-        r = self._scale_rectangle
-        # Erase top, bottom, and right borders. Keep the left column so the
-        # y-axis labels stay visible.
-        for x in range(r.width + 2):
-            canvas.set_pixel(x, 0, char=" ", style="")
-            canvas.set_pixel(x, r.height + 1, char=" ", style="")
-        for y in range(r.height + 2):
-            canvas.set_pixel(r.width + 1, y, char=" ", style="")
-
-
 class TankerFlowApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
@@ -216,39 +176,38 @@ class TankerFlowApp(App):
     #charts-row {
         height: 1fr;
     }
-    #sparkline-container {
-        width: 2fr;
+    #watchlist-container {
+        width: 1fr;
         border: round #888888;
-        padding: 0;
+        padding: 0 1;
     }
     #right-charts {
         width: 1fr;
         height: 1fr;
     }
-    .zone-grid-row {
-        height: 1fr;
+    #zone-summary-label,
+    #tier-label,
+    #scan-label,
+    #promo-label {
+        height: 1;
+        color: ansi_bright_cyan;
+        padding: 0 0;
     }
-    .zone-tile {
-        width: 1fr;
+    #zone-summary {
+        height: 3;
+        padding: 0 0;
+    }
+    #tier-table {
+        height: 7;
+        border: none;
+    }
+    #scan-progress {
+        height: 3;
+        padding: 0 0;
+    }
+    #promo-table {
         height: 1fr;
         border: none;
-        padding: 0;
-    }
-    #tile-nweurope {
-        width: 1fr;
-        height: 1fr;
-        border: none;
-        padding: 0;
-    }
-    .zone-tile-label {
-        height: 2;
-        border: none;
-        padding: 0 1;
-    }
-    _MiniPlot {
-        height: 1fr;
-        border: none;
-        padding: 0;
     }
     #longterm-container {
         width: 1fr;
@@ -322,6 +281,12 @@ class TankerFlowApp(App):
         # mid-ocean, foreign trade, no terrestrial AIS coverage — not a
         # problem we can act on).
         self._watchlist_stats: tuple[int, int, int, int] | None = None
+        # Tier-per-mmsi snapshot from the previous refresh, used to detect
+        # promotions (tier 4-5 → 1-3) without needing a transition-log table.
+        self._prev_tiers: dict[int, int] = {}
+        # Append-only promotion log captured at this TUI's runtime; persists
+        # for the session, displayed in the promo-table.
+        self._promotions: list[tuple[datetime, int, str, int, int, str]] = []
 
     @property
     def _view_mode(self) -> tuple[int, int, int]:
@@ -331,26 +296,18 @@ class TankerFlowApp(App):
         self._view_mode_idx = (self._view_mode_idx + 1) % len(self._VIEW_MODES)
         self.run_worker(self.refresh_data(), exclusive=False)
 
-    def _zone_tile(self, zone: str) -> ComposeResult:
-        tile_id = f"tile-{zone}"
-        with Vertical(id=tile_id, classes="zone-tile"):
-            yield Label("", id=f"label-{zone}", classes="zone-tile-label")
-            yield _MiniPlot(id=f"chart-{zone}", allow_pan_and_zoom=False)
-
     def compose(self) -> ComposeResult:
         yield Static("Connecting to database...", id="status", markup=True)
         with Horizontal(id="charts-row"):
-            with Vertical(id="sparkline-container"):
-                # Top row: 4 secondary zones
-                with Horizontal(classes="zone-grid-row"):
-                    for z in ("usatlantic", "iberian", "baltic", "emed"):
-                        yield from self._zone_tile(z)
-                # Middle row: usgulf + wmed
-                with Horizontal(classes="zone-grid-row"):
-                    for z in ("usgulf", "wmed"):
-                        yield from self._zone_tile(z)
-                # Bottom: nweurope spans full width
-                yield from self._zone_tile("nweurope")
+            with Vertical(id="watchlist-container"):
+                yield Label("Zone occupancy (last 30 min)", id="zone-summary-label")
+                yield Static("…", id="zone-summary", markup=True)
+                yield Label("Tier breakdown (priority_watchlist)", id="tier-label")
+                yield DataTable(id="tier-table")
+                yield Label("Scan rotation", id="scan-label")
+                yield Static("…", id="scan-progress", markup=True)
+                yield Label("Recent promotions (since TUI start)", id="promo-label")
+                yield DataTable(id="promo-table")
             with Vertical(id="right-charts"):
                 with Vertical(id="vessels-container"):
                     yield Label("Ingest lag (server − fix) — …", id="vessels-label")
@@ -388,6 +345,12 @@ class TankerFlowApp(App):
             "Last zone",
         )
 
+        tier_table = self.query_one("#tier-table", DataTable)
+        tier_table.add_columns("Tier", "Count", "In slot", "Description")
+
+        promo_table = self.query_one("#promo-table", DataTable)
+        promo_table.add_columns("When", "Vessel", "MMSI", "From → To", "Reason")
+
         try:
             self._pool = await asyncpg.create_pool(
                 settings.database_url, min_size=1, max_size=3
@@ -408,10 +371,153 @@ class TankerFlowApp(App):
         # don't change rapidly and the queries are non-trivial.
         self.set_interval(30, self.refresh_slow_stats)
         asyncio.create_task(self.refresh_slow_stats())
+        # Tier breakdown + scan progress + promotion log. Touches the small
+        # priority_watchlist table (~800 rows). Slow timer is fine.
+        self.set_interval(30, self.refresh_watchlist_panels)
+        asyncio.create_task(self.refresh_watchlist_panels())
 
     async def on_unmount(self) -> None:
         if self._pool:
             await self._pool.close()
+
+    # Tier-name labels for the breakdown table — drawn from pipeline/scoring.py
+    # tier definitions. Keep in sync if those rules change.
+    _TIER_LABELS: dict[int, str] = {
+        1: "in zone (polygon)",
+        2: "declared inbound",
+        3: "in zone (bbox)",
+        4: "recent anywhere",
+        5: "stale / unseen",
+    }
+
+    async def refresh_watchlist_panels(self) -> None:
+        """Tier breakdown, scan rotation status, and recent-promotions table.
+
+        Promotion detection compares current tier against the snapshot from
+        the previous refresh (cached in self._prev_tiers). Vessels whose tier
+        moved from {4,5} to {1,2,3} land in the promotions log for this
+        session.
+        """
+        if not self._pool:
+            return
+        try:
+            tier_rows, scan_event, in_slot_summary, promo_rows = await asyncio.gather(
+                self._pool.fetch(
+                    """
+                        SELECT tier,
+                               COUNT(*) AS n,
+                               COUNT(*) FILTER (WHERE in_slot) AS n_in_slot
+                        FROM priority_watchlist
+                        GROUP BY tier ORDER BY tier
+                        """
+                ),
+                self._pool.fetchrow(
+                    """
+                        SELECT MAX(event_ts) AS last_sub
+                        FROM ingestion_events
+                        WHERE source = 'aisstream-mmsi-3' AND event_type = 'subscribed'
+                        """
+                ),
+                self._pool.fetchrow(
+                    """
+                        SELECT
+                            COUNT(*) FILTER (WHERE slot_kind = 'persistent') AS n_persistent,
+                            COUNT(*) FILTER (WHERE slot_kind = 'scan') AS n_scan
+                        FROM priority_watchlist
+                        """
+                ),
+                self._pool.fetch(
+                    """
+                        SELECT pw.mmsi, pw.tier, pw.score_reason,
+                               vr.vessel_name
+                        FROM priority_watchlist pw
+                        JOIN vessel_registry vr USING (mmsi)
+                        WHERE pw.in_slot AND pw.slot_kind = 'persistent'
+                        """
+                ),
+            )
+        except Exception:
+            return
+
+        # --- Tier table ---
+        tier_table = self.query_one("#tier-table", DataTable)
+        tier_table.clear()
+        for r in tier_rows:
+            t = r["tier"]
+            tier_table.add_row(
+                str(t),
+                str(r["n"]),
+                str(r["n_in_slot"]),
+                self._TIER_LABELS.get(t, "?"),
+            )
+
+        # --- Scan progress ---
+        last_sub = scan_event["last_sub"] if scan_event else None
+        n_persistent = in_slot_summary["n_persistent"] if in_slot_summary else 0
+        n_scan = in_slot_summary["n_scan"] if in_slot_summary else 0
+        now = datetime.now(timezone.utc)
+        if last_sub:
+            age_s = int((now - last_sub).total_seconds())
+            remaining_s = max(0, 3600 - age_s)
+            scan_status = (
+                f"Slots: [bold]{n_persistent}[/] persistent, [bold]{n_scan}[/] scan\n"
+                f"Scan window age: {age_s // 60}m {age_s % 60}s · "
+                f"next rotation in ~{remaining_s // 60}m"
+            )
+        else:
+            scan_status = (
+                f"Slots: [bold]{n_persistent}[/] persistent, [bold]{n_scan}[/] scan\n"
+                "Scan window: no recent subscribe event"
+            )
+        self.query_one("#scan-progress", Static).update(scan_status)
+
+        # --- Promotions diff ---
+        # Current tier map = the rows currently in_slot (we have those above)
+        # plus all the others we don't fetch — but for promotion detection we
+        # only need the rows whose tier moved into 1-3, which is a small
+        # subset. Fetch the lightweight per-mmsi tier map separately.
+        cur_rows = await self._pool.fetch(
+            "SELECT mmsi, tier FROM priority_watchlist"
+        )
+        cur_tiers: dict[int, int] = {r["mmsi"]: r["tier"] for r in cur_rows}
+
+        if self._prev_tiers:
+            name_map = {r["mmsi"]: r["vessel_name"] for r in promo_rows}
+            for mmsi, new_tier in cur_tiers.items():
+                old_tier = self._prev_tiers.get(mmsi)
+                if old_tier is None or old_tier == new_tier:
+                    continue
+                if old_tier >= 4 and new_tier <= 3:
+                    name = name_map.get(mmsi, "?")
+                    # Reason from priority_watchlist will be more specific —
+                    # fetch the reason for this single mmsi.
+                    reason_row = await self._pool.fetchrow(
+                        "SELECT score_reason FROM priority_watchlist WHERE mmsi = $1",
+                        mmsi,
+                    )
+                    reason = reason_row["score_reason"] if reason_row else ""
+                    self._promotions.append(
+                        (now, mmsi, name, old_tier, new_tier, reason)
+                    )
+            # Cap log size; oldest first.
+            if len(self._promotions) > 100:
+                self._promotions = self._promotions[-100:]
+        self._prev_tiers = cur_tiers
+
+        promo_table = self.query_one("#promo-table", DataTable)
+        promo_table.clear()
+        for ts, mmsi, name, old_t, new_t, reason in reversed(self._promotions[-40:]):
+            ago_s = int((now - ts).total_seconds())
+            ago_str = (
+                f"{ago_s // 60}m" if ago_s >= 60 else f"{ago_s}s"
+            )
+            promo_table.add_row(
+                ago_str,
+                name or "?",
+                str(mmsi),
+                f"{old_t}→{new_t}",
+                reason or "",
+            )
 
     async def refresh_slow_stats(self) -> None:
         """Watchlist coverage + silent-vessels table, on the 30s timer.
@@ -630,57 +736,39 @@ class TankerFlowApp(App):
             f"{dot} {hb_label} | {stats_label} | {now_str} UTC"
         )
 
-        # Per-zone "distinct LNG vessels per minute" chart. ais_fixes is now
-        # exclusively LNG/FSRU vessels, so each row is signal-relevant; we
-        # aggregate to set-count of MMSIs per (minute, zone) client-side.
-        zone_series: dict[str, list[float]] = {
-            name: [0.0] * minutes_back for name, *_ in _ZONES
-        }
-        zone_mmsi_sets: dict[tuple[str, int], set[int]] = {}
-        now_floor = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        # Zone occupancy — distinct LNG vessels per zone, last 30 min. Replaces
+        # the old per-zone sparkline grid; the bar shape is a horizontal table
+        # rendered as markup in the zone-summary Static.
+        zone_counts: dict[str, set[int]] = {name: set() for name, *_ in _ZONES}
+        cutoff = datetime.now(timezone.utc).replace(second=0, microsecond=0)
         for row in zone_fix_rows:
+            # Only include fixes from the last 30 min for the occupancy bar.
+            if (cutoff - row["bucket"]).total_seconds() > 30 * 60:
+                continue
             zone = _classify_zone(row["lat"], row["lon"])
-            if zone is None or zone not in zone_series:
+            if zone is None or zone not in zone_counts:
                 continue
-            mins_ago = int((now_floor - row["bucket"]).total_seconds() // 60)
-            idx = minutes_back - 1 - mins_ago
-            if not (0 <= idx < minutes_back):
-                continue
-            zone_mmsi_sets.setdefault((zone, idx), set()).add(row["mmsi"])
-        for (zone, idx), mmsis in zone_mmsi_sets.items():
-            zone_series[zone][idx] = float(len(mmsis))
+            zone_counts[zone].add(row["mmsi"])
 
-        x = list(range(1 - minutes_back, 1))
-        for zone_name, *_ in _ZONES:
-            series = zone_series[zone_name]
-            tile_chart = self.query_one(f"#chart-{zone_name}", _MiniPlot)
-            tile_chart.clear()
-            # Pad ymin below 0 so a flat-zero series renders above the x-axis
-            # instead of being clipped into the bottom border.
-            y_max = max(series) or 1
-            tile_chart.set_ylimits(ymin=-y_max * 0.05, ymax=y_max)
-            tile_chart.plot(
-                x,
-                series,
-                line_style=_ZONE_COLORS[zone_name],
-                hires_mode=HiResMode.BRAILLE,
+        max_count = max((len(s) for s in zone_counts.values()), default=0) or 1
+        zone_lines: list[str] = []
+        for name, *_ in _ZONES:
+            n = len(zone_counts[name])
+            bar_len = int(round(20 * n / max_count)) if max_count > 0 else 0
+            color = _ZONE_COLORS.get(name, "white")
+            bar = "█" * bar_len + " " * (20 - bar_len)
+            zone_lines.append(
+                f"[{color}]{name:11s}[/] [{color}]{bar}[/] [bold]{n}[/]"
             )
-
-            # The trailing minute is in-progress: MinuteAggregator only writes
-            # its row to ingestion_stats_minute once the next minute begins, so
-            # series[-1] is always 0 during the live minute. Read stats from
-            # the most-recently-completed minute slice instead.
-            complete = series[:-1] or [0.0]
-            now_v = int(complete[-1])
-            peak_v = int(max(complete))
-            mean_v = round(sum(complete) / len(complete))
-            zone_color = _ZONE_COLORS[zone_name]
-            label_content = Text()
-            label_content.append(zone_name, style=zone_color)
-            label_content.append(f"  {minutes_back}m", style="dim")
-            label_content.append("\n")
-            label_content.append(f"now {now_v}  pk {peak_v}  μ {mean_v}", style="dim")
-            self.query_one(f"#label-{zone_name}", Label).update(label_content)
+        # Compact 2-column layout: 4 zones per column to fit in 3-4 lines.
+        col_a = zone_lines[: (len(zone_lines) + 1) // 2]
+        col_b = zone_lines[(len(zone_lines) + 1) // 2 :]
+        rows = []
+        for i in range(max(len(col_a), len(col_b))):
+            left = col_a[i] if i < len(col_a) else ""
+            right = col_b[i] if i < len(col_b) else ""
+            rows.append(f"{left}   {right}")
+        self.query_one("#zone-summary", Static).update("\n".join(rows))
 
         # Long-term chart (fixes/hour, up to 90 days)
         lt_data = [float(row["cnt"]) for row in lt_bucket_rows]

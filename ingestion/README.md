@@ -69,28 +69,60 @@ Source labels in `ingestion_stats_minute` and `ingestion_events`:
 - The MMSI filter is a *whitelist*, not a hint — subscribed MMSIs that aren't
   in range of any terrestrial AIS receiver simply don't report.
 
-## Discovery (new LNG carriers)
+## Watchlist selection (which 150 vessels to subscribe to)
 
-The old bbox subscription doubled as a passive discovery mechanism:
-`dynamic_enrichment.maybe_queue` watched every fix for an unknown MMSI inside
-a `terminal_zones` polygon and triggered a VesselFinder lookup. With pure
-MMSI filtering, unknown MMSIs never flow through us — that path is dead.
+`vessel_registry` now holds the full global LNG/FSRU fleet (~800 vessels),
+bulk-imported from the IGU 2025 World LNG Report (`db/seed/lng_fleet_igu_2025.csv`
+via `scripts/import_igu_fleet.py`). The 150 slots cap means we can't subscribe
+to all of them at once — instead, the slots are allocated by a tier scoring
+layer that runs every hour:
 
-Operational implication: when a new LNG carrier enters service (industry-wide
-~3-5 newbuilds/month, all announced months in advance) we need to add its
-MMSI to `vessel_registry` ourselves. The next planned reconnect (every 6h)
-picks up the new MMSI on its connection's chunk.
+- **`pipeline/scoring.py`** ranks every LNG/FSRU vessel into one of 5 tiers
+  using current AIS history + parsed `vessel_state.dest`:
 
-Manual addition flow for now:
+  | Tier | Rule |
+  |---|---|
+  | 1 | Fix inside any `terminal_zones` polygon in last 14d |
+  | 2 | `vessel_state.dest` parses to a `terminals.unlocode` AND `state_ts > now() - 14d` |
+  | 3 | Fix inside any `config.ZONES` rectangle in last 14d (not 1/2) |
+  | 4 | Any fix in last 7d (not 1-3) |
+  | 5 | Fix in 7-90d OR never seen |
+
+- **Persistent block (chunks 0 + 1, 100 slots)** — top 100 by `(tier ASC, score DESC)`
+  where tier in 1-3. Vessels currently in or unambiguously heading to our zones.
+- **Scan rotation (chunk 2, 50 slots)** — next 50 by `(tier ASC, score ASC)` where
+  tier in 4-5. Stalest first, so every vessel in the registry cycles through over
+  ~13h.
+- **Promotion** — a scan-window fix that lands inside a zone polygon (or a parsed
+  inbound `dest`) bumps the vessel's tier to 1-3 on the next scoring run. The
+  vessel gets a persistent slot on the very next 1h reconnect.
+
+`load_persistent_mmsis` and `load_scan_mmsis` in `aisstream.py` read from
+`priority_watchlist` and write back `in_slot` / `slot_kind` so the TUI can
+render who's currently subscribed. The 1h reconnect cycle (`RECONNECT_INTERVAL_SECONDS`)
+runs:
+
+1. `scoring_loop` recomputes `priority_watchlist`
+2. Each `connection_loop` close+reopens its WebSocket
+3. Persistent chunks get the freshest top-100; scan chunk swaps in the next 50
+
+### Discovery (new LNG carriers)
+
+The old bbox subscription doubled as a passive discovery mechanism. Under MMSI
+filtering, unknown MMSIs never flow through us — that path is dead. Newbuilds
+arrive via the IGU report refresh instead:
+
+- IGU publishes annually; expect ~50-80 newbuilds/year added
+- Download the latest report PDF, save to `db/seed/igu-world-lng-report-latest.pdf`
+- Run `make refresh-fleet` — re-parses the appendix and incrementally imports
+  any new IMOs via the VF VESSELS endpoint (~3 credits each, one-time)
+
+Ad-hoc newbuilds before the next IGU refresh can be added manually:
 
 1. Insert a row into `vessel_registry` with the new MMSI + IMO
 2. `make enrich` — runs VesselFinder against the new entry to classify it
 3. Verify `is_lng_carrier` or `is_fsru` is now TRUE
-4. Wait up to 6h for the ingester's next planned reconnect, or restart ingest
-
-**Follow-up planned**: a daily script that queries VesselFinder for `LNG
-Tanker` vessel type globally, reconciles against `vessel_registry`, and
-auto-adds new MMSIs. Until then, manual discovery is the discipline.
+4. Wait up to 1h for the next planned reconnect
 
 ## What this means for the signal
 
@@ -105,3 +137,9 @@ healthy. `ingestion_stats_minute.fix_count` summed across the three
 `aisstream-mmsi-N` sources should be ~150/min and stable; if it drops to ~100
 or below for sustained periods, one of the connections is silently dropping or
 the watchlist drifted.
+
+Note that **chunk 2 (the scan-rotation connection) reports differently** from
+chunks 0+1: its 50 vessels swap every hour, so the rate per *vessel* is lower
+than persistent connections but the distinct-MMSI count over a multi-hour
+window is much higher. The TUI's "Scan rotation" panel reports the in-flight
+window age and time to next rotation.

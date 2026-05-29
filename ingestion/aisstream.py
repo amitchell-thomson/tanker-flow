@@ -12,6 +12,8 @@ from rich.logging import RichHandler
 
 from config import settings
 
+from pipeline import scoring
+
 from .dynamic_enrichment import EnrichmentState, enrichment_worker, load_known_mmsis
 from .metrics import MinuteAggregator, classify_zone, record_event
 from .models import AISMessage, PositionReport, ShipStaticData
@@ -42,9 +44,21 @@ FLUSH_INTERVAL_SECONDS = 0.5
 # visibility; MMSI filtering achieves ~100% on the priority list. See README.
 NUM_CONNECTIONS = 3
 MMSI_CAP_PER_CONNECTION = 50         # AISstream's documented limit
-# Refresh the watchlist every 6h so newly-enriched MMSIs get picked up — each
-# reconnect re-queries vessel_registry. (Cycle decay is no longer a concern.)
-RECONNECT_INTERVAL_SECONDS = 6 * 3600
+
+# Slot allocation: chunks 0 and 1 take the persistent block; chunk 2 is the
+# scan-rotation connection that cycles through tier-4/5 vessels.
+PERSISTENT_CONNECTIONS = 2
+PERSISTENT_SLOTS = PERSISTENT_CONNECTIONS * MMSI_CAP_PER_CONNECTION   # 100
+SCAN_CHUNK_INDEX = NUM_CONNECTIONS - 1
+SCAN_SLOTS = MMSI_CAP_PER_CONNECTION                                  # 50
+
+# Reconnect every hour. Each reconnect:
+#   1. Triggers a fresh scoring run (see scoring_loop) just beforehand
+#   2. Re-queries priority_watchlist for the current top-150
+#   3. Closes + reopens the WebSocket with the new MMSI chunk
+# The 1h cadence is what makes scan rotation work — chunk 2 swaps its 50
+# vessels each cycle, cycling through ~650 tier-4/5 candidates over ~13h.
+RECONNECT_INTERVAL_SECONDS = 3600
 
 # Use full-globe bbox; the MMSI filter does the actual constraining.
 GLOBAL_BBOX = [[[-85.0, -180.0], [85.0, 180.0]]]
@@ -75,15 +89,27 @@ def build_subscribe_payload(api_key: str, mmsis: list[int]) -> dict:
     }
 
 
-async def load_priority_mmsis(pool: asyncpg.Pool) -> list[int]:
-    """All in-scope MMSIs (LNG carriers + FSRUs) from vessel_registry.
-
-    Returned ordered by most-recent-fix DESC so the freshest vessels get the
-    first NUM_CONNECTIONS×MMSI_CAP_PER_CONNECTION slots; if the watchlist
-    exceeds capacity, the truncated tail is the least-active vessels (laid
-    up / off-grid for longest), which is the right tradeoff for the signal.
-    """
+async def load_persistent_mmsis(pool: asyncpg.Pool) -> list[int]:
+    """Top PERSISTENT_SLOTS vessels from priority_watchlist (tier 1-3),
+    ordered by (tier ASC, score DESC). Falls back to the cold-start query
+    on the same shape if priority_watchlist is empty (e.g. first boot before
+    the first scoring pass)."""
     async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT mmsi FROM priority_watchlist
+            WHERE tier <= 3
+            ORDER BY tier ASC, score DESC
+            LIMIT $1
+            """,
+            PERSISTENT_SLOTS,
+        )
+        if rows:
+            return [r["mmsi"] for r in rows]
+        # Cold start: priority_watchlist not yet populated. Fall back to the
+        # is_lng_carrier OR is_fsru list ordered by recency so the ingester
+        # still has something useful to subscribe to.
+        logger.warning("priority_watchlist empty — using cold-start fallback")
         rows = await conn.fetch(
             """
             SELECT v.mmsi
@@ -95,28 +121,60 @@ async def load_priority_mmsis(pool: asyncpg.Pool) -> list[int]:
             ) f ON TRUE
             WHERE (v.is_lng_carrier OR v.is_fsru) AND NOT v.excluded
             ORDER BY f.last_fix DESC NULLS LAST, v.mmsi
-            """
+            LIMIT $1
+            """,
+            PERSISTENT_SLOTS,
         )
     return [r["mmsi"] for r in rows]
 
 
-def chunk_mmsis(mmsis: list[int], num_chunks: int, cap: int) -> list[list[int]]:
-    """Interleave MMSIs across `num_chunks` chunks so each gets a balanced mix
-    of active and inactive vessels (the input is sorted by recency, so naive
-    slicing would concentrate all active vessels in chunk 0 and starve the
-    rest, tripping the watchdog).
-
-    Each chunk truncated to `cap`. The first `num_chunks*cap` MMSIs (the most
-    recently-active) always get slots; any overflow beyond that is dropped.
-    """
-    capacity = num_chunks * cap
-    if len(mmsis) > capacity:
-        logger.warning(
-            f"Priority watchlist has {len(mmsis)} MMSIs but only "
-            f"{num_chunks}×{cap}={capacity} slots — "
-            f"{len(mmsis) - capacity} least-recent truncated"
+async def load_scan_mmsis(pool: asyncpg.Pool) -> list[int]:
+    """Next SCAN_SLOTS vessels from priority_watchlist (tier 4-5), ordered by
+    (tier ASC, score ASC) so the stalest vessels rotate in first. With
+    ~650 tier-4/5 candidates and 50 slots per 1h window, full coverage of the
+    pool takes ~13h."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT mmsi FROM priority_watchlist
+            WHERE tier >= 4
+            ORDER BY tier ASC, score ASC
+            LIMIT $1
+            """,
+            SCAN_SLOTS,
         )
-        mmsis = mmsis[:capacity]
+    return [r["mmsi"] for r in rows]
+
+
+async def mark_slot_assignments(
+    pool: asyncpg.Pool, persistent: list[int], scan: list[int]
+) -> None:
+    """Write back which MMSIs won slots this cycle. Pure observability — the
+    TUI reads in_slot/slot_kind to render the tier breakdown panel."""
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "UPDATE priority_watchlist SET in_slot = FALSE, slot_kind = NULL"
+            )
+            if persistent:
+                await conn.execute(
+                    "UPDATE priority_watchlist SET in_slot = TRUE, slot_kind = 'persistent' "
+                    "WHERE mmsi = ANY($1::BIGINT[])",
+                    persistent,
+                )
+            if scan:
+                await conn.execute(
+                    "UPDATE priority_watchlist SET in_slot = TRUE, slot_kind = 'scan' "
+                    "WHERE mmsi = ANY($1::BIGINT[])",
+                    scan,
+                )
+
+
+def chunk_persistent(mmsis: list[int], num_chunks: int) -> list[list[int]]:
+    """Interleave persistent MMSIs across `num_chunks` chunks (the persistent
+    connections). The input is already in tier-priority order; interleaving
+    spreads activity evenly so no single connection is starved.
+    """
     chunks: list[list[int]] = [[] for _ in range(num_chunks)]
     for i, m in enumerate(mmsis):
         chunks[i % num_chunks].append(m)
@@ -396,18 +454,56 @@ async def ingest():
     # lets the existing batch path (`make enrich`) still feed it indirectly.
     enrichment_task = asyncio.create_task(enrichment_worker(pool, enrich_state))
 
+    # Run scoring once before opening any sockets so the first reconnect has
+    # a fresh priority_watchlist. Then re-run on the same 1h cadence as the
+    # planned reconnects so that promoted vessels get persistent slots on the
+    # very next cycle. If the first run fails (e.g. priority_watchlist not yet
+    # migrated), log + continue — load_persistent_mmsis has a cold-start
+    # fallback that keeps the ingester useful.
+    try:
+        await scoring.compute_and_upsert(pool)
+    except Exception as e:
+        logger.warning(f"Initial scoring run failed: {e}")
+
+    async def scoring_loop():
+        while True:
+            await asyncio.sleep(RECONNECT_INTERVAL_SECONDS)
+            try:
+                await scoring.compute_and_upsert(pool)
+            except Exception as e:
+                logger.warning(f"Scoring run failed: {e}")
+
+    scoring_task = asyncio.create_task(scoring_loop())
+
     async def connection_loop(source_name: str, chunk_index: int):
         """Reconnect loop owning one MMSI-filtered subscription. On each
-        (re)connect, re-reads the priority watchlist and takes its assigned
-        chunk — newly-enriched MMSIs get picked up after the 6h planned
-        reconnect (or any watchdog reconnect)."""
+        (re)connect:
+
+        - chunk_index < SCAN_CHUNK_INDEX → persistent block (interleaved half
+          of the top PERSISTENT_SLOTS by tier/score from priority_watchlist)
+        - chunk_index == SCAN_CHUNK_INDEX → scan rotation (next SCAN_SLOTS
+          oldest tier-4/5 candidates, rotating each 1h reconnect)
+        """
         while True:
             try:
-                priority = await load_priority_mmsis(pool)
-                chunks = chunk_mmsis(
-                    priority, NUM_CONNECTIONS, MMSI_CAP_PER_CONNECTION
-                )
-                my_mmsis = chunks[chunk_index]
+                if chunk_index == SCAN_CHUNK_INDEX:
+                    my_mmsis = await load_scan_mmsis(pool)
+                    persistent_mmsis = []  # set by other connections' loops, written below for observability only when we're a persistent conn
+                else:
+                    persistent_mmsis = await load_persistent_mmsis(pool)
+                    chunks = chunk_persistent(persistent_mmsis, PERSISTENT_CONNECTIONS)
+                    my_mmsis = chunks[chunk_index]
+                    # Persistent conn 0 is the only one that writes the slot
+                    # assignments — coordinated single-writer, no races.
+                    if chunk_index == 0:
+                        scan_mmsis = await load_scan_mmsis(pool)
+                        try:
+                            await mark_slot_assignments(
+                                pool, persistent_mmsis, scan_mmsis
+                            )
+                        except Exception as e:
+                            logger.warning(f"mark_slot_assignments failed: {e}")
+
                 if not my_mmsis:
                     logger.warning(
                         f"[{source_name}] empty MMSI chunk; sleeping 60s"
@@ -445,8 +541,9 @@ async def ingest():
             ]
         )
     finally:
-        enrichment_task.cancel()
-        await asyncio.gather(enrichment_task, return_exceptions=True)
+        for t in (enrichment_task, scoring_task):
+            t.cancel()
+        await asyncio.gather(enrichment_task, scoring_task, return_exceptions=True)
         await pool.close()
 
 

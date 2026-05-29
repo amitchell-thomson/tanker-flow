@@ -1,4 +1,4 @@
-.PHONY: up down db-ui psql logs reset seed-terminals seed-zones viz ingest enrich port-events
+.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events scoring refresh-fleet
 
 up:
 	docker compose up -d
@@ -43,3 +43,21 @@ viz:
 
 port-events:
 	uv run python -m pipeline.port_events
+
+seed-unlocodes:
+	docker exec -i tanker_db psql -U tanker_user -d tanker_flow < db/seed/terminal_unlocodes.sql
+
+scoring:
+	uv run python -m pipeline.scoring
+
+# Periodic refresh of the global LNG/FSRU fleet from the IGU report.
+# Step 1 (manual): download the latest "IGU World LNG Report" PDF from
+# https://www.igu.org/igu-reports and save it to
+# db/seed/igu-world-lng-report-latest.pdf.
+# Step 2: run this target. It re-parses the appendix, regenerates the
+# canonical CSV, and incrementally imports any new IMOs via VF.
+refresh-fleet:
+	uv run --with pypdf python scripts/parse_igu_fleet.py \
+	  --pdf db/seed/igu-world-lng-report-latest.pdf \
+	  --out db/seed/lng_fleet_igu_2025.csv
+	uv run python scripts/import_igu_fleet.py
