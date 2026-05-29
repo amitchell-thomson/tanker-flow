@@ -51,9 +51,14 @@ settings = _Settings()  # type: ignore
 from config import ZONES as _ZONES  # noqa: E402
 
 
-def _classify_zone(lat: float, lon: float) -> str | None:
+def _classify_zone(lat: float | None, lon: float | None) -> str | None:
     """Mirror of ingestion.metrics.classify_zone — duplicated here to avoid a
-    cross-package import dependency. First match wins."""
+    cross-package import dependency. Used to bucket fixes by geographic zone
+    AND to test whether a last-known position fell inside our terrestrial-AIS
+    coverage envelope (vessels last seen outside any zone bbox are most likely
+    mid-ocean and silent for benign reasons). First match wins."""
+    if lat is None or lon is None:
+        return None
     for name, lat_min, lat_max, lon_min, lon_max in _ZONES:
         if lat_min <= lat <= lat_max and lon_min <= lon <= lon_max:
             return name
@@ -409,97 +414,71 @@ class TankerFlowApp(App):
             await self._pool.close()
 
     async def refresh_slow_stats(self) -> None:
-        """Watchlist coverage + stale-vessels table, on the 30s timer."""
+        """Watchlist coverage + silent-vessels table, on the 30s timer.
+
+        Categorises each watchlist vessel into one of three mutually-exclusive
+        buckets based on its most recent fix and whether that fix was inside
+        our terrestrial-AIS coverage envelope (the 7 zone bboxes).
+        """
         if not self._pool:
             return
         try:
-            row = await self._pool.fetchrow(
-                """
-                WITH wl AS (
-                    SELECT mmsi FROM vessel_registry
-                    WHERE (is_lng_carrier OR is_fsru) AND NOT excluded
-                ),
-                last_seen AS (
-                    SELECT wl.mmsi, MAX(a.fix_ts) AS ts
-                    FROM wl LEFT JOIN ais_fixes a USING (mmsi)
-                    GROUP BY wl.mmsi
-                )
-                SELECT
-                  (SELECT COUNT(*) FROM wl) AS watched,
-                  COUNT(*) FILTER (WHERE ts > now() - INTERVAL '30 minutes') AS reporting,
-                  COUNT(*) FILTER (
-                    WHERE ts < now() - INTERVAL '30 minutes'
-                      AND ts > now() - INTERVAL '24 hours'
-                  ) AS silent,
-                  COUNT(*) FILTER (
-                    WHERE ts IS NULL OR ts < now() - INTERVAL '24 hours'
-                  ) AS dormant
-                FROM last_seen
-                """
-            )
-            if row:
-                self._watchlist_stats = (
-                    row["watched"], row["reporting"], row["silent"], row["dormant"]
-                )
-        except Exception:
-            pass
-
-        # Stale-vessels table — only the actionable population: vessels that
-        # were actively reporting in the last 24h but have now gone silent
-        # (>30 min without a fix). Excludes long-dormant vessels (mid-ocean,
-        # operating in non-LNG regions) since they're not a problem we can
-        # act on. Excludes never-seen and >24h-absent.
-        try:
-            stale_rows = await self._pool.fetch(
+            rows = await self._pool.fetch(
                 """
                 WITH wl AS (
                     SELECT mmsi, vessel_name FROM vessel_registry
                     WHERE (is_lng_carrier OR is_fsru) AND NOT excluded
                 ),
                 last_fix AS (
-                    SELECT a.mmsi, MAX(a.fix_ts) AS ts
-                    FROM ais_fixes a JOIN wl USING (mmsi)
-                    WHERE a.fix_ts > now() - INTERVAL '24 hours'
-                    GROUP BY a.mmsi
+                    SELECT DISTINCT ON (mmsi) mmsi, fix_ts AS ts, lat, lon
+                    FROM ais_fixes
+                    ORDER BY mmsi, fix_ts DESC
                 )
-                SELECT wl.mmsi, wl.vessel_name,
-                       EXTRACT(EPOCH FROM (now() - lf.ts))::int AS age_s,
-                       (SELECT lat FROM ais_fixes WHERE mmsi = wl.mmsi
-                        ORDER BY fix_ts DESC LIMIT 1) AS last_lat,
-                       (SELECT lon FROM ais_fixes WHERE mmsi = wl.mmsi
-                        ORDER BY fix_ts DESC LIMIT 1) AS last_lon
-                FROM wl JOIN last_fix lf USING (mmsi)
-                WHERE lf.ts < now() - INTERVAL '30 minutes'
-                ORDER BY lf.ts ASC
-                LIMIT 15
+                SELECT wl.mmsi, wl.vessel_name, lf.ts, lf.lat, lf.lon
+                FROM wl LEFT JOIN last_fix lf USING (mmsi)
                 """
             )
         except Exception:
             return
 
+        now = datetime.now(timezone.utc)
+        reporting = silent = dormant = 0
+        silent_rows: list[tuple[int, str, int, float, float]] = []
+        for r in rows:
+            ts = r["ts"]
+            lat, lon = r["lat"], r["lon"]
+            if ts is None:
+                dormant += 1
+                continue
+            age_s = int((now - ts).total_seconds())
+            if age_s < 1800:                                # < 30 min
+                reporting += 1
+            elif age_s < 86400 and _classify_zone(lat, lon) is not None:
+                silent += 1
+                silent_rows.append(
+                    (r["mmsi"], r["vessel_name"] or "—", age_s, lat, lon)
+                )
+            else:
+                # >24h since last fix, OR was last seen outside coverage zones
+                # (mid-ocean, foreign trade, etc — silent for benign reasons).
+                dormant += 1
+
+        self._watchlist_stats = (len(rows), reporting, silent, dormant)
+
+        silent_rows.sort(key=lambda r: -r[2])  # oldest age first
         table = self.query_one("#stale-table", DataTable)
         table.clear()
-        for r in stale_rows:
-            age_s = r["age_s"]
+        for mmsi, name, age_s, lat, lon in silent_rows[:15]:
             if age_s < 3600:
                 age_label = f"[yellow]{age_s // 60}m[/yellow]"
             elif age_s < 86400:
                 age_label = f"[red]{age_s // 3600}h{(age_s % 3600) // 60}m[/red]"
             else:
                 age_label = f"[red]{age_s // 86400}d[/red]"
-            zone = (
-                _classify_zone(r["last_lat"], r["last_lon"])
-                if r["last_lat"] is not None
-                else None
-            )
+            zone = _classify_zone(lat, lon)
             zone_color = _ZONE_COLORS.get(zone, "white") if zone else "dim"
             zone_label = f"[{zone_color}]{zone}[/]" if zone else "[dim]—[/dim]"
-            table.add_row(
-                r["vessel_name"] or "—",
-                str(r["mmsi"]),
-                age_label,
-                zone_label,
-            )
+            table.add_row(name, str(mmsi), age_label, zone_label)
 
     async def refresh_data(self) -> None:
         if not self._pool:
