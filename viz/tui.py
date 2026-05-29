@@ -416,13 +416,31 @@ class TankerFlowApp(App):
     async def refresh_slow_stats(self) -> None:
         """Watchlist coverage + silent-vessels table, on the 30s timer.
 
-        Categorises each watchlist vessel into one of three mutually-exclusive
-        buckets based on its most recent fix and whether that fix was inside
-        our terrestrial-AIS coverage envelope (the 7 zone bboxes).
+        "Silent" is restricted to vessels with strong evidence they actually
+        stopped reporting while in coverage, rather than just sailing out of
+        the terrestrial-AIS envelope. Two independent filters:
+
+        - SOG < 8 kn at last fix: cruising vessels near the coverage edge are
+          almost certainly heading out, not legitimately silent
+        - Last fix within 50 km of any terminal_zone polygon: vessels far
+          from any AIS-receiver-covered terminal are likely out of coverage
+          even if they're still inside one of our wide geographic bboxes
+          (mid-Gulf inside the usgulf bbox, central North Sea, etc.)
         """
         if not self._pool:
             return
         try:
+            # Constrain last_fix to the last 24h so the fix_ts index limits the
+            # scan (otherwise DISTINCT ON over 22M rows takes ~12s). Any vessel
+            # without a fix in that window gets a NULL ts on the LEFT JOIN and
+            # is buckets as dormant — exactly what we want.
+            #
+            # `near_terminal` uses geometry-mode ST_DWithin so the GIST index
+            # on terminal_zones.geom is used (geography casts bypass it). The
+            # 0.5° buffer ≈ 55 km at the equator, ~30 km at 60°N — imprecise
+            # but a tighter "in receiver range" proxy than our 100s-of-km
+            # geographic zone bboxes (e.g. usgulf includes mid-Gulf, which is
+            # outside any terrestrial receiver's reach).
             rows = await self._pool.fetch(
                 """
                 WITH wl AS (
@@ -430,11 +448,24 @@ class TankerFlowApp(App):
                     WHERE (is_lng_carrier OR is_fsru) AND NOT excluded
                 ),
                 last_fix AS (
-                    SELECT DISTINCT ON (mmsi) mmsi, fix_ts AS ts, lat, lon
+                    SELECT DISTINCT ON (mmsi)
+                           mmsi, fix_ts AS ts, lat, lon, sog
                     FROM ais_fixes
+                    WHERE fix_ts > now() - INTERVAL '24 hours'
                     ORDER BY mmsi, fix_ts DESC
                 )
-                SELECT wl.mmsi, wl.vessel_name, lf.ts, lf.lat, lf.lon
+                SELECT wl.mmsi, wl.vessel_name,
+                       lf.ts, lf.lat, lf.lon, lf.sog,
+                       CASE WHEN lf.lat IS NOT NULL THEN
+                         EXISTS (
+                           SELECT 1 FROM terminal_zones tz
+                           WHERE ST_DWithin(
+                             ST_SetSRID(ST_Point(lf.lon, lf.lat), 4326),
+                             tz.geom,
+                             0.5
+                           )
+                         )
+                       ELSE FALSE END AS near_terminal
                 FROM wl LEFT JOIN last_fix lf USING (mmsi)
                 """
             )
@@ -447,20 +478,27 @@ class TankerFlowApp(App):
         for r in rows:
             ts = r["ts"]
             lat, lon = r["lat"], r["lon"]
+            sog = r["sog"]
+            near_terminal = r["near_terminal"]
             if ts is None:
                 dormant += 1
                 continue
             age_s = int((now - ts).total_seconds())
             if age_s < 1800:                                # < 30 min
                 reporting += 1
-            elif age_s < 86400 and _classify_zone(lat, lon) is not None:
+            elif (
+                age_s < 86400
+                and near_terminal
+                and (sog is None or sog < 8.0)
+            ):
                 silent += 1
                 silent_rows.append(
                     (r["mmsi"], r["vessel_name"] or "—", age_s, lat, lon)
                 )
             else:
-                # >24h since last fix, OR was last seen outside coverage zones
-                # (mid-ocean, foreign trade, etc — silent for benign reasons).
+                # Dormant fold-in: long-absent, never-seen, sailed out of
+                # coverage (last fix far from any terminal), or was cruising
+                # offshore (SOG≥8 kn) when the last fix was recorded.
                 dormant += 1
 
         self._watchlist_stats = (len(rows), reporting, silent, dormant)
