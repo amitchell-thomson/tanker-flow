@@ -311,7 +311,12 @@ class TankerFlowApp(App):
         self._view_mode_idx: int = 0
         # Cached on a slow timer — watchlist coverage stats. The numbers don't
         # change rapidly and the queries touch ais_fixes broadly.
-        self._watchlist_stats: tuple[int, int, int] | None = None  # (watched, reporting_30m, stale_2h)
+        # (reporting_30m, silent, dormant): "reporting" = active in last 30 min;
+        # "silent" = was active in last 24h but missing since (operationally
+        # actionable); "dormant" = absent for >24h (likely outside our zones —
+        # mid-ocean, foreign trade, no terrestrial AIS coverage — not a
+        # problem we can act on).
+        self._watchlist_stats: tuple[int, int, int, int] | None = None
 
     @property
     def _view_mode(self) -> tuple[int, int, int]:
@@ -353,7 +358,9 @@ class TankerFlowApp(App):
                 yield Label("Terminal activity (last 1h)", id="terminal-label")
                 yield DataTable(id="terminal-table")
             with Vertical(id="stale-container"):
-                yield Label("Stale LNG/FSRU vessels", id="stale-label")
+                yield Label(
+                    "Silent vessels (active <24h ago, gone >30m)", id="stale-label"
+                )
                 yield DataTable(id="stale-table")
 
     async def on_mount(self) -> None:
@@ -411,28 +418,37 @@ class TankerFlowApp(App):
                 WITH wl AS (
                     SELECT mmsi FROM vessel_registry
                     WHERE (is_lng_carrier OR is_fsru) AND NOT excluded
+                ),
+                last_seen AS (
+                    SELECT wl.mmsi, MAX(a.fix_ts) AS ts
+                    FROM wl LEFT JOIN ais_fixes a USING (mmsi)
+                    GROUP BY wl.mmsi
                 )
                 SELECT
                   (SELECT COUNT(*) FROM wl) AS watched,
-                  (SELECT COUNT(DISTINCT a.mmsi) FROM ais_fixes a JOIN wl USING (mmsi)
-                     WHERE a.fix_ts > now() - INTERVAL '30 minutes') AS reporting,
-                  (SELECT COUNT(*) FROM wl
-                     WHERE NOT EXISTS (
-                       SELECT 1 FROM ais_fixes a
-                       WHERE a.mmsi = wl.mmsi AND a.fix_ts > now() - INTERVAL '2 hours'
-                     )) AS stale_2h
+                  COUNT(*) FILTER (WHERE ts > now() - INTERVAL '30 minutes') AS reporting,
+                  COUNT(*) FILTER (
+                    WHERE ts < now() - INTERVAL '30 minutes'
+                      AND ts > now() - INTERVAL '24 hours'
+                  ) AS silent,
+                  COUNT(*) FILTER (
+                    WHERE ts IS NULL OR ts < now() - INTERVAL '24 hours'
+                  ) AS dormant
+                FROM last_seen
                 """
             )
             if row:
                 self._watchlist_stats = (
-                    row["watched"], row["reporting"], row["stale_2h"]
+                    row["watched"], row["reporting"], row["silent"], row["dormant"]
                 )
         except Exception:
             pass
 
-        # Refresh the stale-vessels table — most-recently-seen LNG/FSRUs that
-        # haven't reported lately. Skips never-seen (no rows in ais_fixes) and
-        # vessels active in the last 30 min (which aren't "stale").
+        # Stale-vessels table — only the actionable population: vessels that
+        # were actively reporting in the last 24h but have now gone silent
+        # (>30 min without a fix). Excludes long-dormant vessels (mid-ocean,
+        # operating in non-LNG regions) since they're not a problem we can
+        # act on. Excludes never-seen and >24h-absent.
         try:
             stale_rows = await self._pool.fetch(
                 """
@@ -443,7 +459,7 @@ class TankerFlowApp(App):
                 last_fix AS (
                     SELECT a.mmsi, MAX(a.fix_ts) AS ts
                     FROM ais_fixes a JOIN wl USING (mmsi)
-                    WHERE a.fix_ts > now() - INTERVAL '30 days'
+                    WHERE a.fix_ts > now() - INTERVAL '24 hours'
                     GROUP BY a.mmsi
                 )
                 SELECT wl.mmsi, wl.vessel_name,
@@ -453,7 +469,7 @@ class TankerFlowApp(App):
                        (SELECT lon FROM ais_fixes WHERE mmsi = wl.mmsi
                         ORDER BY fix_ts DESC LIMIT 1) AS last_lon
                 FROM wl JOIN last_fix lf USING (mmsi)
-                WHERE EXTRACT(EPOCH FROM (now() - lf.ts)) > 1800   -- > 30 min stale
+                WHERE lf.ts < now() - INTERVAL '30 minutes'
                 ORDER BY lf.ts ASC
                 LIMIT 15
                 """
@@ -575,11 +591,12 @@ class TankerFlowApp(App):
         if self._watchlist_stats is None:
             stats_label = "watchlist: loading…"
         else:
-            watched, reporting, stale = self._watchlist_stats
+            watched, reporting, silent, dormant = self._watchlist_stats
             stats_label = (
-                f"watching {watched} | "
                 f"[green]{reporting}[/green] reporting (30m) | "
-                f"[yellow]{stale}[/yellow] stale (>2h)"
+                f"[yellow]{silent}[/yellow] silent (<24h) | "
+                f"[dim]{dormant}[/dim] dormant | "
+                f"[dim]{watched} watched[/dim]"
             )
         self.query_one("#status", Static).update(
             f"{dot} {hb_label} | {stats_label} | {now_str} UTC"
