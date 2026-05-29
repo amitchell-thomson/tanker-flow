@@ -96,7 +96,7 @@ auto-adds new MMSIs. Until then, manual discovery is the discipline.
 
 Per-LNG-vessel visibility is now ~100%, so state-transition timestamps in
 `port_events` are minute-accurate at worst. Median back-dating drops from ~2
-minutes to ~1 second; p95 from ~12 minutes to ~60 seconds. The state machine's
+minutes to ~ 1 second; p95 from ~ 12 minutes to ~ 60 seconds. The state machine's
 back-dating logic still exists for the rare cases when AISstream momentarily
 doesn't deliver a vessel (terrestrial receiver outage, etc.).
 
