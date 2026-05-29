@@ -76,6 +76,7 @@ CREATE TABLE terminals (
     is_fsru         BOOLEAN      NOT NULL DEFAULT FALSE,
     zone            TEXT         CHECK (zone IN ('usgulf','usatlantic','nweurope','baltic','iberian','wmed','emed')),
     fsru_host_mmsi  BIGINT,      -- For FSRU terminals: the MMSI of the resident FSRU vessel
+    unlocode        TEXT,        -- UN/LOCODE (e.g. NLRTM) used by dest parser to resolve vessel_state.dest → terminal_id
     notes           TEXT
 );
 
@@ -131,6 +132,27 @@ CREATE TABLE port_events (
 CREATE INDEX ON port_events (mmsi, event_time DESC);
 CREATE INDEX ON port_events (terminal_id, event_time DESC);
 CREATE INDEX ON port_events (zone, event_type, event_time DESC);
+
+
+-- Priority watchlist: derived nightly+hourly by pipeline/scoring.py. One row per
+-- LNG/FSRU vessel in vessel_registry. The ingester reads top-N from this table
+-- to pick the 150 MMSIs to subscribe to (100 persistent + 50 scan rotation).
+CREATE TABLE priority_watchlist (
+    mmsi                    BIGINT       PRIMARY KEY REFERENCES vessel_registry(mmsi),
+    tier                    SMALLINT     NOT NULL,                -- 1-5; see pipeline/scoring.py
+    score                   REAL         NOT NULL,                -- finer ordering within tier
+    score_reason            TEXT,                                 -- e.g. 'in-zone:sabine', 'dest:NLRTM eta:3d'
+    last_fix_ts             TIMESTAMPTZ,                          -- max(ais_fixes.fix_ts) for this mmsi
+    last_zone_fix_ts        TIMESTAMPTZ,                          -- last fix inside any terminal_zones or config.ZONES rect
+    parsed_dest_terminal_id INT          REFERENCES terminals(terminal_id),
+    parsed_eta              TIMESTAMPTZ,
+    in_slot                 BOOLEAN      NOT NULL DEFAULT FALSE,  -- set TRUE by aisstream.py after picking the 150
+    slot_kind               TEXT,                                 -- 'persistent' | 'scan' | NULL
+    computed_at             TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+CREATE INDEX ix_priority_watchlist_tier_last_fix ON priority_watchlist (tier, last_fix_ts DESC);
+CREATE INDEX ix_priority_watchlist_slot_kind_last_fix ON priority_watchlist (slot_kind, last_fix_ts);
 
 
 -- Ingestion lifecycle events: append-only.
