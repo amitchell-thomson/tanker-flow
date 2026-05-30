@@ -7,7 +7,9 @@ MMSIs to subscribe to (100 persistent + 50 scan).
 
 Tier definitions (also documented in CLAUDE.md):
 
-    1 — recent fix inside any terminal_zones polygon (within 14d)
+    1 — recent fix inside any terminal_zones polygon (within 3d) — must be
+        plausibly *currently* in zone, not "was there a week ago and is now
+        mid-Atlantic"
     2 — vessel_state.dest parses to a known terminal, state_ts < 14d old
     3 — recent fix inside any config.ZONES rectangle (within 14d), not 1/2
     4 — any fix in the last 7d (not 1-3) — recently active globally
@@ -133,11 +135,12 @@ def assign_tier(
     tier. Higher = more relevant for tiers 1-4; for tier 5 the caller uses
     ASC ordering for scan-rotation staleness.
     """
+    three_days = now - timedelta(days=3)
     fourteen_days = now - timedelta(days=14)
     seven_days = now - timedelta(days=7)
     ninety_days = now - timedelta(days=90)
 
-    if last_polygon_fix_ts and last_polygon_fix_ts > fourteen_days:
+    if last_polygon_fix_ts and last_polygon_fix_ts > three_days:
         return (1, f"in-zone:polygon @ {last_polygon_fix_ts:%Y-%m-%d}", last_polygon_fix_ts)
 
     if dest_terminal_id and state_ts and state_ts > fourteen_days:

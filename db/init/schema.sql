@@ -148,11 +148,13 @@ CREATE TABLE priority_watchlist (
     parsed_eta              TIMESTAMPTZ,
     in_slot                 BOOLEAN      NOT NULL DEFAULT FALSE,  -- set TRUE by aisstream.py after picking the 150
     slot_kind               TEXT,                                 -- 'persistent' | 'scan' | NULL
+    last_scan_window_at     TIMESTAMPTZ,                          -- bumped each time a vessel is picked for a scan window; used to rotate the scan queue
     computed_at             TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 
 CREATE INDEX ix_priority_watchlist_tier_last_fix ON priority_watchlist (tier, last_fix_ts DESC);
 CREATE INDEX ix_priority_watchlist_slot_kind_last_fix ON priority_watchlist (slot_kind, last_fix_ts);
+CREATE INDEX ix_priority_watchlist_tier_scan_window ON priority_watchlist (tier, last_scan_window_at ASC NULLS FIRST);
 
 
 -- Ingestion lifecycle events: append-only.

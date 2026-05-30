@@ -68,8 +68,13 @@ TANKER_TYPES = set(range(80, 90))
 
 @dataclass
 class IngestionState:
-    """Per-connection: MMSI filter set + counters + buffers."""
+    """Per-connection: MMSI filter set + counters + buffers.
 
+    `source_name` is plumbed into ais_fixes / vessel_state so downstream
+    queries can distinguish persistent (mmsi-1/-2) from scan (mmsi-3) fixes.
+    """
+
+    source_name: str = "aisstream"
     non_tanker_mmsis: set[int] = field(default_factory=set)
     fix_inserts: int = 0
     registry_upserts: int = 0
@@ -130,20 +135,35 @@ async def load_persistent_mmsis(pool: asyncpg.Pool) -> list[int]:
 
 async def load_scan_mmsis(pool: asyncpg.Pool) -> list[int]:
     """Next SCAN_SLOTS vessels from priority_watchlist (tier 4-5), ordered by
-    (tier ASC, score ASC) so the stalest vessels rotate in first. With
-    ~650 tier-4/5 candidates and 50 slots per 1h window, full coverage of the
-    pool takes ~13h."""
+    `last_scan_window_at ASC NULLS FIRST` so the least-recently-scanned
+    vessels are picked. After picking, write back `last_scan_window_at = now()`
+    in the same transaction so this exact batch won't be re-picked on the
+    very next reconnect.
+
+    This is what makes scan rotation actually rotate. Without the
+    write-back, watchdog reconnects (every ~5 min when scan vessels are
+    silent) would keep re-selecting the same 50 MMSIs forever.
+    """
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT mmsi FROM priority_watchlist
-            WHERE tier >= 4
-            ORDER BY tier ASC, score ASC
-            LIMIT $1
-            """,
-            SCAN_SLOTS,
-        )
-    return [r["mmsi"] for r in rows]
+        async with conn.transaction():
+            rows = await conn.fetch(
+                """
+                SELECT mmsi FROM priority_watchlist
+                WHERE tier >= 4
+                ORDER BY tier ASC, last_scan_window_at ASC NULLS FIRST
+                LIMIT $1
+                FOR UPDATE
+                """,
+                SCAN_SLOTS,
+            )
+            mmsis = [r["mmsi"] for r in rows]
+            if mmsis:
+                await conn.execute(
+                    "UPDATE priority_watchlist SET last_scan_window_at = now() "
+                    "WHERE mmsi = ANY($1::BIGINT[])",
+                    mmsis,
+                )
+    return mmsis
 
 
 async def mark_slot_assignments(
@@ -213,7 +233,7 @@ def parse_message(
                 msg.Message.Longitude,
                 msg.Message.NavigationalStatus,
                 msg.Message.Sog,
-                "aisstream",
+                ingest_state.source_name,
             )
         )
         zone = classify_zone(msg.Message.Latitude, msg.Message.Longitude)
@@ -246,7 +266,7 @@ def parse_message(
                 msg.Message.MaximumStaticDraught,
                 msg.Message.Destination,
                 json.dumps(msg.Message.Eta) if msg.Message.Eta is not None else None,
-                "aisstream",
+                ingest_state.source_name,
             )
         )
 
@@ -510,7 +530,7 @@ async def ingest():
                     )
                     await asyncio.sleep(60)
                     continue
-                ingest_state = IngestionState()
+                ingest_state = IngestionState(source_name=source_name)
                 await connect_and_drain(
                     url, pool, ingest_state, my_mmsis, source_name
                 )

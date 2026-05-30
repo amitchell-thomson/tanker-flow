@@ -82,7 +82,7 @@ layer that runs every hour:
 
   | Tier | Rule |
   |---|---|
-  | 1 | Fix inside any `terminal_zones` polygon in last 14d |
+  | 1 | Fix inside any `terminal_zones` polygon in last 3d (vessel plausibly *currently* in zone, not "was there last week") |
   | 2 | `vessel_state.dest` parses to a `terminals.unlocode` AND `state_ts > now() - 14d` |
   | 3 | Fix inside any `config.ZONES` rectangle in last 14d (not 1/2) |
   | 4 | Any fix in last 7d (not 1-3) |
