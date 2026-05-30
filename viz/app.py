@@ -113,6 +113,29 @@ async def recent_fixes(
     return [dict(r) for r in rows]
 
 
+@app.get("/api/ingest-status")
+async def ingest_status(pool: asyncpg.Pool = Depends(get_pool)):
+    """Live ingestion pulse for the map HUD: smoothed fix rate (fixes/min over
+    the last 5 min) and how stale the freshest per-minute bucket is, so the
+    frontend can show a live/stale dot. Mirrors the TUI's liveness derivation
+    from ingestion_stats_minute (max bucket per aisstream source)."""
+    row = await pool.fetchrow(
+        """
+        SELECT
+            COALESCE(SUM(fix_count)
+                     FILTER (WHERE bucket > now() - INTERVAL '5 minutes'), 0) AS last_5min,
+            EXTRACT(EPOCH FROM (now() - MAX(bucket)))::int AS last_bucket_age_s
+        FROM ingestion_stats_minute
+        WHERE source LIKE 'aisstream%'
+          AND bucket > now() - INTERVAL '15 minutes'
+        """
+    )
+    return {
+        "fix_rate_per_min": round((row["last_5min"] or 0) / 5.0, 1),
+        "last_bucket_age_s": row["last_bucket_age_s"],  # None if silent 15 min+
+    }
+
+
 @app.get("/api/terminal-zones")
 async def terminal_zones(pool: asyncpg.Pool = Depends(get_pool)):
     rows = await pool.fetch(

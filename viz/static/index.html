@@ -166,6 +166,26 @@
       font-family: monospace;
       max-width: 40vw;
     }
+    /* Live ingestion pulse — fix rate + a dot that breathes while data flows */
+    #live-hud {
+      top: 12px;
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 6px 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      font-family: monospace;
+      color: #bdc3c7;
+    }
+    #live-dot { width: 9px; height: 9px; border-radius: 50%; background: #7f8c8d; flex: none; }
+    #live-dot.live { background: #2ecc71; animation: live-pulse 1.8s ease-in-out infinite; }
+    #live-dot.stale { background: #e74c3c; }
+    @keyframes live-pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(46, 204, 113, 0.55); }
+      50%      { box-shadow: 0 0 0 6px rgba(46, 204, 113, 0); }
+    }
     /* Map legend — decodes the marker encoding (class / tier ring / freshness) */
     #legend {
       bottom: 12px;
@@ -275,6 +295,10 @@
         <div id="fixes-list">Loading…</div>
       </div>
     </div>
+  </div>
+  <div id="live-hud" class="hud">
+    <span id="live-dot"></span>
+    <span id="live-text">…</span>
   </div>
   <button id="reset-btn" class="hud" onclick="resetView()">Show all vessels</button>
   <div id="layer-controls" class="hud">
@@ -743,6 +767,31 @@
     fixesTimer = setInterval(() => {
       if (activeTab === 'fixes' && document.getElementById('fixes-autorefresh').checked) loadFixes();
     }, 15000);
+
+    // ----------------------------------------------------------------
+    // Live ingestion pulse (top-center HUD)
+    // ----------------------------------------------------------------
+
+    async function loadIngestStatus() {
+      try {
+        const s = await fetch('/api/ingest-status').then(r => r.json());
+        const dot = document.getElementById('live-dot');
+        const txt = document.getElementById('live-text');
+        const age = s.last_bucket_age_s;
+        if (age == null) {
+          dot.className = 'stale';
+          txt.textContent = 'no ingest (15m+)';
+        } else if (age < 180) {
+          dot.className = 'live';
+          txt.textContent = `live · ${s.fix_rate_per_min.toLocaleString()} fixes/min`;
+        } else {
+          dot.className = 'stale';
+          txt.textContent = `stale · ${Math.round(age / 60)}m since last fix`;
+        }
+      } catch (e) { /* transient — keep the last shown state */ }
+    }
+    loadIngestStatus();
+    setInterval(loadIngestStatus, 10000);
 
     loadVessels();
     loadTerminalZones();
