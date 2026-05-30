@@ -102,7 +102,10 @@ async def recent_fixes(
         FROM ais_fixes a
         LEFT JOIN vessel_registry v USING (mmsi)
         LEFT JOIN priority_watchlist p USING (mmsi)
-        WHERE a.fix_ts > now() - make_interval(hours => $1)
+        -- $1 may be fractional (e.g. 0.25 = 15 min); multiply an interval rather
+        -- than make_interval(hours=>), whose hours arg is integer and would
+        -- truncate 0.25 → 0, silently matching no rows.
+        WHERE a.fix_ts > now() - ($1 * INTERVAL '1 hour')
           AND a.lat IS NOT NULL AND a.lon IS NOT NULL
         ORDER BY a.fix_ts DESC
         LIMIT $2
@@ -635,7 +638,9 @@ async def port_events(
         where.append(f"pe.terminal_id = ${len(args)}")
     if since_hours is not None:
         args.append(since_hours)
-        where.append(f"pe.event_time > now() - make_interval(hours => ${len(args)})")
+        # Multiply an interval (not make_interval(hours=>), whose integer hours
+        # arg truncates fractional windows) so sub-hour filters work too.
+        where.append(f"pe.event_time > now() - (${len(args)} * INTERVAL '1 hour')")
     args.append(limit)
     limit_idx = len(args)
 
