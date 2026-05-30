@@ -329,6 +329,12 @@
     const TIER_COLORS = { 1: '#2ecc71', 2: '#f1c40f', 3: '#e67e22', 4: '#95a5a6', 5: '#566573' };
     function tierColor(tier) { return TIER_COLORS[tier] || '#34495e'; }
 
+    // priority_watchlist tier → marker radius (px). Tier 1 (at a terminal) reads
+    // largest so "what matters now" carries the most visual weight; stale tiers
+    // shrink. null (off-watchlist) sits at the neutral middle.
+    const TIER_RADIUS = { 1: 8, 2: 7, 3: 6, 4: 5, 5: 4 };
+    function tierRadius(tier) { return TIER_RADIUS[tier] || 5.5; }
+
     // Fix freshness → fill opacity. Just-seen vessels burn bright; the longer
     // since their last fix, the more they fade, so silent vessels recede.
     function freshnessOpacity(fixTs) {
@@ -416,19 +422,21 @@
         const color = v.is_fsru ? FSRU_COLOR : CARRIER_COLOR;
         const stroke = tierColor(v.tier);
         const fresh = freshnessOpacity(v.fix_ts);
+        const r = tierRadius(v.tier);
         let marker;
         if (v.is_fsru) {
-          // FSRUs are stationary hosts — draw a square. Tier rings the box;
-          // freshness fades the whole marker via its layer opacity.
+          // FSRUs are stationary hosts — draw a square, sized by tier like the
+          // circles. Tier rings the box; freshness fades the whole marker.
+          const box = Math.round(r * 1.9);
           const icon = L.divIcon({
             className: 'fsru-icon',
-            html: `<div style="width:12px;height:12px;background:${color};border:2px solid ${stroke};"></div>`,
-            iconSize: [12, 12], iconAnchor: [6, 6],
+            html: `<div style="width:${box}px;height:${box}px;background:${color};border:2px solid ${stroke};"></div>`,
+            iconSize: [box, box], iconAnchor: [box / 2, box / 2],
           });
           marker = L.marker([v.lat, v.lon], { icon, opacity: fresh });
         } else {
           marker = L.circleMarker([v.lat, v.lon], {
-            radius: 6, color: stroke, fillColor: color,
+            radius: r, color: stroke, fillColor: color,
             fillOpacity: fresh, opacity: Math.max(0.5, fresh), weight: 2,
             bubblingMouseEvents: false,
           });
