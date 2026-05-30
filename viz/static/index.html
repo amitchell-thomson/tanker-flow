@@ -5,11 +5,12 @@
   <title>Tanker Flow</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <style>
-    body { margin: 0; background: #1a1a2e; font-family: -apple-system, BlinkMacSystemFont, sans-serif; color: #ecf0f1; }
+    :root { --panel-w: 360px; }
+    body { margin: 0; background: #0d1117; font-family: -apple-system, BlinkMacSystemFont, sans-serif; color: #ecf0f1; }
     #layout { display: flex; height: 100vh; width: 100vw; }
     #map { flex: 1; height: 100vh; }
     #events-panel {
-      width: 360px;
+      width: var(--panel-w);
       height: 100vh;
       background: #1f2733;
       border-left: 1px solid #2c3e50;
@@ -114,53 +115,100 @@
     .badge-ballast { background: #34495e; color: #95a5a6; }
     .badge-cold { background: #e67e22; color: white; }
     .badge-fsru { background: #e74c3c; color: white; }
+    /* Floating HUD surfaces — translucent dark cards that read as one system */
+    .hud {
+      position: absolute;
+      z-index: 1000;
+      background: rgba(20, 26, 34, 0.82);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 8px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+    }
     #reset-btn {
       display: none;
-      position: absolute;
-      top: 10px;
-      right: 370px;
-      z-index: 1000;
-      padding: 6px 12px;
-      background: #2c3e50;
+      top: 12px;
+      right: calc(var(--panel-w) + 12px);
+      padding: 7px 13px;
       color: #ecf0f1;
-      border: 1px solid #7f8c8d;
-      border-radius: 4px;
       cursor: pointer;
       font-size: 13px;
+      font-family: inherit;
     }
-    #reset-btn:hover { background: #34495e; }
+    #reset-btn:hover { background: rgba(52, 73, 94, 0.6); }
     #layer-controls {
-      position: absolute;
-      top: 10px;
-      left: 50px;
-      z-index: 1000;
+      top: 12px;
+      left: 52px;
       display: flex;
-      gap: 6px;
+      gap: 4px;
       flex-wrap: wrap;
+      padding: 5px;
     }
     .layer-btn {
       padding: 5px 10px;
-      background: #2c3e50;
-      color: #ecf0f1;
-      border: 1px solid #7f8c8d;
-      border-radius: 4px;
+      background: transparent;
+      color: #bdc3c7;
+      border: 1px solid transparent;
+      border-radius: 5px;
       cursor: pointer;
       font-size: 12px;
+      font-family: inherit;
     }
-    .layer-btn.active { border-color: #3498db; color: #3498db; }
-    .layer-btn:hover { background: #34495e; }
+    .layer-btn.active { background: rgba(52, 152, 219, 0.18); color: #3498db; }
+    .layer-btn:hover:not(.active) { background: rgba(255, 255, 255, 0.06); }
     #status {
-      position: absolute;
-      bottom: 10px;
-      left: 10px;
-      z-index: 1000;
-      padding: 4px 10px;
-      background: rgba(0,0,0,0.65);
+      bottom: 12px;
+      left: 12px;
+      padding: 6px 12px;
       color: #bdc3c7;
-      border-radius: 4px;
       font-size: 11px;
       font-family: monospace;
+      max-width: 40vw;
     }
+    /* Map legend — decodes the marker encoding (class / tier ring / freshness) */
+    #legend {
+      bottom: 12px;
+      right: calc(var(--panel-w) + 12px);
+      padding: 9px 11px;
+      font-size: 11px;
+      color: #bdc3c7;
+      line-height: 1.5;
+      width: 150px;
+    }
+    #legend .legend-title { font-weight: 600; color: #ecf0f1; margin: 7px 0 3px; }
+    #legend .legend-title:first-child { margin-top: 0; }
+    #legend .legend-row { display: flex; align-items: center; gap: 6px; }
+    #legend .swatch { width: 11px; height: 11px; border-radius: 50%; flex: none; }
+    #legend .swatch.sq { border-radius: 2px; }
+    #legend .tier-scale { display: flex; gap: 3px; margin-top: 2px; }
+    #legend .tier-scale span { flex: 1; text-align: center; border-radius: 2px; font-size: 9px; font-weight: 700; color: #11161c; padding: 1px 0; }
+    #legend .fade-bar { height: 9px; border-radius: 2px; margin-top: 3px; background: linear-gradient(90deg, #ff5fa2 0%, rgba(255,95,162,0.16) 100%); }
+    #legend .fade-labels { display: flex; justify-content: space-between; font-size: 9px; color: #7f8c8d; margin-top: 1px; }
+    /* Dark-theme the Leaflet chrome (zoom, attribution, popups, tooltips) */
+    .leaflet-control-zoom a {
+      background: rgba(20, 26, 34, 0.85); color: #ecf0f1;
+      border-color: rgba(255, 255, 255, 0.1);
+    }
+    .leaflet-control-zoom a:hover { background: rgba(52, 73, 94, 0.9); }
+    .leaflet-bar { border: 1px solid rgba(255, 255, 255, 0.1); }
+    .leaflet-control-attribution {
+      background: rgba(20, 26, 34, 0.7) !important; color: #7f8c8d !important;
+    }
+    .leaflet-control-attribution a { color: #95a5a6 !important; }
+    .leaflet-popup-content-wrapper, .leaflet-popup-tip {
+      background: #1f2733; color: #ecf0f1; box-shadow: 0 3px 14px rgba(0, 0, 0, 0.5);
+    }
+    .leaflet-popup-content { font-size: 12px; }
+    .leaflet-container a.leaflet-popup-close-button { color: #95a5a6; }
+    .leaflet-tooltip {
+      background: #1f2733; color: #ecf0f1; border: 1px solid #2c3e50;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+    }
+    .leaflet-tooltip-top::before { border-top-color: #1f2733; }
+    .leaflet-tooltip-bottom::before { border-bottom-color: #1f2733; }
+    .leaflet-tooltip-left::before { border-left-color: #1f2733; }
+    .leaflet-tooltip-right::before { border-right-color: #1f2733; }
     /* Event-type color pills (also used as the map icon colors) */
     .et-zone_entry      { background: #27ae60; color: white; }
     .et-anchorage_entry { background: #2980b9; color: white; }
@@ -228,20 +276,37 @@
       </div>
     </div>
   </div>
-  <button id="reset-btn" onclick="resetView()">Show all vessels</button>
-  <div id="layer-controls">
+  <button id="reset-btn" class="hud" onclick="resetView()">Show all vessels</button>
+  <div id="layer-controls" class="hud">
     <button class="layer-btn active" id="btn-zones"   onclick="toggleLayer('zones')">Terminal zones</button>
     <button class="layer-btn active" id="btn-boxes"   onclick="toggleLayer('boxes')">AIS boxes</button>
     <button class="layer-btn active" id="btn-vessels" onclick="toggleLayer('vessels')">Vessels</button>
     <button class="layer-btn" id="btn-density" onclick="toggleDensity()">Density</button>
   </div>
-  <div id="status">Loading…</div>
+  <div id="legend" class="hud">
+    <div class="legend-title">Vessel class</div>
+    <div class="legend-row"><span class="swatch" style="background:#ff5fa2;"></span> LNG carrier</div>
+    <div class="legend-row"><span class="swatch sq" style="background:#e74c3c;"></span> FSRU</div>
+    <div class="legend-title">Watchlist tier (ring)</div>
+    <div class="tier-scale">
+      <span class="tier-1">1</span><span class="tier-2">2</span><span class="tier-3">3</span><span class="tier-4">4</span><span class="tier-5">5</span>
+    </div>
+    <div class="fade-labels"><span>at terminal</span><span>stale</span></div>
+    <div class="legend-title">Fix freshness</div>
+    <div class="fade-bar"></div>
+    <div class="fade-labels"><span>just seen</span><span>&gt;24h</span></div>
+  </div>
+  <div id="status" class="hud">Loading…</div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
     const map = L.map('map').setView([25, -30], 3);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '&copy; OpenStreetMap contributors',
-      maxZoom: 18,
+    // Dark basemap (CARTO dark_all) — keeps land detail muted so the colored
+    // vessel/tier markers and the plasma density layer read clearly. {r}
+    // serves @2x tiles on retina; no API key required.
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+      attribution: '&copy; OpenStreetMap &copy; CARTO',
+      subdomains: 'abcd',
+      maxZoom: 19,
     }).addTo(map);
 
     const vesselLayer  = L.layerGroup().addTo(map);
