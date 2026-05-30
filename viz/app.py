@@ -47,6 +47,10 @@ async def index():
 
 @app.get("/api/vessels")
 async def vessels(pool: asyncpg.Pool = Depends(get_pool)):
+    # LNG-centric: only LNG carriers and FSRUs reach the map. Under server-side
+    # MMSI filtering every subscribed vessel is one of these, so there is no
+    # "unknown vessel" class to render. Tier / slot come from the
+    # priority_watchlist so the map can surface scan priority per vessel.
     rows = await pool.fetch(
         """
         WITH latest_fix AS (
@@ -68,11 +72,43 @@ async def vessels(pool: asyncpg.Pool = Depends(get_pool)):
             v.vessel_name, v.flag, v.imo, v.is_lng_carrier, v.is_fsru,
             v.vf_vessel_type, v.design_draught,
             d.draught AS current_draught,
-            d.state_ts AS current_draught_ts
+            d.state_ts AS current_draught_ts,
+            p.tier, p.score_reason, p.in_slot, p.slot_kind
         FROM latest_fix f
-        LEFT JOIN vessel_registry v USING (mmsi)
+        JOIN vessel_registry v USING (mmsi)
         LEFT JOIN latest_draught d USING (mmsi)
+        LEFT JOIN priority_watchlist p USING (mmsi)
+        WHERE v.is_lng_carrier = TRUE OR v.is_fsru = TRUE
         """
+    )
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/recent-fixes")
+async def recent_fixes(
+    since_hours: float = 6.0,
+    limit: int = 200,
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    """Newest AIS fixes across all vessels, newest first — the live feed that
+    backs the 'Recent fixes' panel. Joined with vessel masterdata + tier so each
+    row shows who it is and why we're watching them."""
+    rows = await pool.fetch(
+        """
+        SELECT
+            a.mmsi, a.lat, a.lon, a.fix_ts, a.sog, a.nav_status, a.source,
+            v.vessel_name, v.is_lng_carrier, v.is_fsru, v.vf_vessel_type,
+            p.tier, p.slot_kind
+        FROM ais_fixes a
+        LEFT JOIN vessel_registry v USING (mmsi)
+        LEFT JOIN priority_watchlist p USING (mmsi)
+        WHERE a.fix_ts > now() - make_interval(hours => $1)
+          AND a.lat IS NOT NULL AND a.lon IS NOT NULL
+        ORDER BY a.fix_ts DESC
+        LIMIT $2
+        """,
+        since_hours,
+        limit,
     )
     return [dict(r) for r in rows]
 
