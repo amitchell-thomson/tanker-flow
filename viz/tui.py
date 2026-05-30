@@ -639,6 +639,7 @@ class TankerFlowApp(App):
                 lt_bucket_rows,
                 lag_bucket_rows,
                 conn_age_rows,
+                lifecycle_age_rows,
             ) = await asyncio.gather(
                 # Pull recent LNG/FSRU fixes; we aggregate (per-minute, per-zone
                 # distinct vessels) client-side. Volume is small (~10/min in
@@ -690,33 +691,61 @@ class TankerFlowApp(App):
                         GROUP BY source
                         """
                 ),
+                # Lifecycle-event liveness: proves the WebSocket is alive even
+                # if no fixes are landing (typical for the scan connection
+                # when its current 50 MMSIs are mid-ocean / out of coverage).
+                # Any connect / subscribed / planned_reconnect / watchdog_reconnect
+                # event from a source means the socket is up.
+                self._pool.fetch(
+                    """
+                        SELECT source,
+                               EXTRACT(EPOCH FROM (now() - MAX(event_ts)))::int AS age_s
+                        FROM ingestion_events
+                        WHERE source LIKE 'aisstream%'
+                          AND event_type IN ('connect','subscribed','planned_reconnect','watchdog_reconnect')
+                          AND event_ts > now() - INTERVAL '30 minutes'
+                        GROUP BY source
+                        """
+                ),
             )
         except Exception:
             now = datetime.now(timezone.utc).strftime("%H:%M:%S")
             self.query_one("#status", Static).update(f"⚠ DB error {now}")
             return
 
-        # Liveness from per-source minute deltas. A source is "live" if its
-        # most recent bucket is the current or previous minute (age < 120s);
-        # "stale" if it's gone quiet but reported recently; "dead" if absent.
+        # Two-axis liveness: fix flow (ingestion_stats_minute) AND socket-level
+        # lifecycle (ingestion_events). A connection counts as:
+        #   active   — fixes flowing in last 2 min (data-good)
+        #   silent   — socket alive (lifecycle event in last 10 min) but no
+        #              fixes recently. Expected steady state for the scan
+        #              connection when its current 50 MMSIs are mid-ocean
+        #              or otherwise out of AIS coverage.
+        #   dead     — neither: nothing from the source in 10+ min.
         expected_sources = [f"aisstream-mmsi-{i + 1}" for i in range(3)]
-        ages: dict[str, int] = {row["source"]: row["age_s"] for row in conn_age_rows}
-        live = sum(1 for s in expected_sources if ages.get(s, 10**9) < 120)
-        stale = sum(
+        fix_ages: dict[str, int] = {row["source"]: row["age_s"] for row in conn_age_rows}
+        evt_ages: dict[str, int] = {row["source"]: row["age_s"] for row in lifecycle_age_rows}
+        active = sum(1 for s in expected_sources if fix_ages.get(s, 10**9) < 120)
+        silent = sum(
             1
             for s in expected_sources
-            if 120 <= ages.get(s, 10**9) < 600
+            if fix_ages.get(s, 10**9) >= 120 and evt_ages.get(s, 10**9) < 600
         )
-        dead = len(expected_sources) - live - stale
-        if live == len(expected_sources):
+        dead = len(expected_sources) - active - silent
+        if active == len(expected_sources):
             dot = "[green]●[/green]"
-            hb_label = f"live {live}/{len(expected_sources)}"
-        elif live + stale == len(expected_sources) and stale > 0:
+            hb_label = f"live {active}/{len(expected_sources)}"
+        elif dead == 0:
+            dot = "[cyan]●[/cyan]"
+            hb_label = (
+                f"alive {active + silent}/{len(expected_sources)} "
+                f"(active: {active}, silent: {silent})"
+            )
+        elif active + silent > 0:
             dot = "[yellow]●[/yellow]"
-            hb_label = f"degraded {live}/{len(expected_sources)} (stale: {stale})"
-        elif live > 0:
-            dot = "[yellow]●[/yellow]"
-            hb_label = f"degraded {live}/{len(expected_sources)} (dead: {dead})"
+            hb_label = (
+                f"degraded {active + silent}/{len(expected_sources)} "
+                f"(dead: {dead})"
+            )
         else:
             dot = "[red]●[/red]"
             hb_label = "no connections live"
