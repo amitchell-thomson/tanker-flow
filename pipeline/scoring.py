@@ -68,21 +68,33 @@ candidate_fixes AS (
       AND EXISTS (SELECT 1 FROM lng_fleet l WHERE l.mmsi = a.mmsi)
 ),
 zone_classified AS (
+    -- Per-fix most-specific polygon containment: berth wins over anchorage
+    -- wins over approach. NULL means not in any terminal_zones polygon.
     SELECT
         cf.mmsi,
         cf.fix_ts,
-        EXISTS (
-            SELECT 1 FROM terminal_zones tz
+        (
+            SELECT MIN(
+                CASE tz.zone_type
+                    WHEN 'berth'     THEN 1
+                    WHEN 'anchorage' THEN 2
+                    WHEN 'approach'  THEN 3
+                END
+            )
+            FROM terminal_zones tz
             WHERE ST_Within(ST_SetSRID(ST_Point(cf.lon, cf.lat), 4326), tz.geom)
-        ) AS in_polygon,
+        ) AS specificity,
         {_bbox_predicate("cf.lat", "cf.lon")} AS in_bbox
     FROM candidate_fixes cf
 ),
 fix_stats AS (
     SELECT
         mmsi,
-        MAX(fix_ts) FILTER (WHERE in_polygon) AS last_polygon_fix_ts,
-        MAX(fix_ts) FILTER (WHERE in_bbox)    AS last_bbox_fix_ts
+        MAX(fix_ts) FILTER (WHERE specificity = 1) AS last_berth_fix_ts,
+        MAX(fix_ts) FILTER (WHERE specificity = 2) AS last_anchorage_fix_ts,
+        MAX(fix_ts) FILTER (WHERE specificity = 3) AS last_approach_fix_ts,
+        MAX(fix_ts) FILTER (WHERE specificity IS NOT NULL) AS last_polygon_fix_ts,
+        MAX(fix_ts) FILTER (WHERE in_bbox)                 AS last_bbox_fix_ts
     FROM zone_classified
     GROUP BY mmsi
 ),
@@ -102,6 +114,9 @@ latest_state AS (
 SELECT
     f.mmsi,
     lfg.last_fix_ts,
+    fs.last_berth_fix_ts,
+    fs.last_anchorage_fix_ts,
+    fs.last_approach_fix_ts,
     fs.last_polygon_fix_ts,
     fs.last_bbox_fix_ts,
     ls.dest,
@@ -120,20 +135,57 @@ async def load_unlocode_map(conn: asyncpg.Connection) -> dict[str, int]:
     return {r["unlocode"]: r["terminal_id"] for r in rows}
 
 
+# Within-tier-1 score bonus by zone_type. Berth fixes mean the vessel is
+# actively at a terminal — the highest-signal state for `moored`/`departed`
+# event timing. Bonuses are in seconds so they're directly comparable with
+# epoch timestamps. ~3h spread means a berth fix counts as 3h "fresher" than
+# its actual time for ordering — enough to break ties at the cull boundary
+# without overriding genuinely-recent fixes from less-specific polygons.
+_ZONE_TYPE_BONUS_S: dict[int, int] = {1: 3 * 3600, 2: 2 * 3600, 3: 1 * 3600}
+_ZONE_TYPE_LABEL: dict[int, str] = {1: "berth", 2: "anchorage", 3: "approach"}
+
+
+def _tier1_score(
+    last_berth_fix_ts: datetime | None,
+    last_anchorage_fix_ts: datetime | None,
+    last_approach_fix_ts: datetime | None,
+) -> tuple[float, datetime, str]:
+    """Pick the most-recent + most-specific polygon fix as the tier-1 score.
+
+    Returns (score_value, score_timestamp, polygon_label). Caller has already
+    verified at least one of the inputs is non-null and within the 3-day window.
+    """
+    candidates: list[tuple[float, datetime, str]] = []
+    for spec, ts in (
+        (1, last_berth_fix_ts),
+        (2, last_anchorage_fix_ts),
+        (3, last_approach_fix_ts),
+    ):
+        if ts is None:
+            continue
+        score = ts.timestamp() + _ZONE_TYPE_BONUS_S[spec]
+        candidates.append((score, ts, _ZONE_TYPE_LABEL[spec]))
+    return max(candidates, key=lambda c: c[0])
+
+
 def assign_tier(
     *,
+    last_berth_fix_ts: datetime | None,
+    last_anchorage_fix_ts: datetime | None,
+    last_approach_fix_ts: datetime | None,
     last_polygon_fix_ts: datetime | None,
     last_bbox_fix_ts: datetime | None,
     last_fix_ts: datetime | None,
     dest_terminal_id: int | None,
     state_ts: datetime | None,
     now: datetime,
-) -> tuple[int, str, datetime | None]:
-    """Return (tier, reason, score_timestamp) for a single vessel.
+) -> tuple[int, str, float]:
+    """Return (tier, reason, score_value) for a single vessel.
 
-    score_timestamp is the timestamp this vessel is ordered by within its
-    tier. Higher = more relevant for tiers 1-4; for tier 5 the caller uses
-    ASC ordering for scan-rotation staleness.
+    score_value is the float written to priority_watchlist.score and used for
+    within-tier ordering. For tiers 1-4, higher = more relevant. For tier 5
+    the caller uses ASC ordering on `last_scan_window_at` for rotation
+    instead, so the score there is just the epoch timestamp.
     """
     three_days = now - timedelta(days=3)
     fourteen_days = now - timedelta(days=14)
@@ -141,25 +193,28 @@ def assign_tier(
     ninety_days = now - timedelta(days=90)
 
     if last_polygon_fix_ts and last_polygon_fix_ts > three_days:
-        return (1, f"in-zone:polygon @ {last_polygon_fix_ts:%Y-%m-%d}", last_polygon_fix_ts)
+        score, ts, label = _tier1_score(
+            last_berth_fix_ts, last_anchorage_fix_ts, last_approach_fix_ts
+        )
+        return (1, f"in-zone:{label} @ {ts:%Y-%m-%d}", score)
 
     if dest_terminal_id and state_ts and state_ts > fourteen_days:
         return (
             2,
             f"dest:terminal_id={dest_terminal_id} @ {state_ts:%Y-%m-%d}",
-            state_ts,
+            state_ts.timestamp(),
         )
 
     if last_bbox_fix_ts and last_bbox_fix_ts > fourteen_days:
-        return (3, f"in-zone:bbox @ {last_bbox_fix_ts:%Y-%m-%d}", last_bbox_fix_ts)
+        return (3, f"in-zone:bbox @ {last_bbox_fix_ts:%Y-%m-%d}", last_bbox_fix_ts.timestamp())
 
     if last_fix_ts and last_fix_ts > seven_days:
-        return (4, f"recent-anywhere @ {last_fix_ts:%Y-%m-%d}", last_fix_ts)
+        return (4, f"recent-anywhere @ {last_fix_ts:%Y-%m-%d}", last_fix_ts.timestamp())
 
     if last_fix_ts and last_fix_ts > ninety_days:
-        return (5, f"stale @ {last_fix_ts:%Y-%m-%d}", last_fix_ts)
+        return (5, f"stale @ {last_fix_ts:%Y-%m-%d}", last_fix_ts.timestamp())
 
-    return (5, "never-seen", last_fix_ts)
+    return (5, "never-seen", last_fix_ts.timestamp() if last_fix_ts else 0.0)
 
 
 UPSERT_SQL = """
@@ -205,7 +260,10 @@ async def compute_and_upsert(pool: asyncpg.Pool) -> dict[int, int]:
                 # the wider bbox fix; readers don't need to know which.
                 last_zone_fix_ts = r["last_polygon_fix_ts"] or r["last_bbox_fix_ts"]
 
-                tier, reason, score_ts = assign_tier(
+                tier, reason, score = assign_tier(
+                    last_berth_fix_ts=r["last_berth_fix_ts"],
+                    last_anchorage_fix_ts=r["last_anchorage_fix_ts"],
+                    last_approach_fix_ts=r["last_approach_fix_ts"],
                     last_polygon_fix_ts=r["last_polygon_fix_ts"],
                     last_bbox_fix_ts=r["last_bbox_fix_ts"],
                     last_fix_ts=r["last_fix_ts"],
@@ -214,11 +272,6 @@ async def compute_and_upsert(pool: asyncpg.Pool) -> dict[int, int]:
                     now=now,
                 )
                 tier_counts[tier] += 1
-
-                # Score is the unix-epoch timestamp of the relevant fix; more
-                # recent = higher = ordered first when DESC. For tier-5 scan
-                # ordering, callers ORDER BY score ASC to pick the stalest.
-                score = score_ts.timestamp() if score_ts else 0.0
 
                 await conn.execute(
                     UPSERT_SQL,

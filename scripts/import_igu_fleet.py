@@ -45,6 +45,21 @@ logging.basicConfig(level=logging.INFO, format="%(message)s", handlers=[RichHand
 logger = logging.getLogger(__name__)
 
 
+def load_igu_capacities(csv_path: Path) -> dict[int, int]:
+    """IGU CSV → {imo: capacity_cm}. Used as a fallback when VF MASTERDATA.GAS
+    is NULL (common for 2025-2026 newbuilds not yet in VF's masterdata table)."""
+    out: dict[int, int] = {}
+    with csv_path.open() as f:
+        for r in csv.DictReader(f):
+            if not r["imo"] or not r["capacity_cm"]:
+                continue
+            try:
+                out[int(r["imo"])] = int(r["capacity_cm"])
+            except ValueError:
+                continue
+    return out
+
+
 async def load_unknown_imos(pool: asyncpg.Pool, csv_path: Path) -> list[int]:
     with csv_path.open() as f:
         igu_imos = {int(r["imo"]) for r in csv.DictReader(f) if r["imo"]}
@@ -80,13 +95,22 @@ def parse_vf_timestamp(ts: str | None) -> datetime | None:
 
 
 async def upsert_registry(
-    conn: asyncpg.pool.PoolConnectionProxy, ais: dict, master: dict
+    conn: asyncpg.pool.PoolConnectionProxy,
+    ais: dict,
+    master: dict,
+    igu_capacity: int | None = None,
 ) -> None:
     """UPSERT vessel_registry by MMSI. Don't overwrite columns that have
-    live data already; only fill what's NULL or set authoritative fields."""
+    live data already; only fill what's NULL or set authoritative fields.
+
+    `igu_capacity` is a fallback used only when VF MASTERDATA.GAS is NULL.
+    Many 2025-2026 newbuilds are missing GAS in VF's table but have it in
+    the IGU report.
+    """
     vtype = master.get("TYPE")
     is_lng = vtype == "LNG Tanker"
     is_fsru = vtype == "Offshore Support Vessel"
+    gas_capacity_m3 = master.get("GAS") or igu_capacity
     await conn.execute(
         """
         INSERT INTO vessel_registry (
@@ -149,7 +173,7 @@ async def upsert_registry(
         master.get("MAXDRAUGHT"),
         master.get("TEU"),
         master.get("CRUDE"),
-        master.get("GAS"),
+        gas_capacity_m3,
         is_lng,
         is_fsru,
     )
@@ -201,7 +225,10 @@ async def insert_vessel_state(
 
 
 async def process_one(
-    pool: asyncpg.Pool, client: httpx.AsyncClient, imo: int
+    pool: asyncpg.Pool,
+    client: httpx.AsyncClient,
+    imo: int,
+    igu_capacities: dict[int, int],
 ) -> str:
     """Returns one of: 'ok', 'not_found', 'error', 'skip_no_mmsi', 'skip_dup'."""
     try:
@@ -226,7 +253,9 @@ async def process_one(
 
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await upsert_registry(conn, ais, master)
+            await upsert_registry(
+                conn, ais, master, igu_capacity=igu_capacities.get(imo)
+            )
             wrote_fix = await insert_snapshot_fix(conn, ais)
             wrote_state = await insert_vessel_state(conn, ais)
 
@@ -248,7 +277,11 @@ async def run(csv_path: Path, limit: int | None, dry_run: bool) -> None:
     pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=3)
     try:
         unknowns = await load_unknown_imos(pool, csv_path)
-        logger.info(f"{len(unknowns)} unknown IMOs to resolve")
+        igu_capacities = load_igu_capacities(csv_path)
+        logger.info(
+            f"{len(unknowns)} unknown IMOs to resolve "
+            f"({len(igu_capacities)} have IGU-listed gas capacity as fallback)"
+        )
         if limit is not None:
             unknowns = unknowns[:limit]
             logger.info(f"Limited to first {len(unknowns)}")
@@ -262,7 +295,7 @@ async def run(csv_path: Path, limit: int | None, dry_run: bool) -> None:
         async with httpx.AsyncClient(timeout=15.0) as client:
             for i, imo in enumerate(unknowns, 1):
                 logger.info(f"[{i}/{len(unknowns)}] IMO={imo}")
-                status = await process_one(pool, client, imo)
+                status = await process_one(pool, client, imo, igu_capacities)
                 counts[status] = counts.get(status, 0) + 1
                 await asyncio.sleep(RATE_LIMIT_DELAY)
         logger.info(f"Done. Outcomes: {counts}")
