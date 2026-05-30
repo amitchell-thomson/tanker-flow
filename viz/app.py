@@ -1,3 +1,4 @@
+import asyncio
 import io
 import json
 import math
@@ -29,6 +30,17 @@ async def lifespan(app: FastAPI):
     app.state.pool = await asyncpg.create_pool(
         settings.database_url, min_size=2, max_size=10
     )
+
+    # Warm the density source in the background so the first user to toggle the
+    # layer hits a ready cache instead of waiting on the ~2s build.
+    async def _warm_density() -> None:
+        try:
+            await _density_source(app.state.pool)
+        except Exception:
+            pass  # best-effort; a real request will retry the build
+
+    # Keep a reference so the task isn't garbage-collected before it runs.
+    app.state.warm_task = asyncio.create_task(_warm_density())
     yield
     await app.state.pool.close()
 
@@ -380,13 +392,53 @@ def _haversine_nm(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 # used to normalise brightness identically across the whole-footprint image and
 # every individual tile. Rebuilt at most hourly; shared by all density routes.
 _density_source_cache: dict = {}
+_DENSITY_TTL = 3600
+# Single-flight guard + handle to the in-flight background refresh. Tile
+# requests arrive ~16-at-once when the layer is toggled; without this each would
+# kick its own ~2s rebuild.
+_density_lock = asyncio.Lock()
+_density_refresh_task: asyncio.Task | None = None
 
 
 async def _density_source(pool: asyncpg.Pool) -> dict:
-    cached = _density_source_cache.get("v")
-    if cached and time.time() - cached["ts"] < 3600:
-        return cached
+    """Cached density source with single-flight + stale-while-revalidate.
 
+    Concurrent callers share ONE build rather than each launching a full scan.
+    A stale cache is served immediately while a single background task refreshes
+    it, so only the very first cold build can ever block a request."""
+    cached = _density_source_cache.get("v")
+    if cached and time.time() - cached["ts"] < _DENSITY_TTL:
+        return cached
+    if cached:
+        _kick_density_refresh(pool)  # stale: refresh in the background…
+        return cached  # …and serve the stale frame now (no blocking)
+    # Cold cache: build once under the lock; concurrent callers await the result.
+    async with _density_lock:
+        cached = _density_source_cache.get("v")
+        if cached:
+            return cached
+        src = await _build_density_source(pool)
+        _density_source_cache["v"] = src
+        return src
+
+
+def _kick_density_refresh(pool: asyncpg.Pool) -> None:
+    """Start a background rebuild unless one is already running (single-flight)."""
+    global _density_refresh_task
+    if _density_refresh_task and not _density_refresh_task.done():
+        return
+
+    async def _refresh() -> None:
+        try:
+            async with _density_lock:
+                _density_source_cache["v"] = await _build_density_source(pool)
+        except Exception:
+            pass  # keep serving the stale frame; a later request retries
+
+    _density_refresh_task = asyncio.create_task(_refresh())
+
+
+async def _build_density_source(pool: asyncpg.Pool) -> dict:
     # Stream every in-scope vessel's fixes in track order and build the
     # *segment* geometry (lines between consecutive fixes, not points). Moving
     # vessels accumulate brightness by distance travelled while dwell time at
@@ -453,9 +505,7 @@ async def _density_source(pool: asyncpg.Pool) -> dict:
         nz = log_vals[log_vals > 0]
         return float(np.percentile(nz, 99)) if nz.size else 1.0
 
-    src = {"df": df, "p99": await run_in_threadpool(_ref_p99), "ts": time.time()}
-    _density_source_cache["v"] = src
-    return src
+    return {"df": df, "p99": await run_in_threadpool(_ref_p99), "ts": time.time()}
 
 
 def _tile_line_width(z: int) -> float:
