@@ -6,53 +6,65 @@ non-obvious design comes from AISstream's throttling — which we work around
 by filtering server-side to the specific LNG carriers and FSRUs we care about
 rather than pulling broad geographic data and discarding 95% of it.
 
-## What AISstream actually delivers
+## Why MMSI filtering (history)
 
-A subscribed vessel, while admitted to your subscription, reports roughly once
-per minute (per-vessel cadence is constant at ~1.05 fixes/MMSI/minute across
-all observed throughput regimes). The throttle does not change *how often* an
-admitted vessel reports — it changes *which* vessels are admitted in any given
-minute.
-
-Under the old bbox-based subscription, the set of admitted vessels rotated
-randomly minute-to-minute. Two minutes that delivered very different total fix
-counts shared only a fraction of their MMSIs:
-
-```
-                   distinct MMSI    in both    spike-only    settled-only
-spike   13:32 UTC      1298            250        1048             —
-settled 13:35 UTC       715            250          —             465
-```
-
-Drops had no characteristic bias — spike-only, settled-only, and common groups
-all showed the same speed-band breakdown. Vessels we specifically care about
-(LNG carriers, FSRUs) were not preferentially retained. In a 20-minute window
-of 1500 fixes/min, an LNG carrier in our bboxes was visible an average of 4.9
-minutes (~23% of the window). State transitions therefore landed in
-`port_events` 2-12 minutes after the actual moment of the transition, which
-became the dominant latency in the signal.
+Under the old bbox-based subscription, AISstream's per-account throttle rotated
+the admitted-MMSI set randomly minute-to-minute. In a 20-min window of ~1500
+fixes/min, any given LNG carrier was visible ~23% of the time, so state
+transitions in `port_events` landed 2-12 minutes late. The fix was to subscribe
+*only* to LNG-carrier MMSIs via AISstream's `FiltersShipMMSI` (50-MMSI cap
+per subscription, 3 connections per API key = 150 slots) — keeping each
+subscription's "ask" well below the throttle threshold.
 
 ## Server-side MMSI filtering (current design)
 
-AISstream exposes a `FiltersShipMMSI` subscription field that delivers only
-messages from a fixed list of MMSIs (cap: 50 per subscription). With the LNG
-fleet around the size we cover, this is enough to subscribe to *every* LNG
-carrier and FSRU we care about and skip everything else.
+`aisstream.py` runs **three parallel WebSockets**, each subscribed to a
+disjoint chunk of up to 50 MMSIs via `FiltersShipMMSI`. Slot allocation:
 
-The DB has 142 active LNG carriers + FSRUs (`vessel_registry` rows where
-`is_lng_carrier OR is_fsru` and at least one fix in 30d). Across the
-documented 3-conn-per-API-key cap that's 3 × 50 = 150 slots, with headroom.
+- **Chunks 0 + 1 (100 slots)** — persistent block. Highest-tier vessels from
+  `priority_watchlist` (tiers 1-3: in or approaching our zones).
+- **Chunk 2 (50 slots)** — scan rotation. Lowest `last_scan_window_at` among
+  tier 4-5 candidates. Each scan window writes back `last_scan_window_at = now()`
+  so the next reconnect (planned 1h *or* the 5-min silence watchdog) picks
+  the next 50 stalest, rotating through the full ~650-vessel tier-4/5 pool
+  in roughly an hour.
 
-`aisstream.py` runs **three parallel WebSockets**, each subscribed to a disjoint
-~50-MMSI chunk of the priority watchlist. Per-vessel visibility climbs to
-~100% — every fix from every priority vessel reaches `ais_fixes`. Total volume
-collapses to ~150 fixes/min (one per priority vessel per minute) instead of
-the old ~1100/min throttled sampling.
+Source labels in `ais_fixes` / `vessel_state` / `ingestion_stats_minute` /
+`ingestion_events`: `aisstream-mmsi-1` / `aisstream-mmsi-2` / `aisstream-mmsi-3`.
+The TUI aggregates across them with `source LIKE 'aisstream%'`.
 
-Source labels in `ingestion_stats_minute` and `ingestion_events`:
+## Volume (what to expect)
 
-- `aisstream-mmsi-1` / `aisstream-mmsi-2` / `aisstream-mmsi-3` — one per parallel
-  connection. The TUI aggregates across them with `source LIKE 'aisstream%'`.
+The README's earlier "~150 fixes/min" figure was the theoretical ceiling
+(1 fix/vessel/min × 150 vessels). Reality is significantly lower because:
+
+- Most tier-1 vessels are *anchored or moored* (sog < 1 kn). AIS class A
+  broadcasts position only every 3-10 minutes when stationary, not every
+  10 seconds like underway vessels.
+- AISstream covers terrestrial AIS receivers only. Vessels mid-ocean
+  (often a 5-15 day transit gap) contribute nothing to ais_fixes during
+  the crossing, even though they're in our subscription.
+- Many subscribed vessels are out of any coastal AIS coverage during their
+  scan or persistent window.
+
+**Observed steady-state: roughly 200-1000 fixes/hour total across all three
+connections** (≈ 4-20 fixes/min), highly variable with time of day and fleet
+position. Volume is *not* the right health metric — what matters is whether
+the in-zone vessels we care about deliver sub-minute state transitions to
+`port_events`. The TUI's per-source liveness pane and scan rotation panel
+are the useful indicators.
+
+### Discovered AISstream constraints (empirical)
+
+- **Concurrent-connection cap = 3 per API key.** The 4th simultaneous
+  WebSocket from the same key returns HTTP 429 at the handshake.
+- **Account-level throttle scales with subscription size**, not connection
+  count. MMSI filtering keeps each subscription small enough that the
+  throttle simply doesn't engage on our account.
+- **`FiltersShipMMSI` is exclusive**: zero off-target messages. Verified
+  empirically.
+- The MMSI filter is a *whitelist*, not a hint — subscribed MMSIs that
+  aren't in range of any terrestrial AIS receiver simply don't report.
 
 ### Discovered constraints (empirical, from investigation)
 
@@ -69,42 +81,55 @@ Source labels in `ingestion_stats_minute` and `ingestion_events`:
 - The MMSI filter is a *whitelist*, not a hint — subscribed MMSIs that aren't
   in range of any terrestrial AIS receiver simply don't report.
 
-## Watchlist selection (which 150 vessels to subscribe to)
+## Watchlist selection (picking 150 of ~780 vessels)
 
-`vessel_registry` now holds the full global LNG/FSRU fleet (~800 vessels),
+`vessel_registry` holds the full global LNG/FSRU fleet (~780 vessels),
 bulk-imported from the IGU 2025 World LNG Report (`db/seed/lng_fleet_igu_2025.csv`
-via `scripts/import_igu_fleet.py`). The 150 slots cap means we can't subscribe
-to all of them at once — instead, the slots are allocated by a tier scoring
-layer that runs every hour:
+via `scripts/import_igu_fleet.py`). The 150-slot cap means we can't subscribe
+to all of them at once — instead, slots are allocated by a tier scoring layer
+that runs every hour inside the ingester (`pipeline/scoring.py`, also runnable
+manually via `make scoring`):
 
-- **`pipeline/scoring.py`** ranks every LNG/FSRU vessel into one of 5 tiers
-  using current AIS history + parsed `vessel_state.dest`:
+| Tier | Rule | Typical count |
+|---|---|---|
+| 1 | Fix inside any `terminal_zones` polygon in last 3d (vessel plausibly *currently* in zone) | 30-50 |
+| 2 | `vessel_state.dest` parses to a `terminals.unlocode` AND `state_ts > now() - 14d` | 15-30 |
+| 3 | Fix inside any `config.ZONES` rectangle in last 14d (not 1/2) | 50-80 |
+| 4 | Any fix in last 7d (not 1-3) | 400-500 |
+| 5 | Fix in 7-90d OR never seen | 150-250 |
 
-  | Tier | Rule |
-  |---|---|
-  | 1 | Fix inside any `terminal_zones` polygon in last 3d (vessel plausibly *currently* in zone, not "was there last week") |
-  | 2 | `vessel_state.dest` parses to a `terminals.unlocode` AND `state_ts > now() - 14d` |
-  | 3 | Fix inside any `config.ZONES` rectangle in last 14d (not 1/2) |
-  | 4 | Any fix in last 7d (not 1-3) |
-  | 5 | Fix in 7-90d OR never seen |
+The numbers shift across the day as vessels arrive, depart, and declare new
+destinations. Tier 1 was originally a 14-day window — tightened to 3 days
+because the longer window admitted vessels that had visited a week earlier
+and were since mid-Atlantic, wasting persistent slots on ghost MMSIs.
 
-- **Persistent block (chunks 0 + 1, 100 slots)** — top 100 by `(tier ASC, score DESC)`
-  where tier in 1-3. Vessels currently in or unambiguously heading to our zones.
-- **Scan rotation (chunk 2, 50 slots)** — next 50 by `(tier ASC, score ASC)` where
-  tier in 4-5. Stalest first, so every vessel in the registry cycles through over
-  ~13h.
-- **Promotion** — a scan-window fix that lands inside a zone polygon (or a parsed
-  inbound `dest`) bumps the vessel's tier to 1-3 on the next scoring run. The
-  vessel gets a persistent slot on the very next 1h reconnect.
+- **Persistent block (chunks 0 + 1, 100 slots)** — top 100 by
+  `(tier ASC, score DESC)` where tier in 1-3. If tier 1-3 totals exceed 100,
+  the tail is culled by oldest `last_fix`.
+- **Scan rotation (chunk 2, 50 slots)** — top 50 by
+  `(tier ASC, last_scan_window_at ASC NULLS FIRST)` where tier in 4-5.
+  Each pick advances `last_scan_window_at = now()` in the same transaction
+  so the next reconnect picks a *different* 50, even when the 5-min
+  silence watchdog fires repeatedly.
+- **Promotion** — a scan vessel that delivers an in-zone fix (or a parseable
+  inbound `dest`) gets re-tiered to 1-3 on the next scoring run, and lands
+  in the persistent block on the very next 1h reconnect.
 
 `load_persistent_mmsis` and `load_scan_mmsis` in `aisstream.py` read from
 `priority_watchlist` and write back `in_slot` / `slot_kind` so the TUI can
-render who's currently subscribed. The 1h reconnect cycle (`RECONNECT_INTERVAL_SECONDS`)
-runs:
+render who's currently subscribed. The 1h reconnect cycle
+(`RECONNECT_INTERVAL_SECONDS = 3600`):
 
 1. `scoring_loop` recomputes `priority_watchlist`
 2. Each `connection_loop` close+reopens its WebSocket
 3. Persistent chunks get the freshest top-100; scan chunk swaps in the next 50
+
+The 5-min `SILENCE_THRESHOLD_SECONDS` watchdog also reconnects mid-cycle
+when a connection goes silent. For the scan connection this happens
+frequently (most of the tier-4/5 pool is offshore or laid up), and is
+*expected* — it accelerates scan-pool rotation rather than hurting signal.
+The TUI distinguishes "silent" (socket alive, no fixes) from "dead"
+(no events for 10+ min) to avoid mis-flagging the scan connection.
 
 ### Discovery (new LNG carriers)
 
@@ -126,20 +151,39 @@ Ad-hoc newbuilds before the next IGU refresh can be added manually:
 
 ## What this means for the signal
 
-Per-LNG-vessel visibility is now ~100%, so state-transition timestamps in
-`port_events` are minute-accurate at worst. Median back-dating drops from ~2
-minutes to ~ 1 second; p95 from ~ 12 minutes to ~ 60 seconds. The state machine's
+For vessels in our subscribed set that are actively broadcasting in
+terrestrial AIS coverage, visibility approaches ~100% — state-transition
+timestamps in `port_events` land within seconds of the actual transition,
+not the 2-12 minutes the throttled bbox design produced. The state machine's
 back-dating logic still exists for the rare cases when AISstream momentarily
-doesn't deliver a vessel (terrestrial receiver outage, etc.).
+doesn't deliver a vessel (receiver outage, brief subscription gap).
 
-The single biggest lever on signal latency is keeping all three connections
-healthy. `ingestion_stats_minute.fix_count` summed across the three
-`aisstream-mmsi-N` sources should be ~150/min and stable; if it drops to ~100
-or below for sustained periods, one of the connections is silently dropping or
-the watchlist drifted.
+**The right health metric is *coverage* of vessels currently in zone**, not
+raw fix volume. Practical checks:
 
-Note that **chunk 2 (the scan-rotation connection) reports differently** from
-chunks 0+1: its 50 vessels swap every hour, so the rate per *vessel* is lower
-than persistent connections but the distinct-MMSI count over a multi-hour
-window is much higher. The TUI's "Scan rotation" panel reports the in-flight
-window age and time to next rotation.
+- Run `make port-events` and verify recent `zone_entry` / `moored` /
+  `departed` events look complete vs reality (cross-check against a known
+  port like Sabine or Rotterdam if needed).
+- The TUI's connection-liveness pane should show **`live 3/3`** (active) or
+  **`alive 3/3 (active: 2, silent: 1)`** (cyan; scan connection between
+  windows). Either is healthy.
+- Per-source fix rate in `ingestion_stats_minute` is highly variable —
+  persistent connections typically each deliver 50-300 fixes/hour;
+  scan can be near zero between productive windows. Trends over hours
+  matter more than minute-by-minute spot checks.
+
+**Failure modes worth flagging:**
+
+- One of chunks 0/1 going silent for >10 min while still emitting
+  lifecycle events → AISstream may have dropped the subscription;
+  the next planned or watchdog reconnect should recover.
+- All three sources silent for >10 min → check the process is still
+  running and the API key still works.
+- Tier 1 totals dropping to single digits → either a real lull in
+  fleet activity at our terminals, or the scoring query is broken.
+
+**Chunk 2 (scan) reports differently** from chunks 0+1: its 50 vessels
+swap on every reconnect (planned 1h *and* watchdog 5-min). The distinct-MMSI
+count over a multi-hour window is much higher than its per-minute fix rate
+suggests, and the TUI's "Scan rotation" panel exposes the in-flight window
+age and time to next planned rotation.
