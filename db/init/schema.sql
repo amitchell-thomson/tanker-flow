@@ -16,6 +16,9 @@ CREATE TABLE ais_fixes (
 SELECT create_hypertable('ais_fixes', 'fix_ts');
 SELECT set_chunk_time_interval('ais_fixes', INTERVAL '1 day');
 CREATE UNIQUE INDEX ON ais_fixes (fix_ts, mmsi);
+-- Latest-fix-per-vessel lookups (viz /api/vessels LATERAL, density track order).
+-- Without it those queries seq-scan + disk-sort the whole hypertable.
+CREATE INDEX IF NOT EXISTS ais_fixes_mmsi_fix_ts_idx ON ais_fixes (mmsi, fix_ts DESC);
 
 
 CREATE TABLE vessel_state(
@@ -31,6 +34,8 @@ CREATE TABLE vessel_state(
 SELECT create_hypertable('vessel_state', 'state_ts');
 SELECT set_chunk_time_interval('vessel_state', INTERVAL '1 day');
 CREATE UNIQUE INDEX ON vessel_state (state_ts, mmsi);
+-- Latest-draught-per-vessel lookups (viz /api/vessels LATERAL, laden.py).
+CREATE INDEX IF NOT EXISTS vessel_state_mmsi_state_ts_idx ON vessel_state (mmsi, state_ts DESC);
 
 -- Vessel registry: populated passively + enriched from VesselFinder
 CREATE TABLE vessel_registry (

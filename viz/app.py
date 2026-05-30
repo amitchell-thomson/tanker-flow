@@ -27,7 +27,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.pool = await asyncpg.create_pool(
-        settings.database_url, min_size=1, max_size=5
+        settings.database_url, min_size=2, max_size=10
     )
     yield
     await app.state.pool.close()
@@ -51,33 +51,38 @@ async def vessels(pool: asyncpg.Pool = Depends(get_pool)):
     # MMSI filtering every subscribed vessel is one of these, so there is no
     # "unknown vessel" class to render. Tier / slot come from the
     # priority_watchlist so the map can surface scan priority per vessel.
+    #
+    # Driven from the ~780 in-scope registry rows with a LATERAL "latest row per
+    # vessel" lookup against each hypertable. Backed by the (mmsi, ts DESC)
+    # indexes this is ~780 index seeks (LIMIT 1 each) instead of scanning +
+    # disk-sorting all 22M fixes / 3M states — the old DISTINCT ON form spilled
+    # 130 MB to disk and took seconds, starving the connection pool at page load.
     rows = await pool.fetch(
         """
-        WITH latest_fix AS (
-            SELECT DISTINCT ON (mmsi)
-                mmsi, lat, lon, fix_ts, sog, nav_status
-            FROM ais_fixes
-            WHERE lat IS NOT NULL AND lon IS NOT NULL
-              AND fix_ts > now() - INTERVAL '48 hours'
-            ORDER BY mmsi, fix_ts DESC
-        ),
-        latest_draught AS (
-            SELECT DISTINCT ON (mmsi) mmsi, draught, state_ts
-            FROM vessel_state
-            WHERE draught IS NOT NULL AND draught > 0
-            ORDER BY mmsi, state_ts DESC
-        )
         SELECT
-            f.mmsi, f.lat, f.lon, f.fix_ts, f.sog, f.nav_status,
+            v.mmsi, f.lat, f.lon, f.fix_ts, f.sog, f.nav_status,
             v.vessel_name, v.flag, v.imo, v.is_lng_carrier, v.is_fsru,
             v.vf_vessel_type, v.design_draught,
             d.draught AS current_draught,
             d.state_ts AS current_draught_ts,
             p.tier, p.score_reason, p.in_slot, p.slot_kind
-        FROM latest_fix f
-        JOIN vessel_registry v USING (mmsi)
-        LEFT JOIN latest_draught d USING (mmsi)
+        FROM vessel_registry v
         LEFT JOIN priority_watchlist p USING (mmsi)
+        CROSS JOIN LATERAL (
+            SELECT lat, lon, fix_ts, sog, nav_status
+            FROM ais_fixes
+            WHERE mmsi = v.mmsi AND lat IS NOT NULL AND lon IS NOT NULL
+              AND fix_ts > now() - INTERVAL '48 hours'
+            ORDER BY fix_ts DESC
+            LIMIT 1
+        ) f
+        LEFT JOIN LATERAL (
+            SELECT draught, state_ts
+            FROM vessel_state
+            WHERE mmsi = v.mmsi AND draught IS NOT NULL AND draught > 0
+            ORDER BY state_ts DESC
+            LIMIT 1
+        ) d ON TRUE
         WHERE v.is_lng_carrier = TRUE OR v.is_fsru = TRUE
         """
     )
