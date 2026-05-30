@@ -58,6 +58,13 @@ def main(dry_run: bool = False) -> None:
                         print(f"  SKIP  fid={fid} '{terminal_name}' — not in terminals table")
                         skipped += 1
                         continue
+                    if not zone_type:
+                        # Draft / scratch polygons left in QGIS with no classification.
+                        # Common when a feature was started but never tagged; we don't
+                        # want them in terminal_zones.
+                        print(f"  SKIP  fid={fid} '{terminal_name}' — zone_type is null")
+                        skipped += 1
+                        continue
 
                     terminal_id = name_to_id[db_name]
                     wkb = gpkg_to_wkb(geom_bytes)
