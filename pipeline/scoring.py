@@ -307,6 +307,17 @@ async def load_open_leg_pins(conn: asyncpg.Connection) -> set[int]:
     return {r["mmsi"] for r in rows}
 
 
+# A promotion is "notable" (worth logging) when a vessel moves UP into the
+# persistent-subscription band (tiers 1-3) — i.e. it just became important
+# enough to hold a guaranteed slot. Movements within 4/5 aren't logged.
+_PERSISTENT_TIER_MAX = 3
+
+LOG_PROMOTION_SQL = """
+INSERT INTO tier_promotions (mmsi, vessel_name, old_tier, new_tier, via, reason, zone)
+VALUES ($1, $2, $3, $4, 'scoring', $5, NULL)
+"""
+
+
 UPSERT_SQL = """
 INSERT INTO priority_watchlist (
     mmsi, tier, score, score_reason,
@@ -343,6 +354,21 @@ async def compute_and_upsert(pool: asyncpg.Pool) -> dict[int, int]:
         pinned = await load_open_leg_pins(conn)
         logger.info(f"Open-leg pins: {len(pinned)} vessel(s)")
 
+        # Snapshot current tiers + names BEFORE the upsert so we can detect
+        # promotions into the persistent band and log them to tier_promotions.
+        prev_tiers: dict[int, int] = {
+            r["mmsi"]: r["tier"]
+            for r in await conn.fetch("SELECT mmsi, tier FROM priority_watchlist")
+        }
+        names: dict[int, str | None] = {
+            r["mmsi"]: r["vessel_name"]
+            for r in await conn.fetch(
+                "SELECT mmsi, vessel_name FROM vessel_registry "
+                "WHERE is_lng_carrier OR is_fsru"
+            )
+        }
+        promotions: list[tuple] = []
+
         # Also remove rows from priority_watchlist where the vessel is no
         # longer in scope (e.g. excluded=TRUE post-import). The set of valid
         # mmsis is exactly `rows`.
@@ -372,6 +398,17 @@ async def compute_and_upsert(pool: asyncpg.Pool) -> dict[int, int]:
 
                 parsed_eta = _parse_eta(r["eta"], now)
 
+                # Notable promotion: moved up INTO the persistent band. old_tier
+                # absent (first time seen) counts as a promotion iff it lands in
+                # the band — it just appeared as slot-worthy.
+                old_tier = prev_tiers.get(r["mmsi"])
+                if tier <= _PERSISTENT_TIER_MAX and (
+                    old_tier is None or tier < old_tier
+                ):
+                    promotions.append(
+                        (r["mmsi"], names.get(r["mmsi"]), old_tier, tier, reason)
+                    )
+
                 await conn.execute(
                     UPSERT_SQL,
                     r["mmsi"],
@@ -385,6 +422,9 @@ async def compute_and_upsert(pool: asyncpg.Pool) -> dict[int, int]:
                     r["mmsi"] in pinned,
                 )
 
+            if promotions:
+                await conn.executemany(LOG_PROMOTION_SQL, promotions)
+
             # Sweep stale priority_watchlist rows (vessel no longer in scope).
             removed = await conn.execute(
                 "DELETE FROM priority_watchlist WHERE mmsi <> ALL($1::BIGINT[])",
@@ -396,6 +436,7 @@ async def compute_and_upsert(pool: asyncpg.Pool) -> dict[int, int]:
     logger.info(
         "Tier counts: "
         + " ".join(f"t{t}={tier_counts[t]}" for t in sorted(tier_counts))
+        + f"  (promotions logged: {len(promotions)})"
     )
     return tier_counts
 
