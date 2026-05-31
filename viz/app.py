@@ -16,6 +16,7 @@ matplotlib.use("Agg")  # must be before any other matplotlib import
 import numpy as np
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
 from matplotlib import colormaps
 from PIL import Image
 from starlette.concurrency import run_in_threadpool
@@ -46,6 +47,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 async def get_pool(request: Request) -> asyncpg.Pool:
