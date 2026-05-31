@@ -11,7 +11,7 @@
 
 -- US Gulf
 UPDATE terminals SET unlocode = 'USSAB' WHERE terminal_name = 'Sabine Pass';
-UPDATE terminals SET unlocode = 'USPMS' WHERE terminal_name = 'Plaquemines';
+UPDATE terminals SET unlocode = 'USPLQ' WHERE terminal_name = 'Plaquemines';  -- vessels broadcast USPLQ (not the older USPMS)
 UPDATE terminals SET unlocode = 'USCLU' WHERE terminal_name = 'Calcasieu Pass';
 UPDATE terminals SET unlocode = 'USCRP' WHERE terminal_name = 'Corpus Christi';
 UPDATE terminals SET unlocode = 'USCAU' WHERE terminal_name = 'Cameron';

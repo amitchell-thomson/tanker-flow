@@ -16,9 +16,11 @@ LOCODES = {
     "NLEEM": 11,
     "BEZEE": 12,
     "USSAB": 1,
+    "USPLQ": 2,
     "USCRP": 4,
     "USCAU": 5,
     "USFPO": 6,
+    "ESCAR": 24,
     "PLSWI": 29,
     "DEWVN": 16,
 }
@@ -34,11 +36,11 @@ def test_empty_returns_none(dest):
     [
         "FOR ORDERS",
         "FOR ORDER",
-        "for orders",            # case-insensitive
+        "for orders",  # case-insensitive
         "OPEN SEA FOR ORDERS",
         "GERMANY FOR ORDERS",
         "EU FOR ORDERS",
-        "  AT SEA  ",            # whitespace-tolerant
+        "  AT SEA  ",  # whitespace-tolerant
         "TBN",
     ],
 )
@@ -95,3 +97,41 @@ def test_terminal_not_in_provided_locodes_returns_none():
     # have a seeded unlocode), even a perfect-LOCODE input still misses.
     sparse = {"NLRTM": 10}
     assert parse_destination("BEZEE", sparse) == (None, False)
+
+
+def test_plaquemines_resolves_via_uspql():
+    # Vessels broadcast USPLQ for Plaquemines (the seed previously had USPMS,
+    # which never appears in real traffic).
+    assert parse_destination("USPLQ", LOCODES) == (2, False)
+    assert parse_destination("PLAQUEMINES", LOCODES) == (2, False)
+
+
+@pytest.mark.parametrize(
+    "dest",
+    [
+        "FORORDERS",  # no space
+        "FOR  ORDERS",  # double space
+        "USG FOR ORDERS",  # region prefix, no concrete port
+        "BALTIC FOR ORDERS",
+        "ATLANTIC FOR ORDER",
+    ],
+)
+def test_for_orders_variants(dest):
+    assert parse_destination(dest, LOCODES) == (None, True)
+
+
+def test_suffix_decorated_locode_recovers_leading_token():
+    # Operators append ETA/distance notes after a valid LOCODE.
+    assert parse_destination("ESCAR<D9 HRS", LOCODES) == (24, False)
+    assert parse_destination("BEZEE DE 86 HRS", LOCODES) == (12, False)
+
+
+def test_named_port_wins_over_for_orders_qualifier():
+    # "USCRP FOR ORDERS" declares Corpus (even if uncommitted) — resolve it.
+    assert parse_destination("USCRP FOR ORDERS", LOCODES) == (4, False)
+
+
+def test_for_orders_does_not_match_inside_words():
+    # The \b guard must not trip on "BEFORE"; neither input resolves either.
+    assert parse_destination("BEFORE DEPARTURE", LOCODES) == (None, False)
+    assert parse_destination("FORMOSA", LOCODES) == (None, False)

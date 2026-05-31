@@ -25,6 +25,8 @@ Rotterdam LOCODE.
 
 from __future__ import annotations
 
+import re
+
 # Markers vessels use when they have no committed destination. None of these
 # should be treated as a terminal match.
 FOR_ORDERS_MARKERS: frozenset[str] = frozenset(
@@ -39,7 +41,7 @@ FOR_ORDERS_MARKERS: frozenset[str] = frozenset(
         "OPEN SEA FOR ORDERS",
         "AT SEA",
         "AWAITING ORDERS",
-        "TBN",            # to be nominated
+        "TBN",  # to be nominated
         "ORDERS",
         "NIL",
     }
@@ -89,7 +91,7 @@ FREEFORM_TO_LOCODE: dict[str, str] = {
     # US Gulf
     "SABINE": "USSAB",
     "SABINEPASS": "USSAB",
-    "PLAQUEMINES": "USPMS",
+    "PLAQUEMINES": "USPLQ",
     "CALCASIEU": "USCLU",
     "CORPUSCHRISTI": "USCRP",
     "CORPUS": "USCRP",
@@ -103,6 +105,43 @@ FREEFORM_TO_LOCODE: dict[str, str] = {
 }
 
 
+# Matches a "for orders" / "for order" phrase anywhere, tolerant of zero or
+# more internal spaces ("FORORDERS", "FOR  ORDERS", "USG FOR ORDERS"). The
+# leading \b avoids matching inside words like "BEFORE".
+FOR_ORDERS_RE = re.compile(r"\bFOR\s*ORDERS?\b")
+
+
+def _is_for_orders(s: str) -> bool:
+    """True if the normalized (upper) string declares no committed port."""
+    return s in FOR_ORDERS_MARKERS or FOR_ORDERS_RE.search(s) is not None
+
+
+def _resolve_locode(s: str, unlocode_to_terminal: dict[str, int]) -> int | None:
+    """Resolve an already-normalized (upper, stripped) destination to a
+    terminal_id, or None. Tries, in order: exact compact LOCODE ("NL RTM"),
+    freeform-name alias ("ROTTERDAM"), then a leading LOCODE-shaped token —
+    which recovers suffix-decorated values like "ESCAR<D9 HRS" or
+    "BEZEE DE 86 HRS" that operators append ETA/distance notes to."""
+    compact = s.replace(" ", "")
+    if compact in unlocode_to_terminal:
+        return unlocode_to_terminal[compact]
+    if compact in FREEFORM_TO_LOCODE:
+        canonical = FREEFORM_TO_LOCODE[compact]
+        if canonical in unlocode_to_terminal:
+            return unlocode_to_terminal[canonical]
+
+    # Leading LOCODE-shaped token: 2 letters + optional single space + 3 alnum.
+    m = re.match(r"([A-Z]{2}\s?[A-Z0-9]{3})", s)
+    if m:
+        lead = m.group(1).replace(" ", "")
+        if lead in unlocode_to_terminal:
+            return unlocode_to_terminal[lead]
+        canonical = FREEFORM_TO_LOCODE.get(lead)
+        if canonical is not None and canonical in unlocode_to_terminal:
+            return unlocode_to_terminal[canonical]
+    return None
+
+
 def parse_destination(
     dest_str: str | None,
     unlocode_to_terminal: dict[str, int],
@@ -110,9 +149,10 @@ def parse_destination(
     """Return (terminal_id, is_for_orders).
 
     - `(terminal_id, False)` — vessel declared a destination matching one of
-      our terminals.
+      our terminals (a named port wins even when a "FOR ORDERS" qualifier is
+      appended, e.g. "USCRP FOR ORDERS").
     - `(None, True)` — vessel declared an explicit "no destination yet"
-      marker (FOR ORDERS, etc.).
+      marker (FOR ORDERS, OPEN SEA, TBN, …) and named no port we track.
     - `(None, False)` — empty, unparseable, or matches a terminal we don't
       track.
     """
@@ -123,28 +163,19 @@ def parse_destination(
     if not s:
         return (None, False)
 
-    if s in FOR_ORDERS_MARKERS:
-        return (None, True)
-
-    # Chained destinations: "USSAB>NLRTM" or "USSAB > NLRTM" — the right-hand
+    # Chained destinations: "USSAB>NLRTM" / "USSAB > NLRTM" — the right-hand
     # side is where the vessel is headed *next*. Use it.
     if ">" in s:
         s = s.split(">")[-1].strip()
-        # An empty RHS or another FOR-ORDERS marker after stripping → bail.
         if not s:
             return (None, False)
-        if s in FOR_ORDERS_MARKERS:
-            return (None, True)
 
-    # Direct LOCODE-with-spaces case: "NL RTM" / "BE ZEE".
-    compact = s.replace(" ", "")
-    if compact in unlocode_to_terminal:
-        return (unlocode_to_terminal[compact], False)
+    # A concrete terminal takes precedence over a "for orders" qualifier.
+    terminal_id = _resolve_locode(s, unlocode_to_terminal)
+    if terminal_id is not None:
+        return (terminal_id, False)
 
-    # Freeform name? Normalize and re-look-up.
-    if compact in FREEFORM_TO_LOCODE:
-        canonical = FREEFORM_TO_LOCODE[compact]
-        if canonical in unlocode_to_terminal:
-            return (unlocode_to_terminal[canonical], False)
+    if _is_for_orders(s):
+        return (None, True)
 
     return (None, False)
