@@ -123,6 +123,13 @@ CREATE TABLE port_events (
     lon             REAL,
     laden_flag      BOOLEAN,
     laden_source    TEXT             CHECK (laden_source IN ('draught', 'flow_direction')),
+    -- Ingestion regime, generated from event_time vs the 2026-05-30 09:27 UTC
+    -- cutover (mirrors config.REGIME_CUTOVER): 'bbox' = old throttled bbox
+    -- subscription, 'mmsi_filter' = server-side MMSI filtering. STORED so it
+    -- can never drift. See docs/review-2026-05-31-pre-signal-audit.md §0.
+    regime          TEXT             GENERATED ALWAYS AS (
+                        CASE WHEN event_time < TIMESTAMPTZ '2026-05-30 09:27:00+00'
+                             THEN 'bbox' ELSE 'mmsi_filter' END) STORED,
     cold_start      BOOLEAN          NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ      DEFAULT now(),
     CONSTRAINT valid_event_type CHECK (
@@ -152,7 +159,8 @@ CREATE TABLE priority_watchlist (
     parsed_dest_terminal_id INT          REFERENCES terminals(terminal_id),
     parsed_eta              TIMESTAMPTZ,
     in_slot                 BOOLEAN      NOT NULL DEFAULT FALSE,  -- set TRUE by aisstream.py after picking the 150
-    slot_kind               TEXT,                                 -- 'persistent' | 'scan' | NULL
+    slot_kind               TEXT,                                 -- 'persistent' | 'scan' | 'pinned' | NULL
+    is_pinned               BOOLEAN      NOT NULL DEFAULT FALSE,  -- recent open laden leg (set by scoring.py); forced into a persistent slot so we re-acquire the vessel on its European approach (M1)
     last_scan_window_at     TIMESTAMPTZ,                          -- bumped each time a vessel is picked for a scan window; used to rotate the scan queue
     computed_at             TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
