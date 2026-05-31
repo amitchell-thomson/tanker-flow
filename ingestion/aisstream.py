@@ -51,6 +51,14 @@ PERSISTENT_CONNECTIONS = 2
 PERSISTENT_SLOTS = PERSISTENT_CONNECTIONS * MMSI_CAP_PER_CONNECTION   # 100
 SCAN_CHUNK_INDEX = NUM_CONNECTIONS - 1
 SCAN_SLOTS = MMSI_CAP_PER_CONNECTION                                  # 50
+# Of the scan slots, reserve a quota for tier-5 vessels (stale / never-seen)
+# so they actually cycle. Without this, tier 4 (~400-500 vessels) keeps
+# consuming all 50 slots under `(tier ASC, last_scan_window_at ASC)` and
+# tier-5 vessels starve forever — they can never accrue a fix to be promoted
+# out. With 10 reserved slots, every tier-5 vessel cycles within ~10-22h
+# while tier-4 cycle time goes from ~3.7h to ~4.6h.
+SCAN_TIER5_SLOTS = 10
+SCAN_TIER4_SLOTS = SCAN_SLOTS - SCAN_TIER5_SLOTS                      # 40
 
 # Reconnect every hour. Each reconnect:
 #   1. Triggers a fresh scoring run (see scoring_loop) just beforehand
@@ -134,29 +142,59 @@ async def load_persistent_mmsis(pool: asyncpg.Pool) -> list[int]:
 
 
 async def load_scan_mmsis(pool: asyncpg.Pool) -> list[int]:
-    """Next SCAN_SLOTS vessels from priority_watchlist (tier 4-5), ordered by
+    """Next SCAN_SLOTS vessels from priority_watchlist, split between a
+    tier-4 quota (SCAN_TIER4_SLOTS) and a tier-5 discovery quota
+    (SCAN_TIER5_SLOTS). Each sub-pool is ordered by
     `last_scan_window_at ASC NULLS FIRST` so the least-recently-scanned
     vessels are picked. After picking, write back `last_scan_window_at = now()`
     in the same transaction so this exact batch won't be re-picked on the
     very next reconnect.
 
-    This is what makes scan rotation actually rotate. Without the
-    write-back, watchdog reconnects (every ~5 min when scan vessels are
-    silent) would keep re-selecting the same 50 MMSIs forever.
+    This is what makes scan rotation actually rotate. Without the write-back,
+    watchdog reconnects (every ~5 min when scan vessels are silent) would
+    keep re-selecting the same 50 MMSIs forever.
+
+    The two-pool split exists because the previous single
+    `WHERE tier >= 4 ORDER BY tier ASC, ...` query exhausted the 50 slots
+    on tier 4 alone (which has hundreds of candidates), so tier-5 vessels
+    never got subscribed and could never accrue a fix to promote out of
+    tier 5. Reserving 10 slots breaks that starvation.
+
+    If tier 5 doesn't have enough candidates to fill its quota, the spare
+    slots roll over to tier 4 (and vice versa) so we always subscribe to
+    SCAN_SLOTS vessels when possible.
+    """
+    pick_sql = """
+        SELECT mmsi FROM priority_watchlist
+        WHERE tier = $1
+        ORDER BY last_scan_window_at ASC NULLS FIRST
+        LIMIT $2
+        FOR UPDATE
     """
     async with pool.acquire() as conn:
         async with conn.transaction():
-            rows = await conn.fetch(
-                """
-                SELECT mmsi FROM priority_watchlist
-                WHERE tier >= 4
-                ORDER BY tier ASC, last_scan_window_at ASC NULLS FIRST
-                LIMIT $1
-                FOR UPDATE
-                """,
-                SCAN_SLOTS,
-            )
-            mmsis = [r["mmsi"] for r in rows]
+            tier4_rows = await conn.fetch(pick_sql, 4, SCAN_TIER4_SLOTS)
+            tier5_rows = await conn.fetch(pick_sql, 5, SCAN_TIER5_SLOTS)
+
+            # Roll-over: if either pool came up short, top up from the other
+            # so SCAN_SLOTS gets fully filled.
+            mmsis = [r["mmsi"] for r in tier4_rows] + [r["mmsi"] for r in tier5_rows]
+            shortfall = SCAN_SLOTS - len(mmsis)
+            if shortfall > 0:
+                already = set(mmsis)
+                topup = await conn.fetch(
+                    """
+                    SELECT mmsi FROM priority_watchlist
+                    WHERE tier >= 4 AND mmsi <> ALL($1::BIGINT[])
+                    ORDER BY tier ASC, last_scan_window_at ASC NULLS FIRST
+                    LIMIT $2
+                    FOR UPDATE
+                    """,
+                    list(already),
+                    shortfall,
+                )
+                mmsis.extend(r["mmsi"] for r in topup)
+
             if mmsis:
                 await conn.execute(
                     "UPDATE priority_watchlist SET last_scan_window_at = now() "

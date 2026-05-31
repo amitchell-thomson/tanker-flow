@@ -23,11 +23,16 @@ disjoint chunk of up to 50 MMSIs via `FiltersShipMMSI`. Slot allocation:
 
 - **Chunks 0 + 1 (100 slots)** — persistent block. Highest-tier vessels from
   `priority_watchlist` (tiers 1-3: in or approaching our zones).
-- **Chunk 2 (50 slots)** — scan rotation. Lowest `last_scan_window_at` among
-  tier 4-5 candidates. Each scan window writes back `last_scan_window_at = now()`
-  so the next reconnect (planned 1h *or* the 5-min silence watchdog) picks
-  the next 50 stalest, rotating through the full ~650-vessel tier-4/5 pool
-  in roughly an hour.
+- **Chunk 2 (50 slots)** — scan rotation, split between a **40-slot tier-4
+  quota** and a **10-slot tier-5 discovery quota** (each ordered by
+  `last_scan_window_at ASC NULLS FIRST`, with roll-over if either pool is
+  short). Each scan window writes back `last_scan_window_at = now()` so the
+  next reconnect (planned 1h *or* the 5-min silence watchdog) picks the next
+  stalest batch. The quota split exists because under a single
+  `(tier ASC, ...)` ordering tier 4 (hundreds of candidates) consumed every
+  slot and tier-5 vessels never got subscribed — they could then never accrue
+  a fix to promote out of tier 5 (starvation loop). With 10 reserved slots,
+  every tier-5 vessel cycles within ~10-22h.
 
 Source labels in `ais_fixes` / `vessel_state` / `ingestion_stats_minute` /
 `ingestion_events`: `aisstream-mmsi-1` / `aisstream-mmsi-2` / `aisstream-mmsi-3`.
@@ -106,11 +111,15 @@ and were since mid-Atlantic, wasting persistent slots on ghost MMSIs.
 - **Persistent block (chunks 0 + 1, 100 slots)** — top 100 by
   `(tier ASC, score DESC)` where tier in 1-3. If tier 1-3 totals exceed 100,
   the tail is culled by oldest `last_fix`.
-- **Scan rotation (chunk 2, 50 slots)** — top 50 by
-  `(tier ASC, last_scan_window_at ASC NULLS FIRST)` where tier in 4-5.
-  Each pick advances `last_scan_window_at = now()` in the same transaction
-  so the next reconnect picks a *different* 50, even when the 5-min
-  silence watchdog fires repeatedly.
+- **Scan rotation (chunk 2, 50 slots)** — 40 from tier 4 + 10 from tier 5,
+  each pool ordered by `last_scan_window_at ASC NULLS FIRST`. Shortfall in
+  one pool rolls over to the other so the chunk is always fully filled when
+  the watchlist has ≥50 scan-eligible vessels. Each pick advances
+  `last_scan_window_at = now()` in the same transaction so the next reconnect
+  picks a *different* batch, even when the 5-min silence watchdog fires
+  repeatedly. The tier-5 carve-out exists to prevent the previous starvation
+  state where a tier-5 vessel could never be subscribed (and so could never
+  accrue a fix to promote out of tier 5).
 - **Promotion** — a scan vessel that delivers an in-zone fix (or a parseable
   inbound `dest`) gets re-tiered to 1-3 on the next scoring run, and lands
   in the persistent block on the very next 1h reconnect.
