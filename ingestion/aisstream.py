@@ -12,7 +12,7 @@ from rich.logging import RichHandler
 
 from config import settings
 
-from pipeline import scoring
+from pipeline import port_events, scoring
 
 from .dynamic_enrichment import EnrichmentState, enrichment_worker, load_known_mmsis
 from .metrics import MinuteAggregator, classify_zone, record_event
@@ -67,6 +67,13 @@ SCAN_TIER4_SLOTS = SCAN_SLOTS - SCAN_TIER5_SLOTS  # 40
 # The 1h cadence is what makes scan rotation work — chunk 2 swaps its 50
 # vessels each cycle, cycling through ~650 tier-4/5 candidates over ~13h.
 RECONNECT_INTERVAL_SECONDS = 3600
+
+# Periodic port_events rebuild cadence. The rebuild is a full recompute from
+# ais_fixes (~6s over the current hypertable) but writes via an atomic staging
+# swap, so a 2-min cadence keeps derived events/legs near-live at ~5% of one core
+# without ever exposing a partial table. Minutes-scale latency is well inside what
+# the signal layer needs (outage/queue nowcasts, not per-second updates).
+PORT_EVENTS_INTERVAL_SECONDS = 120
 
 # Use full-globe bbox; the MMSI filter does the actual constraining.
 GLOBAL_BBOX = [[[-85.0, -180.0], [85.0, 180.0]]]
@@ -559,6 +566,22 @@ async def ingest():
 
     scoring_task = asyncio.create_task(scoring_loop())
 
+    async def port_events_loop():
+        # Periodic full rebuild so derived port_events/legs stay near-live rather
+        # than waiting for a manual `make port-events`. run() builds all events
+        # off-table then writes via an atomic staging swap (TRUNCATE + bulk INSERT
+        # in one transaction), so concurrent readers (the viz API) never see a
+        # partial table. Uses wall-clock `now` for stale-envelope closing — the
+        # --as-of override is only for reproducible offline rebuilds.
+        while True:
+            await asyncio.sleep(PORT_EVENTS_INTERVAL_SECONDS)
+            try:
+                await port_events.run(pool)
+            except Exception as e:
+                logger.warning(f"port_events rebuild failed: {e}")
+
+    port_events_task = asyncio.create_task(port_events_loop())
+
     async def connection_loop(source_name: str, chunk_index: int):
         """Reconnect loop owning one MMSI-filtered subscription. On each
         (re)connect:
@@ -625,9 +648,11 @@ async def ingest():
             ]
         )
     finally:
-        for t in (enrichment_task, scoring_task):
+        for t in (enrichment_task, scoring_task, port_events_task):
             t.cancel()
-        await asyncio.gather(enrichment_task, scoring_task, return_exceptions=True)
+        await asyncio.gather(
+            enrichment_task, scoring_task, port_events_task, return_exceptions=True
+        )
         await pool.close()
 
 

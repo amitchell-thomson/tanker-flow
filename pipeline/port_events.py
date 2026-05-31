@@ -145,7 +145,6 @@ async def run(pool: asyncpg.Pool, now: datetime | None = None) -> None:
         now = datetime.now(UTC)
 
     async with pool.acquire() as conn:
-        await conn.execute(TRUNCATE_SQL)
         in_scope = await conn.fetch(IN_SCOPE_MMSIS_SQL)
         berths = await conn.fetch(BERTH_CENTROIDS_SQL)
         terminal_rows = await conn.fetch(TERMINAL_METADATA_SQL)
@@ -185,14 +184,18 @@ async def run(pool: asyncpg.Pool, now: datetime | None = None) -> None:
     )
 
     # ----- FSRU short-circuit: one moored event per declared host -----
-    fsru_events_inserted = await _emit_fsru_moored(
-        pool, fsru_mmsis, fsru_hosts, terminal_zone_map
+    # Events accumulate in `event_rows` and are written only by the atomic swap
+    # at the end — nothing touches the live table until then. The output is tiny
+    # (events ≪ fixes), so holding it in memory is cheap regardless of fleet size.
+    event_rows: list[tuple] = []
+    event_rows.extend(
+        await _emit_fsru_moored(pool, fsru_mmsis, fsru_hosts, terminal_zone_map)
     )
 
     # ----- Walk every other in-scope MMSI through the state machine -----
     summary = {
         "regular_vessels": 0,
-        "fsru_vessels_emitted": fsru_events_inserted,
+        "fsru_vessels_emitted": len(event_rows),
         "events_by_kind": defaultdict(int),
         "open_visits": 0,
         "cold_start_events": 0,
@@ -200,6 +203,9 @@ async def run(pool: asyncpg.Pool, now: datetime | None = None) -> None:
     }
 
     # Stream the spatial join in a single cursor and split at MMSI boundaries.
+    # READ-ONLY: each vessel's events are appended to event_rows; the live table
+    # is left intact for the whole (~seconds) walk so concurrent readers keep
+    # seeing the previous complete snapshot.
     async with pool.acquire() as conn:
         async with conn.transaction():
             cur = await conn.cursor(SPATIAL_JOIN_SQL, walker_mmsis)
@@ -212,8 +218,7 @@ async def run(pool: asyncpg.Pool, now: datetime | None = None) -> None:
                 for row in rows:
                     if row["mmsi"] != current_mmsi:
                         if current_mmsi is not None:
-                            await _process_vessel(
-                                pool,
+                            _process_vessel(
                                 current_mmsi,
                                 buf,
                                 nearest_berth,
@@ -223,13 +228,13 @@ async def run(pool: asyncpg.Pool, now: datetime | None = None) -> None:
                                 draught_lookup,
                                 summary,
                                 now,
+                                event_rows,
                             )
                         current_mmsi = row["mmsi"]
                         buf = []
                     buf.append(_row_to_fix(row))
             if current_mmsi is not None:
-                await _process_vessel(
-                    pool,
+                _process_vessel(
                     current_mmsi,
                     buf,
                     nearest_berth,
@@ -239,7 +244,22 @@ async def run(pool: asyncpg.Pool, now: datetime | None = None) -> None:
                     draught_lookup,
                     summary,
                     now,
+                    event_rows,
                 )
+
+    # ----- Atomic staging swap -----
+    # All new events were built above without touching the live table. Replace
+    # its contents in ONE short transaction: the TRUNCATE and the bulk INSERT
+    # commit together, so a concurrent reader sees either the entire previous
+    # snapshot or the entire new one — never the empty/half-filled table that
+    # the old TRUNCATE-then-stream-inserts approach exposed for the whole walk.
+    # The ACCESS EXCLUSIVE lock is held only for the bulk insert (sub-second),
+    # not the multi-second walk.
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(TRUNCATE_SQL)
+            if event_rows:
+                await conn.executemany(INSERT_SQL, event_rows)
 
     _log_summary(summary, time.monotonic() - t_start)
 
@@ -300,8 +320,7 @@ def _classify_envelope_sides(events: list[Event]) -> list[Side]:
     return sides
 
 
-async def _process_vessel(
-    pool: asyncpg.Pool,
+def _process_vessel(
     mmsi: int,
     fixes: list[Fix],
     nearest_berth,
@@ -311,6 +330,7 @@ async def _process_vessel(
     draught_lookup,
     summary: dict[str, Any],
     now: datetime,
+    out_rows: list[tuple],
 ) -> None:
     summary["regular_vessels"] += 1
     if not fixes:
@@ -377,9 +397,7 @@ async def _process_vessel(
     if has_moored and not has_departed:
         summary["open_visits"] += 1
 
-    if rows:
-        async with pool.acquire() as conn:
-            await conn.executemany(INSERT_SQL, rows)
+    out_rows.extend(rows)
 
 
 async def _emit_fsru_moored(
@@ -387,18 +405,19 @@ async def _emit_fsru_moored(
     fsru_mmsis: set[int],
     fsru_hosts: dict[int, int],
     terminal_zone_map: dict[int, str],
-) -> int:
-    """Emit one synthetic moored event per declared FSRU at its host terminal.
+) -> list[tuple]:
+    """Build one synthetic moored event per declared FSRU at its host terminal,
+    returned as INSERT_SQL row tuples (the caller batches them into the atomic
+    swap rather than inserting here).
 
     The event_time is the first fix observed for that MMSI. FSRUs without a
     declared host (terminals.fsru_host_mmsi IS NULL) are logged and skipped —
     the resident vessel is unknown.
     """
+    rows: list[tuple] = []
     if not fsru_mmsis:
-        return 0
+        return rows
 
-    inserted = 0
-    rows = []
     async with pool.acquire() as conn:
         for mmsi in sorted(fsru_mmsis):
             terminal_id = fsru_hosts.get(mmsi)
@@ -444,10 +463,7 @@ async def _emit_fsru_moored(
                     True,  # cold_start = TRUE — they've been moored since before data
                 )
             )
-        if rows:
-            await conn.executemany(INSERT_SQL, rows)
-            inserted = len(rows)
-    return inserted
+    return rows
 
 
 def _log_summary(summary: dict[str, Any], wall_seconds: float) -> None:
