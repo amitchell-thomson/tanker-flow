@@ -234,9 +234,8 @@ to select whole signal families (all queue signals in or out together).
 ### 7 · Bayesian structural time series / dynamic linear models — *best T2 fit*
 
 **What.** A state-space spread model with a regression component, spike-and-slab
-priors for variable selection, and native uncertainty. This is the
-recommendation in SIGNALS §A2, and the most appropriate spread model for small
-data.
+priors for variable selection, and native uncertainty — the most appropriate
+spread model for this small a sample.
 
 **Maths.** Decompose the spread into latent components plus regressors:
 
@@ -457,7 +456,9 @@ control (V.1) to absorb any residual FX sensitivity.
    PLS (§8).
 7. **Defer** LightGBM (§9, constrained only) and full cross-exciting Hawkes (§4)
    until the panel passes ~1 year / the event count is large.
-8. **Never** deep sequence models on this sample size (SIGNALS §F).
+8. **Never** deep sequence models (Transformer / LSTM / TFT) on this sample
+   size — with weeks of data and 30+ features they overfit badly; the "Transformer
+   wins on financial time series" literature almost always has a leakage bug.
 
 The honest summary: on a few months you **confirm edge** (Parts II + V.2) rather
 than **forecast the spread** (Part III). The physical nowcasts and the

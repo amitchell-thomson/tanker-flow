@@ -1,9 +1,13 @@
 # Signals derivable from `port_events` + `ais_fixes`
 
-Inventory of market signals that can be extracted from the tanker-flow data once
-`approach` polygons and missing anchorages are in place, with notes on which
-signals survive a **terrestrial-AIS-only** constraint, and which ML methods most
-plausibly turn these signals into a tradeable view on the Henry Hub / TTF spread.
+Inventory of market signals that can be extracted from the tanker-flow data, with
+notes on which signals survive a **terrestrial-AIS-only** constraint. The
+`approach` polygons and anchorages this inventory assumes are now in place
+(34/34 terminals), and the voyage-leg foundation under the flow signals is built
+(`pipeline/legs.py`). The **modelling** layer — which methods turn these signals
+into a tradeable view on the Henry Hub / TTF spread, and why they can extract
+signal from only a few months of data — lives in the companion
+[`MODELS.md`](MODELS.md).
 
 ---
 
@@ -59,21 +63,48 @@ clean series — they step. Rules for the modelling layer:
   the seam will learn the ingestion change as if it were a market move. Segment by
   regime, or start the training corpus at the cutover.
 - **The usable real-time history is ~6.5 weeks of a now-defunct regime + the live
-  tail** — not the "1000–1800 daily rows over 3–5 years" assumed in the ML section
-  below. The old block is fit for validating *signal logic* (event detection, leg
+  tail** — `MODELS.md` works through the consequences (`N ≈ 45`, `N_eff ≈ 28`).
+  The old block is fit for validating *signal logic* (event detection, leg
   geometry, queue/turn-time realism all survive random fix drops), **not** for
   training the spread model. The real training corpus only begins accruing now,
   under the new scheme.
 - **Signal *extraction* is safe today; signal *modelling* is not yet.** Computing
   #1/#6/#9 from `port_events` is unaffected by the seam (each event is individually
-  correct); fitting §A–F on a series that crosses it is not.
+  correct); fitting any `MODELS.md` spread model on a series that crosses it is not.
 - **Regime-specific artifacts:** the old regime inflates "gone-dark" / stale-close
   and manufactures phantom open legs via random drops + box geography; the new
   regime manufactures phantom open legs via scorer tier-decay instead. Both demand
   open-leg **age-censoring** (see #17/#20) regardless of regime.
 
+- **The seam is now explicit in the data.** `port_events.regime` is a STORED
+  generated column (`'bbox'` before the 2026-05-30 09:27 UTC cutover,
+  `'mmsi_filter'` after, mirroring `config.regime_of`), so every series below can
+  be segmented on it directly in SQL — no derivation needed.
+
 Full provenance and per-signal impact: `docs/review-2026-05-31-pre-signal-audit.md`
-(§0).
+(§0) and the post-hardening re-audit `docs/review-2026-05-31-post-hardening-audit.md`,
+which records the must-fixes (naive pairing, phantom legs, dest_parser, FSRU hosts)
+as resolved or quarantined.
+
+---
+
+## 0·6 · Schema notes for the signal builder
+
+A few columns the signal definitions below lean on, to save a schema hunt and
+avoid looking for fields where they don't live:
+
+- **`flow_direction` is on `terminals`, not `port_events`.** Signals phrased as
+  "`moored` events with `flow_direction='import'`" (#4, #12, #14, #16) require a
+  `port_events.terminal_id → terminals.flow_direction` join.
+- **`port_events.laden_source`** (`'draught'` | `'flow_direction'`) records how
+  `laden_flag` was decided. Outbound (`departed`) legs are now
+  flow-direction-determined; the ton-mile (#1) and fleet-laden (#33) weights can
+  condition on this.
+- **`port_events.regime`** is the STORED generated column from §0.5 — segment
+  every time series on it.
+- **Registry weights:** `vessel_registry.dwt` is 100% populated (#1 fully
+  supported); `gas_capacity_m3` is missing for 4 (#2); `design_draught ≤ 0` for
+  75/780 in-scope (those laden flags fall back to flow-direction).
 
 ---
 
@@ -90,6 +121,19 @@ Full provenance and per-signal impact: `docs/review-2026-05-31-pre-signal-audit.
 > *Mechanism*: These mechanically constrain European supply over the next 7–21
 > days. Sustained dip in #1 / #4 should precede TTF strength (spread widens);
 > surge should precede TTF weakness (spread narrows).
+
+> **Leg foundation (`pipeline/legs.py`).** Signals #1–#5, #20–#22 and #32 are not
+> computed from a naive "`departed` → next `zone_entry`" scan. That pairing was a
+> documented failure mode — laden `usgulf→usgulf` legs averaging 31 days, a missed
+> European round-trip collapsed into one bogus near-zero-distance "leg". The legs
+> module pairs and **classifies** every leg: `closed` (cross-zone real voyage),
+> `same_zone` (intra-region hop / berth shift / re-entry — ~zero cross-zone
+> ton-miles, so **excluded** from the lane flow), `open_in_transit`, and
+> `open_censored` (open beyond `CENSOR_OPEN_DAYS = 30` — quarantined as a phantom;
+> see §4). Each leg is regime-tagged and carries `dwt` / `gas_capacity_m3`. The
+> signal layer aggregates over this classified base: select `closed` + laden
+> `open_in_transit` for the US→Europe lane; never sum `same_zone` or
+> `open_censored`.
 
 ---
 
@@ -146,6 +190,21 @@ spread-relevant — but it's also where the terrestrial-AIS constraint hurts mos
 > *Without satellite AIS, #20 and #21 are the workable floating-storage proxies*:
 > they use only the departure and arrival timestamps, not any mid-ocean fix.
 > #17–19 should be reported with the caveat "subset visible from coast".
+
+> **Phantom-leg bias — a second, distinct bias on top of mid-ocean blindness.**
+> Beyond the spatial blind spot above, a large share of open legs are not floating
+> storage at all: they are arrivals we never recorded because the vessel went dark
+> (old-regime throttle drops / box geography, or new-regime scorer tier-decay).
+> The pre-signal audit found 47 open laden-US legs with *zero* post-departure
+> fixes (oldest 42.9 d). These *phantoms* are indistinguishable from genuine
+> idleness and inflate #1, #17, #19 and #20 without bound. Two mitigations are
+> live: (a) `pipeline/legs.py` **censors** open legs older than 30 days
+> (`open_censored`), so they never enter the in-transit base; (b) `scoring.py`
+> **pins** any vessel with a recent open laden leg into a persistent subscription
+> slot (`priority_watchlist.is_pinned`) so the new scheme re-acquires it on the
+> European approach. The censor is a single global cap — the signal layer should
+> still apply a tighter per-O-D window (US→EU ~18 d) on top, and the pin only
+> helps the *new* regime, not the historical phantoms.
 
 ---
 
@@ -222,134 +281,25 @@ by the curve. Outage detection is high-leverage.
 
 ---
 
-## ML methods — which approach for which signal
+## Modelling → see [`MODELS.md`](MODELS.md)
 
-Targets to consider in priority order: (a) HH/TTF spread first-difference at
-1-week and 4-week horizons, (b) realised spread volatility, (c) per-terminal
-arrival/loading rates as intermediate model outputs.
+The modelling layer — which method turns these signals into a spread forecast,
+why each can extract signal from only a few months of data, and how to control
+for the non-tanker drivers of the spread — has moved to its dedicated companion
+**[`MODELS.md`](MODELS.md)**. The headline points:
 
-The training set is small — daily resolution over ~3–5 years gives ~1000–1800
-rows. This is the central constraint: deep models will overfit; the methods
-below are picked for sample-efficiency and interpretability.
+- **Physical nowcasts work today** (kinematic ETA propagation, Poisson/NB arrival
+  counts, Cox/Weibull survival models for queue & berth time). They are high-SNR,
+  event-level, and validatable against EIA on the existing window.
+- **The spread model does not yet.** With `N ≈ 45` daily rows (`N_eff ≈ 28`) and
+  the 2026-05-30 regime seam, training a spread model is premature; the right
+  tools are shrinkage + Bayesian priors + honest uncertainty (regularised
+  regression, Bayesian structural time series, regime detection), not a point
+  forecast. **Never train across the seam** (§0.5). The usable training corpus
+  only begins accruing now, under the MMSI-filter regime.
+- **The edge is the dataset, not the method:** a clean, low-latency, per-vessel
+  AIS feed (≈1 s ingest lag vs vendors' hours-to-days) and 24–48 h-early
+  outage / change-point detection (#36–#38) — not smooth-model R².
 
-### A. Baseline / shallow models — necessary, low edge
-
-1. **Lagged linear regression** — spread first-difference on 10–15 hand-picked
-   lagged AIS features (`#1`, `#4`, `#7`, `#13`, `#20`, `#42`) + EIA storage +
-   degree-days. Sanity-check baseline. Anything fancier must beat this on
-   walk-forward CV.
-2. **VAR / Bayesian state-space (dynamic linear model)** — treats spread as a
-   slowly-varying latent state observed through both the AIS signals and the
-   spread itself. Gives uncertainty intervals natively, which is what a hedger
-   actually wants. Recommended over pure VAR because of the small sample.
-
-### B. Gradient boosting — workhorse production model
-
-3. **LightGBM / XGBoost** on the full feature set, target = spread Δ at horizon
-   `h`. Handles 30–40 features, captures interactions, monotonic constraints
-   available for sign-known features (e.g., constrain "loading queue time" to
-   have non-negative effect on spread). SHAP for interpretation.
-   *Edge: low — every commodity desk has this. But the right baseline for the
-   production nowcast.*
-
-### C. Per-vessel micro-models — where the genuine edge sits
-
-This is the part very few people are doing in LNG, and the part where having a
-custom AIS pipeline rather than a Kpler / Vortexa subscription pays off. The
-pipeline already produces per-vessel events; bulk-data vendors usually don't
-expose them at this granularity.
-
-4. **Survival models for `time-at-queue` and `time-at-berth`** — Cox
-   proportional hazards (or DeepSurv for non-linearities) per terminal,
-   covariates = vessel `dwt`, recent terminal congestion, season, day-of-week,
-   weather (degree-day proxy). Yields per-vessel arrival-rate predictions that
-   aggregate to a much better forecast of weekly arrivals than naive counts.
-   *Edge: HIGH. Underexploited because most LNG modelling stops at aggregate
-   counts.*
-5. **Multivariate Hawkes process over terminals** — models arrivals at one
-   terminal as self-exciting + cross-exciting from neighbours (tide windows,
-   weather systems, fleet rotation). Better arrival nowcast than independent
-   Poisson rates.
-   *Edge: HIGH for short-horizon arrivals; moderate for spread directly.*
-6. **Per-vessel "intent" classifier** — given a vessel's last 7 days of fixes
-   plus its `vessel_state.dest`, predict P(next `zone_entry` is European). A
-   simple boosted tree on engineered features (current zone, sog, declared
-   dest, time-since-departed). Aggregated over the fleet gives a probabilistic
-   Europe-arrival forecast that beats counting declared destinations naively.
-   *Edge: medium-high.*
-
-### D. Event / regime detection — high leverage for outages
-
-7. **Bayesian online change-point detection (BOCPD)** on arrivals-per-week and
-   loadings-per-week per terminal. Fires alerts within 24–48h of a regime
-   break — the Freeport-2022 archetype. Cheap, well-understood, and outages
-   dominate realised spread moves.
-   *Edge: HIGH on a per-event basis; sparse signal (few events per year) so
-   hard to backtest, but the asymmetric payoff makes it worth running.*
-8. **HMM / regime-switching regression** for the spread itself, where the
-   regime is driven by composite features (#42 spread thrust, #36/#37 outage
-   indicators). Lets the model learn that the linear relationship between
-   queue depth and spread differs in "normal" vs "outage" vs "winter freeze"
-   regimes.
-
-### E. Causal / event-study layer — for understanding, not nowcasting
-
-9. **Difference-in-differences across outage events** — was the Freeport
-   spread move *caused* by the outage, or were both driven by underlying
-   weather? Useful for sizing positions when a similar outage recurs.
-10. **Synthetic control on natural experiments** — when a single terminal goes
-    offline, compare the cumulative spread move against a synthetic
-    counterfactual constructed from terminals that remained online. Quantifies
-    each terminal's marginal contribution.
-
-### F. Methods to avoid given the data
-
-- **Deep sequence models (Transformer / LSTM / TFT)** — with ~1500 daily
-  observations and 30+ features, these overfit badly. The literature claiming
-  Transformer wins on financial time series almost always has a leakage bug.
-  Don't.
-- **GNNs on the O-D matrix** — clean conceptual fit, but the graph is small
-  (~33 in-scope terminals) and the data is too short. A boosted tree on
-  hand-crafted O-D features beats it.
-- **End-to-end RL for trading the spread** — sample-inefficient,
-  hard-to-debug. Premature for this dataset size.
-
----
-
-## Where the edge actually sits
-
-Plain ML technique is *not* the edge. Three things are:
-
-1. **Owning a clean, low-latency AIS-derived dataset.** Median ingest lag is
-   currently ~1 s; Kpler / Vortexa publish position-derived reports with
-   hours-to-days of lag. The nowcast on **#36–38** (outage / queue formation)
-   is the highest-leverage application of the speed advantage.
-
-2. **Per-vessel micro-features that bulk-data vendors flatten away.** The
-   `port_events` table is already at per-vessel-per-event granularity. The
-   survival / Hawkes / intent classifiers in section C use this directly.
-   Vendor data forces everyone into aggregate counts; this pipeline doesn't.
-
-3. **Outage / change-point detection.** Discrete supply shocks (Freeport,
-   Yamal sanctions, Norwegian field maintenance) drive a disproportionate
-   share of realised spread variance. Being 24–48 h ahead on identifying an
-   outage from `port_events` is worth more than any smooth-model R².
-
-The terrestrial-AIS constraint **eliminates the mid-voyage diversion edge**
-(signal #28) and **degrades the global floating-storage measurement** (#17–19).
-What remains intact is the entire port-side stack — queues, throughput,
-turn times, outages, declared-destination-at-departure — which is also where
-most of the spread-relevant information actually concentrates. The pipeline is
-well-suited to that subset.
-
-Recommended build order:
-1. Lagged linear baseline (#1, #4, #7, #13, #20, #42 + storage + degree-days).
-2. LightGBM nowcast on the full feature set, walk-forward CV.
-3. Per-terminal BOCPD on arrivals/loadings — wire to alerts.
-4. Cox survival model on queue / berth times — feed predictions into the GBM.
-5. Hawkes model for arrivals — only if (4) shows the survival features have
-   signal.
-6. State-space / HMM regime layer — only after a stable GBM baseline.
-
-Skip the deep-learning layer until/unless the dataset extends to >5 years of
-daily data or moves to hourly resolution.
+See `MODELS.md` for the full treatment, the small-sample maths, the non-tanker
+control set, and the recommended build order.
