@@ -17,11 +17,12 @@ fix), not the moment of dwell-confirmation.
 
 from __future__ import annotations
 
-import math
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
+
+from .geo import haversine_nm
 
 
 ZONE_TYPE_SPECIFICITY = {"berth": 0, "anchorage": 1, "approach": 2}
@@ -476,8 +477,28 @@ class _Walker:
             return
         # Fix outside ALL polygons of the current terminal — visit envelope
         # closes. (AIS dropouts don't fire this because they produce no fix at
-        # all; only an actual fix outside can close the envelope.) Flush
-        # anchorage_exit first if we were still inside the anchorage polygon.
+        # all; only an actual fix outside can close the envelope.)
+        #
+        # departed recovery: if we were still MOORED, the vessel undocked and
+        # its first post-undock fix is already outside every polygon (the
+        # approach polygon didn't contain the outbound channel, or a position
+        # jump). The normal MOORED->DEPARTED watchdog never saw a qualifying
+        # in-envelope fix, so emit `departed` here to keep the DFA well-formed
+        # (moored -> departed -> zone_exit) and avoid undercounting loadings
+        # (#9). Back-dated to the last in-polygon fix (self.last_fix_*) — the
+        # last position we actually observed at the berth, which is the correct
+        # origin for a downstream voyage leg and a lower bound on the true
+        # departure time.
+        if self.state == State.MOORED:
+            self.emit(
+                "departed",
+                self.last_fix_ts if self.last_fix_ts is not None else fix.fix_ts,
+                self.terminal_id,
+                self.last_fix_lat if self.last_fix_lat is not None else fix.lat,
+                self.last_fix_lon if self.last_fix_lon is not None else fix.lon,
+            )
+        # Flush anchorage_exit first if we were still inside the anchorage
+        # polygon.
         if self.in_anchorage:
             self.emit("anchorage_exit", fix.fix_ts, self.terminal_id, fix.lat, fix.lon)
             self.in_anchorage = False
@@ -603,60 +624,6 @@ def walk(
 
 
 # ----------------------------------------------------------------------
-# Post-walk passes
-# ----------------------------------------------------------------------
-
-
-def reattribute_overlaps(events: list[Event]) -> list[Event]:
-    """For each moored event at terminal B, rewrite preceding zone_entry/
-    anchored events in the same envelope to B if their originating fix also
-    lay inside one of B's polygons (i.e., the regions overlap).
-
-    The overlap check uses each event's `candidate_terminal_ids` — the set of
-    every terminal whose polygons contained the originating fix. If B is in
-    that set, then A and B's polygons both contain the earlier fix's location.
-    """
-    if not events:
-        return events
-
-    result = list(events)
-    open_start: int | None = None
-    for i, ev in enumerate(result):
-        if ev.event_type == "zone_entry":
-            open_start = i
-        elif ev.event_type == "zone_exit" and open_start is not None:
-            _reattribute_envelope(result, open_start, i)
-            open_start = None
-    if open_start is not None:
-        _reattribute_envelope(result, open_start, len(result) - 1)
-    return result
-
-
-def _reattribute_envelope(events: list[Event], start: int, end: int) -> None:
-    moored_idx = next(
-        (j for j in range(start, end + 1) if events[j].event_type == "moored"),
-        None,
-    )
-    if moored_idx is None:
-        return
-    moored_tid = events[moored_idx].terminal_id
-    for j in range(start, moored_idx):
-        ev = events[j]
-        if ev.terminal_id == moored_tid:
-            continue
-        if moored_tid in ev.candidate_terminal_ids:
-            events[j] = Event(
-                event_type=ev.event_type,
-                event_time=ev.event_time,
-                terminal_id=moored_tid,
-                lat=ev.lat,
-                lon=ev.lon,
-                cold_start=ev.cold_start,
-                candidate_terminal_ids=ev.candidate_terminal_ids,
-            )
-
-
-# ----------------------------------------------------------------------
 # DFA validation
 # ----------------------------------------------------------------------
 
@@ -706,23 +673,10 @@ def make_nearest_berth(
     def f(candidates: list[int], lat: float, lon: float) -> int:
         def min_dist(tid: int) -> float:
             return min(
-                _haversine_nm(lat, lon, blat, blon)
+                haversine_nm(lat, lon, blat, blon)
                 for blat, blon in centroids_by_terminal[tid]
             )
 
         return min(candidates, key=min_dist)
 
     return f
-
-
-def _haversine_nm(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Great-circle distance in nautical miles."""
-    r_nm = 3440.065  # earth radius in nm
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlam = math.radians(lon2 - lon1)
-    a = (
-        math.sin(dphi / 2) ** 2
-        + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
-    )
-    return 2 * r_nm * math.asin(math.sqrt(a))

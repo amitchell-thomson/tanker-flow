@@ -12,7 +12,6 @@ from datetime import datetime, timedelta, timezone
 from pipeline.state_machine import (
     Fix,
     make_nearest_berth,
-    reattribute_overlaps,
     validate_sequence,
     walk,
 )
@@ -146,8 +145,6 @@ def test_shared_anchorage_then_berth_at_other_terminal():
     )
     assert all(e.terminal_id == 2 for e in events)
     validate_sequence(events)
-    # reattribute_overlaps is a no-op safety net after the inline rewrite.
-    assert reattribute_overlaps(events) == events
 
 
 def test_distinct_terminals_real_switch_closes_and_reopens_envelope():
@@ -400,3 +397,99 @@ def test_re_anchoring_emits_two_anchored_events():
     )
     # First stint: 5 -> 50 = 45 min. Second stint: 100 -> 150 = 50 min. Total 95.
     assert total_queue == timedelta(minutes=95)
+
+
+# ----------------------------------------------------------------------
+# departed recovery: vessel undocks and its first post-undock fix is already
+# outside every polygon (the approach polygon didn't contain the outbound
+# channel, or a position jump). A `departed` must still be emitted, back-dated
+# to the last in-polygon fix, rather than skipped straight to zone_exit.
+# ----------------------------------------------------------------------
+
+
+def test_moored_to_open_ocean_emits_departed():
+    fixes = [
+        fix(0, ((1, "approach", 0),), sog=5.0),
+        fix(10, ((1, "berth", 0), (1, "approach", 0)), sog=0.1),
+        fix(45, ((1, "berth", 0), (1, "approach", 0)), sog=0.1),  # moored (dwell)
+        # Next fix is already open ocean — no approach-band fix in between.
+        fix(60, (), sog=8.0),
+    ]
+    events = walk(iter(fixes), NEAREST_BERTH)
+    validate_sequence(events)
+    types = [(e.event_type, e.event_time) for e in events]
+    assert types == [
+        ("zone_entry", at(0)),
+        ("moored", at(10)),
+        ("departed", at(45)),  # back-dated to the last in-polygon (berth) fix
+        ("zone_exit", at(60)),
+    ]
+    departed = next(e for e in events if e.event_type == "departed")
+    assert departed.terminal_id == 1
+    assert not departed.cold_start
+
+
+# ----------------------------------------------------------------------
+# Stale-envelope close: AIS goes silent inside a polygon for > stale_threshold.
+# The envelope is closed at the last observed fix, flagged cold_start=True.
+# (Currently the source of ~1/3 of all live zone_exit events — was untested.)
+# ----------------------------------------------------------------------
+
+
+def test_stale_envelope_close_between_fixes():
+    """A >72h gap between two consecutive fixes while anchored closes the
+    envelope at the last fix (synthetic anchorage_exit + zone_exit)."""
+    fixes = [
+        fix(0, ((1, "approach", 0),), sog=5.0),
+        fix(10, ((1, "anchorage", 0), (1, "approach", 0)), sog=0.2),
+        fix(45, ((1, "anchorage", 0), (1, "approach", 0)), sog=0.2),  # anchored
+        # 73h silence, then the vessel reappears far away in open ocean.
+        fix(45 + 73 * 60, (), sog=10.0),
+    ]
+    events = walk(iter(fixes), NEAREST_BERTH)
+    validate_sequence(events)
+    types = [e.event_type for e in events]
+    assert types == [
+        "zone_entry",
+        "anchorage_entry",
+        "anchored",
+        "anchorage_exit",
+        "zone_exit",
+    ]
+    # Synthetic close back-dated to the last in-polygon fix (t=45), cold_start.
+    assert events[-1].event_type == "zone_exit"
+    assert events[-1].event_time == at(45)
+    assert events[-1].cold_start is True
+    assert events[-2].event_type == "anchorage_exit"
+    assert events[-2].cold_start is True
+
+
+def test_stale_envelope_close_end_of_stream():
+    """Stream ends with the vessel still moored and the last fix older than
+    now - stale_threshold: close the envelope at the last fix. No departed
+    (we lost coverage; departure is unknowable)."""
+    fixes = [
+        fix(0, ((1, "approach", 0),), sog=5.0),
+        fix(10, ((1, "berth", 0), (1, "approach", 0)), sog=0.1),
+        fix(45, ((1, "berth", 0), (1, "approach", 0)), sog=0.1),  # moored
+    ]
+    # `now` is 80h after the last fix -> end-of-stream stale close fires.
+    events = walk(iter(fixes), NEAREST_BERTH, now=at(45 + 80 * 60))
+    validate_sequence(events)
+    types = [e.event_type for e in events]
+    assert types == ["zone_entry", "moored", "zone_exit"]
+    assert events[-1].cold_start is True
+    assert events[-1].event_time == at(45)
+
+
+def test_no_stale_close_when_now_within_threshold():
+    """If now is within stale_threshold of the last fix, the envelope stays
+    open (matches the cold-end behaviour)."""
+    fixes = [
+        fix(0, ((1, "approach", 0),), sog=5.0),
+        fix(10, ((1, "berth", 0), (1, "approach", 0)), sog=0.1),
+        fix(45, ((1, "berth", 0), (1, "approach", 0)), sog=0.1),
+    ]
+    events = walk(iter(fixes), NEAREST_BERTH, now=at(45 + 10))  # 10 min later
+    types = [e.event_type for e in events]
+    assert types == ["zone_entry", "moored"]
