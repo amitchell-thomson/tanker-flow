@@ -1,4 +1,6 @@
 # config.py
+from datetime import datetime, timezone
+
 from pydantic_settings import BaseSettings
 
 
@@ -46,3 +48,20 @@ AIS_BOUNDING_BOXES = [
     [[lat_min, lon_min], [lat_max, lon_max]]
     for _, lat_min, lat_max, lon_min, lon_max in ZONES
 ]
+
+
+# Ingestion regime cutover. The hard switch from the old "bbox + throttle"
+# AISstream subscription (ais_fixes.source = 'aisstream'; subscribe to all
+# vessels in the ZONES boxes, with AISstream randomly dropping vessels under
+# load) to server-side MMSI filtering (source = 'aisstream-mmsi-{1,2,3}';
+# ~150 tier-ranked MMSIs, reliable capture). The two regimes have OPPOSITE
+# missingness biases, so every rate/count time series steps at this instant:
+# segment on it and never train a model across it. This literal is mirrored in
+# the generated `port_events.regime` column (db/init/schema.sql). See
+# docs/review-2026-05-31-pre-signal-audit.md §0.
+REGIME_CUTOVER = datetime(2026, 5, 30, 9, 27, 0, tzinfo=timezone.utc)
+
+
+def regime_of(ts: datetime) -> str:
+    """Return the ingestion regime ('bbox' | 'mmsi_filter') for a timestamp."""
+    return "bbox" if ts < REGIME_CUTOVER else "mmsi_filter"

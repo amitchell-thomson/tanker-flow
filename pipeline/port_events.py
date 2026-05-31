@@ -9,6 +9,7 @@ Usage: `uv run python -m pipeline.port_events` (or `make port-events`).
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
 import time
@@ -133,14 +134,15 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 # ----------------------------------------------------------------------
 
 
-async def run(pool: asyncpg.Pool) -> None:
+async def run(pool: asyncpg.Pool, now: datetime | None = None) -> None:
     t_start = time.monotonic()
     # Wall-clock reference for end-of-stream stale-envelope closing. Computed
     # once at run start so the cutoff is consistent across all vessels in this
-    # batch — otherwise a vessel processed later would be evaluated against a
-    # slightly later `now`, biasing nothing in practice but introducing
-    # rebuild-time-dependent non-determinism.
-    now = datetime.now(UTC)
+    # batch. Pass an explicit `now` (via --as-of) to pin it for a deterministic,
+    # reproducible rebuild — otherwise the same ais_fixes snapshot can close
+    # different open envelopes depending on when the rebuild happens to run.
+    if now is None:
+        now = datetime.now(UTC)
 
     async with pool.acquire() as conn:
         await conn.execute(TRUNCATE_SQL)
@@ -470,10 +472,34 @@ def _log_summary(summary: dict[str, Any], wall_seconds: float) -> None:
     logger.info("=" * 60)
 
 
+def _parse_as_of(raw: str) -> datetime:
+    raw = raw.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    dt = datetime.fromisoformat(raw)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt
+
+
 async def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Recompute port_events from ais_fixes (TRUNCATE + rebuild)."
+    )
+    parser.add_argument(
+        "--as-of",
+        type=_parse_as_of,
+        default=None,
+        metavar="ISO8601",
+        help="Pin the wall-clock reference for stale-envelope closing "
+        "(e.g. 2026-05-30T09:27:00Z) for a deterministic, reproducible rebuild. "
+        "Defaults to now().",
+    )
+    args = parser.parse_args()
+
     pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=4)
     try:
-        await run(pool)
+        await run(pool, now=args.as_of)
     finally:
         await pool.close()
 
