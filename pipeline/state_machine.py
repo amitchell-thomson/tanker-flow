@@ -61,10 +61,11 @@ class Event:
     lon: float
     cold_start: bool = False
     # Every terminal_id whose polygon contained the originating fix. Used by
-    # reattribute_overlaps to detect "earlier event was in a region also
-    # covered by the moored terminal's polygons" without a separate PostGIS
-    # query. For events that fire without an originating fix (e.g., zone_exit
-    # emitted when no candidate matches), this is just {terminal_id}.
+    # the inline envelope-reattribution path (_can_reattribute_envelope_to) to
+    # detect "earlier event was in a region also covered by the moored
+    # terminal's polygons" without a separate PostGIS query. For events that
+    # fire without an originating fix (e.g., zone_exit emitted when no candidate
+    # matches), this is just {terminal_id}.
     candidate_terminal_ids: frozenset[int] = frozenset()
 
 

@@ -178,9 +178,12 @@ async def load_scan_mmsis(pool: asyncpg.Pool) -> list[int]:
     slots roll over to tier 4 (and vice versa) so we always subscribe to
     SCAN_SLOTS vessels when possible.
     """
+    # NOT is_pinned: pinned vessels already hold a persistent slot
+    # (load_persistent_mmsis), so excluding them here avoids double-picking a
+    # tier-4/5 pin into the scan pool (wasted slot + a 'scan' relabel).
     pick_sql = """
         SELECT mmsi FROM priority_watchlist
-        WHERE tier = $1
+        WHERE tier = $1 AND NOT is_pinned
         ORDER BY last_scan_window_at ASC NULLS FIRST
         LIMIT $2
         FOR UPDATE
@@ -199,7 +202,7 @@ async def load_scan_mmsis(pool: asyncpg.Pool) -> list[int]:
                 topup = await conn.fetch(
                     """
                     SELECT mmsi FROM priority_watchlist
-                    WHERE tier >= 4 AND mmsi <> ALL($1::BIGINT[])
+                    WHERE tier >= 4 AND NOT is_pinned AND mmsi <> ALL($1::BIGINT[])
                     ORDER BY tier ASC, last_scan_window_at ASC NULLS FIRST
                     LIMIT $2
                     FOR UPDATE

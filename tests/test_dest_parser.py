@@ -135,3 +135,12 @@ def test_for_orders_does_not_match_inside_words():
     # The \b guard must not trip on "BEFORE"; neither input resolves either.
     assert parse_destination("BEFORE DEPARTURE", LOCODES) == (None, False)
     assert parse_destination("FORMOSA", LOCODES) == (None, False)
+
+
+def test_leading_token_does_not_slice_longer_alnum_runs():
+    # The leading-token fallback must not slice the first 5 chars out of a
+    # longer word: "USCAUTION" is not Cameron (USCAU), "NLRTMOUTH" not Rotterdam.
+    assert parse_destination("USCAUTION", LOCODES) == (None, False)
+    assert parse_destination("NLRTMOUTH", LOCODES) == (None, False)
+    # A space/punctuation-delimited LOCODE still resolves via the leading token.
+    assert parse_destination("USCAU OUTBOUND", LOCODES) == (5, False)

@@ -131,7 +131,11 @@ def _resolve_locode(s: str, unlocode_to_terminal: dict[str, int]) -> int | None:
             return unlocode_to_terminal[canonical]
 
     # Leading LOCODE-shaped token: 2 letters + optional single space + 3 alnum.
-    m = re.match(r"([A-Z]{2}\s?[A-Z0-9]{3})", s)
+    # Trailing (?![A-Z0-9]) anchors the token to a word boundary so we don't
+    # slice the first 5 chars out of a longer alnum run (e.g. "USCAUTION" must
+    # NOT resolve to Cameron/USCAU). A real decorated dest separates the LOCODE
+    # with a space/punctuation ("ESCAR<D9 HRS", "BEZEE DE 86 HRS").
+    m = re.match(r"([A-Z]{2}\s?[A-Z0-9]{3})(?![A-Z0-9])", s)
     if m:
         lead = m.group(1).replace(" ", "")
         if lead in unlocode_to_terminal:
