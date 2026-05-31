@@ -160,7 +160,9 @@ def _parse_eta(eta_json: str | dict | None, now: datetime) -> datetime | None:
         return None
     if month == 0 or day == 0 or hour >= 24 or minute >= 60:
         return None
-    if not (1 <= month <= 12 and 1 <= day <= 31 and 0 <= hour < 24 and 0 <= minute < 60):
+    if not (
+        1 <= month <= 12 and 1 <= day <= 31 and 0 <= hour < 24 and 0 <= minute < 60
+    ):
         return None
     try:
         candidate = datetime(now.year, month, day, hour, minute, tzinfo=timezone.utc)
@@ -253,7 +255,11 @@ def assign_tier(
         )
 
     if last_bbox_fix_ts and last_bbox_fix_ts > fourteen_days:
-        return (3, f"in-zone:bbox @ {last_bbox_fix_ts:%Y-%m-%d}", last_bbox_fix_ts.timestamp())
+        return (
+            3,
+            f"in-zone:bbox @ {last_bbox_fix_ts:%Y-%m-%d}",
+            last_bbox_fix_ts.timestamp(),
+        )
 
     if last_fix_ts and last_fix_ts > seven_days:
         return (4, f"recent-anywhere @ {last_fix_ts:%Y-%m-%d}", last_fix_ts.timestamp())
@@ -264,14 +270,51 @@ def assign_tier(
     return (5, "never-seen", last_fix_ts.timestamp() if last_fix_ts else 0.0)
 
 
+# Open-leg pin: vessels with a laden `departed` and no later `zone_entry` get a
+# guaranteed persistent slot (see ingestion.aisstream.load_persistent_mmsis) so
+# we re-acquire them on the return approach rather than losing them to
+# tier-decay — the phantom-open-leg failure (M1). Bound the set: only legs
+# departed within PIN_LOOKBACK_DAYS (older ⇒ almost certainly arrived-and-missed
+# or sitting in storage, won't usefully reappear), capped at PIN_MAX most-recent
+# so pins never crowd out the tier-1/2 persistent slots.
+PIN_LOOKBACK_DAYS = 25
+PIN_MAX = 25
+
+OPEN_LADEN_PIN_SQL = """
+WITH open_laden AS (
+    SELECT pe.mmsi, max(pe.event_time) AS departed_ts
+    FROM port_events pe
+    WHERE pe.event_type = 'departed'
+      AND pe.laden_flag = TRUE
+      AND pe.event_time > now() - make_interval(days => $1)
+      AND NOT EXISTS (
+          SELECT 1 FROM port_events z
+          WHERE z.mmsi = pe.mmsi
+            AND z.event_type = 'zone_entry'
+            AND z.event_time > pe.event_time
+      )
+    GROUP BY pe.mmsi
+)
+SELECT mmsi FROM open_laden
+ORDER BY departed_ts DESC
+LIMIT $2
+"""
+
+
+async def load_open_leg_pins(conn: asyncpg.Connection) -> set[int]:
+    """MMSIs with a recent, bounded open laden leg — see the PIN_* constants."""
+    rows = await conn.fetch(OPEN_LADEN_PIN_SQL, PIN_LOOKBACK_DAYS, PIN_MAX)
+    return {r["mmsi"] for r in rows}
+
+
 UPSERT_SQL = """
 INSERT INTO priority_watchlist (
     mmsi, tier, score, score_reason,
     last_fix_ts, last_zone_fix_ts,
     parsed_dest_terminal_id, parsed_eta,
-    in_slot, slot_kind, computed_at
+    is_pinned, in_slot, slot_kind, computed_at
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE, NULL, now())
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, FALSE, NULL, now())
 ON CONFLICT (mmsi) DO UPDATE SET
     tier                    = EXCLUDED.tier,
     score                   = EXCLUDED.score,
@@ -280,6 +323,7 @@ ON CONFLICT (mmsi) DO UPDATE SET
     last_zone_fix_ts        = EXCLUDED.last_zone_fix_ts,
     parsed_dest_terminal_id = EXCLUDED.parsed_dest_terminal_id,
     parsed_eta              = EXCLUDED.parsed_eta,
+    is_pinned               = EXCLUDED.is_pinned,
     computed_at             = now()
 """
 
@@ -296,6 +340,9 @@ async def compute_and_upsert(pool: asyncpg.Pool) -> dict[int, int]:
         rows = await conn.fetch(SCORING_SQL)
         logger.info(f"Scoring {len(rows)} LNG/FSRU vessels")
 
+        pinned = await load_open_leg_pins(conn)
+        logger.info(f"Open-leg pins: {len(pinned)} vessel(s)")
+
         # Also remove rows from priority_watchlist where the vessel is no
         # longer in scope (e.g. excluded=TRUE post-import). The set of valid
         # mmsis is exactly `rows`.
@@ -303,7 +350,9 @@ async def compute_and_upsert(pool: asyncpg.Pool) -> dict[int, int]:
 
         async with conn.transaction():
             for r in rows:
-                dest_terminal_id, _is_for_orders = parse_destination(r["dest"], unlocodes)
+                dest_terminal_id, _is_for_orders = parse_destination(
+                    r["dest"], unlocodes
+                )
                 # last_zone_fix_ts in the table = polygon fix if present, else
                 # the wider bbox fix; readers don't need to know which.
                 last_zone_fix_ts = r["last_polygon_fix_ts"] or r["last_bbox_fix_ts"]
@@ -333,6 +382,7 @@ async def compute_and_upsert(pool: asyncpg.Pool) -> dict[int, int]:
                     last_zone_fix_ts,
                     dest_terminal_id,
                     parsed_eta,
+                    r["mmsi"] in pinned,
                 )
 
             # Sweep stale priority_watchlist rows (vessel no longer in scope).

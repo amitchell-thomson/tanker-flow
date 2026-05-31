@@ -43,14 +43,14 @@ FLUSH_INTERVAL_SECONDS = 0.5
 # the previous bbox+rotation design was throttled to ~25-50% per-LNG-carrier
 # visibility; MMSI filtering achieves ~100% on the priority list. See README.
 NUM_CONNECTIONS = 3
-MMSI_CAP_PER_CONNECTION = 50         # AISstream's documented limit
+MMSI_CAP_PER_CONNECTION = 50  # AISstream's documented limit
 
 # Slot allocation: chunks 0 and 1 take the persistent block; chunk 2 is the
 # scan-rotation connection that cycles through tier-4/5 vessels.
 PERSISTENT_CONNECTIONS = 2
-PERSISTENT_SLOTS = PERSISTENT_CONNECTIONS * MMSI_CAP_PER_CONNECTION   # 100
+PERSISTENT_SLOTS = PERSISTENT_CONNECTIONS * MMSI_CAP_PER_CONNECTION  # 100
 SCAN_CHUNK_INDEX = NUM_CONNECTIONS - 1
-SCAN_SLOTS = MMSI_CAP_PER_CONNECTION                                  # 50
+SCAN_SLOTS = MMSI_CAP_PER_CONNECTION  # 50
 # Of the scan slots, reserve a quota for tier-5 vessels (stale / never-seen)
 # so they actually cycle. Without this, tier 4 (~400-500 vessels) keeps
 # consuming all 50 slots under `(tier ASC, last_scan_window_at ASC)` and
@@ -58,7 +58,7 @@ SCAN_SLOTS = MMSI_CAP_PER_CONNECTION                                  # 50
 # out. With 10 reserved slots, every tier-5 vessel cycles within ~10-22h
 # while tier-4 cycle time goes from ~3.7h to ~4.6h.
 SCAN_TIER5_SLOTS = 10
-SCAN_TIER4_SLOTS = SCAN_SLOTS - SCAN_TIER5_SLOTS                      # 40
+SCAN_TIER4_SLOTS = SCAN_SLOTS - SCAN_TIER5_SLOTS  # 40
 
 # Reconnect every hour. Each reconnect:
 #   1. Triggers a fresh scoring run (see scoring_loop) just beforehand
@@ -103,22 +103,36 @@ def build_subscribe_payload(api_key: str, mmsis: list[int]) -> dict:
 
 
 async def load_persistent_mmsis(pool: asyncpg.Pool) -> list[int]:
-    """Top PERSISTENT_SLOTS vessels from priority_watchlist (tier 1-3),
-    ordered by (tier ASC, score DESC). Falls back to the cold-start query
-    on the same shape if priority_watchlist is empty (e.g. first boot before
-    the first scoring pass)."""
+    """The PERSISTENT_SLOTS persistent subscriptions: open-leg PINS first
+    (vessels with a recent open laden leg — forced in regardless of tier so we
+    re-acquire them on the return approach, fixing M1), then the top tier-1-3
+    vessels by (tier ASC, score DESC) to fill the remainder. Total is capped at
+    PERSISTENT_SLOTS; pins are bounded to PIN_MAX << PERSISTENT_SLOTS in
+    scoring, so the tier block is never fully crowded out. Falls back to the
+    cold-start query if priority_watchlist is empty (first boot)."""
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
+        pinned = await conn.fetch(
             """
             SELECT mmsi FROM priority_watchlist
-            WHERE tier <= 3
+            WHERE is_pinned
             ORDER BY tier ASC, score DESC
             LIMIT $1
             """,
             PERSISTENT_SLOTS,
         )
-        if rows:
-            return [r["mmsi"] for r in rows]
+        pinned_mmsis = [r["mmsi"] for r in pinned]
+        fill = await conn.fetch(
+            """
+            SELECT mmsi FROM priority_watchlist
+            WHERE tier <= 3 AND NOT is_pinned
+            ORDER BY tier ASC, score DESC
+            LIMIT $1
+            """,
+            PERSISTENT_SLOTS - len(pinned_mmsis),
+        )
+        mmsis = pinned_mmsis + [r["mmsi"] for r in fill]
+        if mmsis:
+            return mmsis
         # Cold start: priority_watchlist not yet populated. Fall back to the
         # is_lng_carrier OR is_fsru list ordered by recency so the ingester
         # still has something useful to subscribe to.
@@ -218,6 +232,13 @@ async def mark_slot_assignments(
                 await conn.execute(
                     "UPDATE priority_watchlist SET in_slot = TRUE, slot_kind = 'persistent' "
                     "WHERE mmsi = ANY($1::BIGINT[])",
+                    persistent,
+                )
+                # Relabel the pinned subset (they live in the persistent block)
+                # so the TUI can distinguish forced open-leg pins from tier slots.
+                await conn.execute(
+                    "UPDATE priority_watchlist SET slot_kind = 'pinned' "
+                    "WHERE mmsi = ANY($1::BIGINT[]) AND is_pinned",
                     persistent,
                 )
             if scan:
@@ -369,7 +390,9 @@ async def flush_buffers(pool: asyncpg.Pool, ingest_state: IngestionState) -> Non
                 )
                 ingest_state.state_inserts += len(state_batch)
             except Exception as e:
-                logger.warning(f"Batch state insert failed ({len(state_batch)} rows): {e}")
+                logger.warning(
+                    f"Batch state insert failed ({len(state_batch)} rows): {e}"
+                )
 
 
 async def connect_and_drain(
@@ -391,15 +414,11 @@ async def connect_and_drain(
     payload = build_subscribe_payload(settings.aisstream_api_key, mmsis)
 
     logger.info(f"[{source_name}] Connecting to aisstream.io ({len(mmsis)} MMSIs)...")
-    await record_event(
-        pool, source_name, "connect", {"mmsi_count": len(mmsis)}
-    )
+    await record_event(pool, source_name, "connect", {"mmsi_count": len(mmsis)})
     async with websockets.connect(url, ping_timeout=None) as ws:
         await ws.send(json.dumps(payload))
         logger.info(f"[{source_name}] Subscribed.")
-        await record_event(
-            pool, source_name, "subscribed", {"mmsi_count": len(mmsis)}
-        )
+        await record_event(pool, source_name, "subscribed", {"mmsi_count": len(mmsis)})
         minute_agg.note_connection_start()
 
         last_message_time = time.monotonic()
@@ -451,7 +470,9 @@ async def connect_and_drain(
                         f"[{source_name}] No messages for {silence:.0f}s — triggering reconnect"
                     )
                     await record_event(
-                        pool, source_name, "watchdog_reconnect",
+                        pool,
+                        source_name,
+                        "watchdog_reconnect",
                         {"silence_s": int(silence)},
                     )
                     await ws.close()
@@ -465,7 +486,9 @@ async def connect_and_drain(
                 f"{RECONNECT_INTERVAL_SECONDS}s — closing ws to refresh watchlist"
             )
             await record_event(
-                pool, source_name, "planned_reconnect",
+                pool,
+                source_name,
+                "planned_reconnect",
                 {"interval_s": RECONNECT_INTERVAL_SECONDS},
             )
             await ws.close()
@@ -563,21 +586,19 @@ async def ingest():
                             logger.warning(f"mark_slot_assignments failed: {e}")
 
                 if not my_mmsis:
-                    logger.warning(
-                        f"[{source_name}] empty MMSI chunk; sleeping 60s"
-                    )
+                    logger.warning(f"[{source_name}] empty MMSI chunk; sleeping 60s")
                     await asyncio.sleep(60)
                     continue
                 ingest_state = IngestionState(source_name=source_name)
-                await connect_and_drain(
-                    url, pool, ingest_state, my_mmsis, source_name
-                )
+                await connect_and_drain(url, pool, ingest_state, my_mmsis, source_name)
             except websockets.ConnectionClosed as e:
                 logger.warning(
                     f"[{source_name}] Websocket closed: {e}. Reconnecting in 30s"
                 )
                 await record_event(
-                    pool, source_name, "error",
+                    pool,
+                    source_name,
+                    "error",
                     {"kind": "ConnectionClosed", "msg": str(e)},
                 )
                 await asyncio.sleep(30)
@@ -586,7 +607,9 @@ async def ingest():
                     f"[{source_name}] Unexpected error: {e}. Reconnecting in 60s"
                 )
                 await record_event(
-                    pool, source_name, "error",
+                    pool,
+                    source_name,
+                    "error",
                     {"kind": type(e).__name__, "msg": str(e)},
                 )
                 await asyncio.sleep(60)
