@@ -13,6 +13,7 @@ import asyncio
 import logging
 import time
 from collections import defaultdict
+from datetime import UTC, datetime
 from typing import Any
 
 import asyncpg
@@ -134,6 +135,12 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 
 async def run(pool: asyncpg.Pool) -> None:
     t_start = time.monotonic()
+    # Wall-clock reference for end-of-stream stale-envelope closing. Computed
+    # once at run start so the cutoff is consistent across all vessels in this
+    # batch — otherwise a vessel processed later would be evaluated against a
+    # slightly later `now`, biasing nothing in practice but introducing
+    # rebuild-time-dependent non-determinism.
+    now = datetime.now(UTC)
 
     async with pool.acquire() as conn:
         await conn.execute(TRUNCATE_SQL)
@@ -213,6 +220,7 @@ async def run(pool: asyncpg.Pool) -> None:
                                 design_draught,
                                 draught_lookup,
                                 summary,
+                                now,
                             )
                         current_mmsi = row["mmsi"]
                         buf = []
@@ -228,6 +236,7 @@ async def run(pool: asyncpg.Pool) -> None:
                     design_draught,
                     draught_lookup,
                     summary,
+                    now,
                 )
 
     _log_summary(summary, time.monotonic() - t_start)
@@ -299,13 +308,14 @@ async def _process_vessel(
     design_draught: dict[int, float | None],
     draught_lookup,
     summary: dict[str, Any],
+    now: datetime,
 ) -> None:
     summary["regular_vessels"] += 1
     if not fixes:
         summary["vessels_with_zero_events"] += 1
         return
 
-    events = walk(iter(fixes), nearest_berth)
+    events = walk(iter(fixes), nearest_berth, now=now)
     if not events:
         summary["vessels_with_zero_events"] += 1
         return

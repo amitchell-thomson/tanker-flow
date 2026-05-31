@@ -89,6 +89,7 @@ class _Walker:
 
     thresholds: Thresholds
     nearest_berth: NearestBerthFn
+    stale_threshold: timedelta = timedelta(hours=72)
 
     state: State = State.TRANSIT
     terminal_id: int | None = None
@@ -109,6 +110,15 @@ class _Walker:
     pending_lat: float | None = None
     pending_lon: float | None = None
     pending_candidates: frozenset[int] = field(default_factory=frozenset)
+
+    # Most recent fix observed — used to close stale envelopes when AIS goes
+    # silent inside a polygon (gap > stale_threshold between two consecutive
+    # fixes, or stream ends with terminal_id still set and last fix older than
+    # `now - stale_threshold`). The synthetic close is back-dated to this fix,
+    # which is a lower bound on when the vessel actually left.
+    last_fix_ts: datetime | None = None
+    last_fix_lat: float | None = None
+    last_fix_lon: float | None = None
 
     events: list[Event] = field(default_factory=list)
 
@@ -241,7 +251,59 @@ class _Walker:
     # Per-fix step
     # ------------------------------------------------------------------
 
+    def close_stale_envelope(self) -> None:
+        """Emit synthetic anchorage_exit (if needed) + zone_exit at the last
+        observed fix, marked cold_start=True. Used both for between-fix gaps
+        and for end-of-stream when the vessel is still inside a polygon but
+        the last fix is older than `now - stale_threshold`.
+
+        DFA: moored/departed/anchorage_exit/zone_entry can all legally
+        transition to zone_exit, so a direct close is always valid.
+        ANCHORED requires anchorage_exit first; we emit it.
+        """
+        if self.terminal_id is None or self.last_fix_ts is None:
+            return
+        if self.in_anchorage or self.state == State.ANCHORED:
+            self.emit(
+                "anchorage_exit",
+                self.last_fix_ts,
+                self.terminal_id,
+                self.last_fix_lat,  # type: ignore[arg-type]
+                self.last_fix_lon,  # type: ignore[arg-type]
+                cold_start=True,
+            )
+            self.in_anchorage = False
+        self.emit(
+            "zone_exit",
+            self.last_fix_ts,
+            self.terminal_id,
+            self.last_fix_lat,  # type: ignore[arg-type]
+            self.last_fix_lon,  # type: ignore[arg-type]
+            cold_start=True,
+        )
+        self.state = State.TRANSIT
+        self.terminal_id = None
+        self.clear_pending()
+
     def step(self, fix: Fix, is_first_fix: bool) -> None:
+        # Stale-envelope gap detection: if we've been silent for longer than
+        # stale_threshold while still inside a polygon, treat the envelope as
+        # implicitly closed at the last observed fix before processing the new
+        # one. Without this, a vessel that goes dark in port and reappears far
+        # away would have its zone_exit timestamp dragged forward to the
+        # reappearance fix — biasing time-at-port upward and time-in-transit
+        # downward.
+        if (
+            self.terminal_id is not None
+            and self.last_fix_ts is not None
+            and (fix.fix_ts - self.last_fix_ts) > self.stale_threshold
+        ):
+            self.close_stale_envelope()
+            # After close, walker is back in TRANSIT with no terminal. The
+            # current fix proceeds as a fresh fix (not is_first_fix — we've
+            # already seen the vessel, just lost coverage).
+            is_first_fix = False
+
         resolved = self.resolve(fix.zones, fix.lat, fix.lon)
 
         # Cold-start only fires when the very first observed fix is already
@@ -346,6 +408,11 @@ class _Walker:
 
         # We're inside terminal_id's envelope. Drive substate transitions.
         self._step_in_envelope(fix, zt)
+
+    def record_last_fix(self, fix: Fix) -> None:
+        self.last_fix_ts = fix.fix_ts
+        self.last_fix_lat = fix.lat
+        self.last_fix_lon = fix.lon
 
     def _cold_start(self, fix: Fix, resolved: tuple[int, str]) -> None:
         tid, zt = resolved
@@ -498,17 +565,40 @@ def walk(
     fixes: Iterator[Fix],
     nearest_berth: NearestBerthFn,
     thresholds: Thresholds | None = None,
+    now: datetime | None = None,
+    stale_threshold: timedelta = timedelta(hours=72),
 ) -> list[Event]:
     """Run the state machine over a single vessel's chronological fixes.
 
-    Returns the emitted events in order. Cold-end (vessel still moored at end of
-    stream) leaves the moored event open — no synthetic departed/zone_exit.
+    Returns the emitted events in order.
+
+    `now` and `stale_threshold` control stale-envelope closing:
+      - Gap detection (always on): a gap > stale_threshold between consecutive
+        fixes while still inside an envelope synthesizes anchorage_exit +
+        zone_exit at the last fix, both flagged cold_start=True.
+      - End-of-stream check (only if `now` is provided): if the stream ends
+        with the vessel still inside an envelope AND the last fix is older
+        than `now - stale_threshold`, the envelope is closed the same way.
+        When `now` is None, an open envelope at end-of-stream is left open
+        (preserves the original "cold-end" behavior used by unit tests).
     """
-    walker = _Walker(thresholds=thresholds or Thresholds(), nearest_berth=nearest_berth)
+    walker = _Walker(
+        thresholds=thresholds or Thresholds(),
+        nearest_berth=nearest_berth,
+        stale_threshold=stale_threshold,
+    )
     first = True
     for fix in fixes:
         walker.step(fix, is_first_fix=first)
+        walker.record_last_fix(fix)
         first = False
+    if (
+        now is not None
+        and walker.terminal_id is not None
+        and walker.last_fix_ts is not None
+        and (now - walker.last_fix_ts) > stale_threshold
+    ):
+        walker.close_stale_envelope()
     return walker.events
 
 
