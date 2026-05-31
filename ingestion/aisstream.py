@@ -68,6 +68,13 @@ SCAN_TIER4_SLOTS = SCAN_SLOTS - SCAN_TIER5_SLOTS  # 40
 # vessels each cycle, cycling through ~650 tier-4/5 candidates over ~13h.
 RECONNECT_INTERVAL_SECONDS = 3600
 
+# Scoring cadence — decoupled from the 1h reconnect. Re-ranking the watchlist is
+# a sub-second SQL pass, so running it every 5 min keeps tiers fresh (and logs
+# promotions) without waiting an hour. A vessel the scan discovers in-zone is
+# promoted instantly at flush (promote_inzone); this loop is the catch-all that
+# also handles demotions, dest-based tier-2, and refines the inline tier.
+SCORING_INTERVAL_SECONDS = 300
+
 # Periodic port_events rebuild cadence. The rebuild is a full recompute from
 # ais_fixes (~6s over the current hypertable) but writes via an atomic staging
 # swap, so a 2-min cadence keeps derived events/legs near-live at ~5% of one core
@@ -98,6 +105,11 @@ class IngestionState:
     fix_buf: list[tuple] = field(default_factory=list)
     registry_buf: list[tuple] = field(default_factory=list)
     state_buf: list[tuple] = field(default_factory=list)
+    # MMSI -> geographic zone for fixes seen in this flush window that landed
+    # inside a config.ZONES rectangle. Drives instant in-zone tier promotion at
+    # flush time so a vessel the scan rotation just discovered near a terminal
+    # isn't dropped before the next hourly scoring pass. Cleared each flush.
+    inzone_mmsi: dict[int, str] = field(default_factory=dict)
 
 
 def build_subscribe_payload(api_key: str, mmsis: list[int]) -> dict:
@@ -308,6 +320,10 @@ def parse_message(
         zone = classify_zone(msg.Message.Latitude, msg.Message.Longitude)
         lag_s = (datetime.now(timezone.utc) - msg.MetaData.time_utc).total_seconds()
         minute_agg.observe_fix(mmsi, msg.MetaData.time_utc, lag_s, zone)
+        if zone is not None:
+            # Remember the latest in-zone position for this MMSI this flush;
+            # flush_buffers promotes these in one batched UPDATE.
+            ingest_state.inzone_mmsi[mmsi] = zone
 
     elif isinstance(msg, ShipStaticData):
         vessel_type = msg.Message.Type
@@ -340,16 +356,64 @@ def parse_message(
         )
 
 
+# Instant in-zone promotion: any subscribed vessel whose fix lands inside a
+# config.ZONES rectangle is promoted to tier INLINE_PROMOTE_TIER immediately,
+# so the scan rotation can't drop it before the next hourly scoring pass (the
+# SM BLUEBIRD case: discovered by scan at a US terminal, then rotated out before
+# promotion). Gated on tier > INLINE_PROMOTE_TIER so it only ever promotes; the
+# next scoring pass refines the exact tier. Each promotion is logged to
+# tier_promotions (via='inline') with the vessel name + zone for the TUI.
+INLINE_PROMOTE_TIER = 3
+
+INLINE_PROMOTE_SQL = """
+WITH inz AS (
+    SELECT m AS mmsi, z AS zone
+    FROM unnest($1::bigint[], $2::text[]) AS t(m, z)
+),
+promoted AS (
+    UPDATE priority_watchlist pw
+    SET tier            = $3,
+        score           = extract(epoch FROM now()),
+        score_reason    = 'live: in ' || inz.zone,
+        last_zone_fix_ts = now(),
+        computed_at     = now()
+    FROM inz
+    WHERE pw.mmsi = inz.mmsi AND pw.tier > $3
+    RETURNING pw.mmsi, pw.tier AS new_tier, inz.zone
+)
+INSERT INTO tier_promotions (mmsi, vessel_name, old_tier, new_tier, via, reason, zone)
+SELECT p.mmsi, vr.vessel_name, NULL, p.new_tier, 'inline',
+       'live fix in ' || p.zone, p.zone
+FROM promoted p
+LEFT JOIN vessel_registry vr ON vr.mmsi = p.mmsi
+"""
+
+
+async def promote_inzone(conn: asyncpg.Connection, inzone: dict[int, str]) -> None:
+    """Promote vessels seen in-zone this flush to INLINE_PROMOTE_TIER (promote
+    only) and log each to tier_promotions. One batched round-trip.
+
+    old_tier is recorded NULL: the UPDATE's RETURNING gives the post-update tier,
+    and capturing the pre-update tier would need an extra read — not worth it for
+    a log row. The TUI renders a NULL old_tier as '·'.
+    """
+    mmsis = list(inzone.keys())
+    zones = [inzone[m] for m in mmsis]
+    await conn.execute(INLINE_PROMOTE_SQL, mmsis, zones, INLINE_PROMOTE_TIER)
+
+
 async def flush_buffers(pool: asyncpg.Pool, ingest_state: IngestionState) -> None:
     """Swap-and-write the in-memory buffers in one batched round-trip per table."""
     fix_batch = ingest_state.fix_buf
     registry_batch = ingest_state.registry_buf
     state_batch = ingest_state.state_buf
+    inzone = ingest_state.inzone_mmsi
     if not fix_batch and not registry_batch and not state_batch:
         return
     ingest_state.fix_buf = []
     ingest_state.registry_buf = []
     ingest_state.state_buf = []
+    ingest_state.inzone_mmsi = {}
 
     async with pool.acquire() as conn:
         if fix_batch:
@@ -403,6 +467,12 @@ async def flush_buffers(pool: asyncpg.Pool, ingest_state: IngestionState) -> Non
                 logger.warning(
                     f"Batch state insert failed ({len(state_batch)} rows): {e}"
                 )
+
+        if inzone:
+            try:
+                await promote_inzone(conn, inzone)
+            except Exception as e:
+                logger.warning(f"Inline in-zone promotion failed: {e}")
 
 
 async def connect_and_drain(
@@ -558,7 +628,7 @@ async def ingest():
 
     async def scoring_loop():
         while True:
-            await asyncio.sleep(RECONNECT_INTERVAL_SECONDS)
+            await asyncio.sleep(SCORING_INTERVAL_SECONDS)
             try:
                 await scoring.compute_and_upsert(pool)
             except Exception as e:
