@@ -398,10 +398,9 @@ class TankerFlowApp(App):
         # Cached on the slow timer so the status row can render it without a
         # separate query.
         self._last_scoring_age_s: int | None = None
-        # Tier-per-mmsi snapshot from previous refresh, used to detect tier
-        # promotions (4-5 → 1-3) without needing a transition-log table.
-        self._prev_tiers: dict[int, int] = {}
-        self._promotions: list[tuple[datetime, int, str, int, int, str]] = []
+        # Promotions are read from the persisted tier_promotions log (written by
+        # scoring + inline in-zone promotion), so the panel survives TUI restarts
+        # — no in-process tier diffing needed.
         # Watchlist-explorer filter state — keypresses set these; the explorer
         # query reads them when it refreshes.
         self._explorer_tier_filter: str = ""
@@ -521,7 +520,7 @@ class TankerFlowApp(App):
                 yield DataTable(id="tier-table")
                 yield Label("[bold cyan]Scan rotation[/]", id="scan-label")
                 yield Static("…", id="scan-progress", markup=True)
-                yield Label("[bold cyan]Promotions[/] [dim]· since TUI start[/]", id="promo-label")
+                yield Label("[bold cyan]Promotions[/] [dim]· recent (persisted)[/]", id="promo-label")
                 yield DataTable(id="promo-table")
             with Vertical(id="watchlist-explorer-container"):
                 yield Static("[dim]sort: tier[/]", id="explorer-status", markup=True)
@@ -559,7 +558,7 @@ class TankerFlowApp(App):
         tier_table.add_columns("Tier", "Count", "In slot", "Description")
 
         promo_table = self.query_one("#promo-table", DataTable)
-        promo_table.add_columns("When", "Vessel", "MMSI", "From → To", "Reason")
+        promo_table.add_columns("When", "Vessel", "Tier", "Via", "Where")
 
         errors_table = self.query_one("#errors-table", DataTable)
         errors_table.add_columns("Age", "Source", "Kind", "Message")
@@ -925,44 +924,26 @@ class TankerFlowApp(App):
             )
         self.query_one("#scan-progress", Static).update(scan_status)
 
-        # --- Promotions diff ---
-        cur_rows = await self._pool.fetch(
-            "SELECT mmsi, tier FROM priority_watchlist"
+        # --- Promotions (from the persisted tier_promotions log) ---
+        # Read recent promotions directly; survives TUI restarts and includes
+        # both scoring re-ranks (via='scoring') and instant in-zone promotions
+        # (via='inline'). vessel_name + zone are denormalised on the log row.
+        promo_log = await self._pool.fetch(
+            """
+            SELECT promoted_at, mmsi, vessel_name, old_tier, new_tier, via, zone, reason
+            FROM tier_promotions
+            ORDER BY promoted_at DESC
+            LIMIT 40
+            """
         )
-        cur_tiers: dict[int, int] = {r["mmsi"]: r["tier"] for r in cur_rows}
-
-        if self._prev_tiers:
-            name_map = {r["mmsi"]: r["vessel_name"] for r in promo_rows}
-            for mmsi, new_tier in cur_tiers.items():
-                old_tier = self._prev_tiers.get(mmsi)
-                if old_tier is None or old_tier == new_tier:
-                    continue
-                if old_tier >= 4 and new_tier <= 3:
-                    name = name_map.get(mmsi, "?")
-                    reason_row = await self._pool.fetchrow(
-                        "SELECT score_reason FROM priority_watchlist WHERE mmsi = $1",
-                        mmsi,
-                    )
-                    reason = reason_row["score_reason"] if reason_row else ""
-                    self._promotions.append(
-                        (now, mmsi, name, old_tier, new_tier, reason)
-                    )
-            if len(self._promotions) > 100:
-                self._promotions = self._promotions[-100:]
-        self._prev_tiers = cur_tiers
-
         promo_table = self.query_one("#promo-table", DataTable)
         promo_table.clear()
-        for ts, mmsi, name, old_t, new_t, reason in reversed(self._promotions[-40:]):
-            ago_s = int((now - ts).total_seconds())
-            ago_str = f"{ago_s // 60}m" if ago_s >= 60 else f"{ago_s}s"
-            promo_table.add_row(
-                ago_str,
-                name or "?",
-                str(mmsi),
-                f"{_tier_chip(old_t)}[dim]→[/]{_tier_chip(new_t)}",
-                f"[dim]{reason or ''}[/]",
-            )
+        for r in promo_log:
+            ago = _fmt_age((now - r["promoted_at"]).total_seconds())
+            name = r["vessel_name"].strip() if r["vessel_name"] else f"MMSI {r['mmsi']}"
+            tier_cell = f"{_tier_chip(r['old_tier'])}[dim]→[/]{_tier_chip(r['new_tier'])}"
+            where = r["zone"] or r["reason"] or ""
+            promo_table.add_row(ago, name, tier_cell, r["via"], f"[dim]{where}[/]")
 
     async def refresh_slow_stats(self) -> None:
         """Watchlist coverage + silent-vessels table, on the 30s timer.
