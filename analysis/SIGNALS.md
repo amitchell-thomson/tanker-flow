@@ -37,6 +37,46 @@ indicator** (A, where the marginal cargo is going), or an **inventory proxy**
 
 ---
 
+## 0·5 · Constraint: ingestion regime break (a structural discontinuity)
+
+The terrestrial-AIS limit above is a *spatial* constraint. There is also a
+*temporal* one: the ingestion scheme changed in a hard cutover at **2026-05-30
+09:27 UTC**, so the real-time position history is two different data-generating
+processes spliced together. Anything built as a time series across that seam
+inherits an artifactual break.
+
+| | Old regime (bbox + throttle) | New regime (server-side MMSI filter) |
+|---|---|---|
+| Span | 2026-04-14 → 2026-05-30 09:26 (~6.5 wk, **~93% of `port_events`**) | 2026-05-30 09:27 → present |
+| Subscription | every vessel inside fixed geographic boxes | ~150 tier-ranked MMSIs from `priority_watchlist` |
+| Missingness | **stochastic** — AISstream throttles by dropping vessels ~at random from the return | **systematic** — vessels the scorer deprioritises are never subscribed |
+| Net bias | unbiased *selection*, noisy *capture* | biased *selection*, reliable *capture* |
+
+The regimes are biased in **opposite** directions, so they don't average into one
+clean series — they step. Rules for the modelling layer:
+
+- **Never train a model across 2026-05-30.** A spread model fit on data spanning
+  the seam will learn the ingestion change as if it were a market move. Segment by
+  regime, or start the training corpus at the cutover.
+- **The usable real-time history is ~6.5 weeks of a now-defunct regime + the live
+  tail** — not the "1000–1800 daily rows over 3–5 years" assumed in the ML section
+  below. The old block is fit for validating *signal logic* (event detection, leg
+  geometry, queue/turn-time realism all survive random fix drops), **not** for
+  training the spread model. The real training corpus only begins accruing now,
+  under the new scheme.
+- **Signal *extraction* is safe today; signal *modelling* is not yet.** Computing
+  #1/#6/#9 from `port_events` is unaffected by the seam (each event is individually
+  correct); fitting §A–F on a series that crosses it is not.
+- **Regime-specific artifacts:** the old regime inflates "gone-dark" / stale-close
+  and manufactures phantom open legs via random drops + box geography; the new
+  regime manufactures phantom open legs via scorer tier-decay instead. Both demand
+  open-leg **age-censoring** (see #17/#20) regardless of regime.
+
+Full provenance and per-signal impact: `docs/review-2026-05-31-pre-signal-audit.md`
+(§0).
+
+---
+
 ## 1 · Flow signals — the headline market signal
 
 | # | Signal | Feasible? | Lead | Type |
