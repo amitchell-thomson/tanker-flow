@@ -121,6 +121,29 @@ def _flow_direction_inference(side: Side, flow_direction: str | None) -> bool | 
 Source = Literal["draught", "flow_direction"]
 
 
+def _laden_from_draught(
+    series: list[tuple[datetime, float]],
+    event_time: datetime,
+    design_draught: float | None,
+    *,
+    side: Side,
+) -> bool | None:
+    """laden? from the draught feed for this event, or None if undecidable.
+
+    Outbound (`side='post'`) uses the post-event lookahead window; everything
+    else forward-fills the most recent reading at-or-before event_time.
+    """
+    if design_draught is None or design_draught <= 0:
+        return None
+    if side == "post":
+        draught = _draught_after(series, event_time, LOOKAHEAD_FORWARD)
+    else:
+        draught = _draught_forward_fill(series, event_time)
+    if draught is None:
+        return None
+    return draught >= LADEN_THRESHOLD * design_draught
+
+
 def infer_laden(
     mmsi: int,
     event_time: datetime,
@@ -129,27 +152,41 @@ def infer_laden(
     design_draught: float | None,
     draught_lookup: dict[int, list[tuple[datetime, float]]],
 ) -> tuple[bool | None, Source | None]:
-    """Layered laden inference: draught primary, flow_direction fallback.
+    """Layered laden inference.
 
-    Returns (laden_flag, source) — source is 'draught' when a usable draught
-    reading was found, 'flow_direction' when we fell back, or None when
-    neither could answer.
+    Inbound / moored events: draught (forward-filled) is primary — the master
+    broadcasts the laden draught for hours/days before approach — with
+    flow_direction as the fallback.
 
-    For outbound (`side='post'`) events, requires a draught reading AFTER
-    event_time within `LOOKAHEAD_FORWARD` — pre-event readings still reflect
-    pre-discharge state and aren't trusted.
+    Outbound (`side='post'`) events: flow_direction is primary at a known-flow
+    terminal (export ⇒ leaves laden, import ⇒ leaves ballast). The draught feed
+    is unreliable here — the master often rebroadcasts the *pre-discharge*
+    draught for 30–90 min after undocking, so a reading inside the lookahead
+    window can still reflect the old cargo state (this caused the NW-Europe
+    "laden departure" mislabels). The post-event draught is used only as a
+    fallback when the terminal flow_direction is unknown. Trade-off: a genuine
+    reload / re-export at an import terminal is now (rarely) labelled ballast.
+
+    Returns (laden_flag, source): source is 'draught', 'flow_direction', or
+    None when neither could answer.
     """
     series = draught_lookup.get(mmsi)
-    draught: float | None = None
-    if series:
-        if side == "post":
-            draught = _draught_after(series, event_time, LOOKAHEAD_FORWARD)
-        else:
-            draught = _draught_forward_fill(series, event_time)
 
-    if draught is not None and design_draught is not None and design_draught > 0:
-        return draught >= LADEN_THRESHOLD * design_draught, "draught"
+    if side == "post":
+        fallback = _flow_direction_inference(side, flow_direction)
+        if fallback is not None:
+            return fallback, "flow_direction"
+        if series is not None:
+            laden = _laden_from_draught(series, event_time, design_draught, side=side)
+            if laden is not None:
+                return laden, "draught"
+        return None, None
 
+    # Inbound / moored: draught primary, flow_direction fallback.
+    if series is not None:
+        laden = _laden_from_draught(series, event_time, design_draught, side=side)
+        if laden is not None:
+            return laden, "draught"
     fallback = _flow_direction_inference(side, flow_direction)
     if fallback is None:
         return None, None

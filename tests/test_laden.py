@@ -31,63 +31,60 @@ def mk_event(event_type: str, terminal_id: int = 10, minutes: float = 0) -> Even
 
 
 # ----------------------------------------------------------------------
-# Lookahead window: outbound events prefer a post-event draught reading
+# Outbound events: flow_direction is primary at a known-flow terminal; the
+# post-event draught lookahead is only the fallback when flow is unknown.
 # ----------------------------------------------------------------------
 
 
-def test_outbound_uses_post_event_draught_when_available():
-    """The GASLOG GENEVA case: vessel sits at berth at laden draught,
-    undocks, post-discharge draught is reported ~60 min after the event.
-    The lookahead window catches it and flips laden -> False."""
+def test_outbound_known_flow_prefers_flow_direction_over_stale_draught():
+    """Regression for the NW-Europe mislabel: a vessel leaves an import terminal
+    in ballast, but the master is slow to update and still broadcasts the laden
+    draught inside the +6h window. flow_direction must win at a known-flow
+    terminal so the departure isn't mislabelled laden."""
     lookup = build_draught_lookup(
         [
-            (MMSI, at(-1440), 11.0),  # 24h before: laden, while at berth
-            (MMSI, at(-60), 11.0),  # 1h before: still laden, just before undocking
-            (MMSI, at(57), 9.3),  # 57 min after: post-discharge draught
+            (MMSI, at(-60), 11.0),  # laden, pre-undock
+            (MMSI, at(57), 11.0),  # STILL laden 57 min after undock (stale)
         ]
     )
-    assert infer_laden(MMSI, at(0), "post", "import", DESIGN, lookup) == (
-        False,
-        "draught",
-    )
-
-
-def test_outbound_falls_back_to_flow_direction_when_no_post_event_draught():
-    """Pre-event draught only — too stale to trust on an outbound event."""
-    lookup = build_draught_lookup(
-        [
-            (MMSI, at(-1440), 11.0),  # 24h before: laden, pre-discharge
-            (MMSI, at(-60), 11.0),  # 1h before: still laden
-            # No post-event draught yet
-        ]
-    )
+    # import terminal: leaves ballast, despite the stale laden draught reading.
     assert infer_laden(MMSI, at(0), "post", "import", DESIGN, lookup) == (
         False,
         "flow_direction",
     )
+    # export terminal: leaves laden.
     assert infer_laden(MMSI, at(0), "post", "export", DESIGN, lookup) == (
         True,
         "flow_direction",
     )
 
 
-def test_outbound_ignores_pre_event_draught_even_if_recent():
-    """A reading from -45 min still reflects the pre-discharge state — vessel
-    hadn't physically undocked yet. Don't trust it on an outbound event."""
+def test_outbound_unknown_flow_uses_post_event_draught():
+    """When the terminal flow_direction is unknown, fall back to the post-event
+    draught reading inside the lookahead window."""
+    lookup = build_draught_lookup(
+        [
+            (MMSI, at(-60), 11.0),  # pre-undock (ignored — pre-event)
+            (MMSI, at(57), 9.3),  # post-discharge draught, 57 min after
+        ]
+    )
+    assert infer_laden(MMSI, at(0), "post", None, DESIGN, lookup) == (
+        False,
+        "draught",
+    )
+
+
+def test_outbound_unknown_flow_ignores_pre_event_draught():
+    """Unknown flow + only a pre-event reading: pre-event draught is stale on an
+    outbound event, so there is nothing trustworthy to say."""
     lookup = build_draught_lookup([(MMSI, at(-45), 11.0)])
-    assert infer_laden(MMSI, at(0), "post", "import", DESIGN, lookup) == (
-        False,
-        "flow_direction",
-    )
+    assert infer_laden(MMSI, at(0), "post", None, DESIGN, lookup) == (None, None)
 
 
-def test_outbound_post_event_draught_outside_window_falls_back():
-    """A post-event reading more than LOOKAHEAD_FORWARD (6h) away is ignored."""
+def test_outbound_unknown_flow_post_draught_outside_window_returns_null():
+    """Unknown flow + post reading beyond LOOKAHEAD_FORWARD (6h): ignored."""
     lookup = build_draught_lookup([(MMSI, at(8 * 60), 9.3)])
-    assert infer_laden(MMSI, at(0), "post", "import", DESIGN, lookup) == (
-        False,
-        "flow_direction",
-    )
+    assert infer_laden(MMSI, at(0), "post", None, DESIGN, lookup) == (None, None)
 
 
 def test_inbound_uses_forward_fill_not_lookahead():
