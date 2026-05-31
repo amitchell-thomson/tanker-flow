@@ -90,6 +90,30 @@ ON CONFLICT (terminal_name) DO UPDATE SET
     notes           = EXCLUDED.notes;
 
 -- ---------------------------------------------------------------------------
+-- FSRU host vessel MMSIs.
+-- Each FSRU terminal has one permanently moored host vessel. The state machine
+-- (pipeline/port_events.py) short-circuits these MMSIs: instead of walking
+-- them through TRANSIT->IN_ENVELOPE->MOORED, it emits a single synthetic
+-- moored event at the declared host's terminal_id. Without this, an FSRU
+-- vessel would (correctly) be classified as moored, but the per-fix cost of
+-- proving that for every fix it has emitted is wasted compute.
+--
+-- Mukran has two FSRUs side-by-side (Neptune + Energos Power); we pick the
+-- one observed at the host site (Neptune). Energos Power was in the Red Sea
+-- at last observation.
+-- ---------------------------------------------------------------------------
+UPDATE terminals SET fsru_host_mmsi = 205157000 WHERE terminal_name = 'Eemshaven FSRU';        -- EEMSHAVEN LNG
+UPDATE terminals SET fsru_host_mmsi = 563071100 WHERE terminal_name = 'Brunsbuttel FSRU';      -- HOEGH GANNET
+UPDATE terminals SET fsru_host_mmsi = 257344000 WHERE terminal_name = 'Wilhelmshaven 1 FSRU';  -- HOEGH ESPERANZA
+UPDATE terminals SET fsru_host_mmsi = 205423000 WHERE terminal_name = 'Wilhelmshaven 2 FSRU';  -- EXCELSIOR
+UPDATE terminals SET fsru_host_mmsi = 277587000 WHERE terminal_name = 'Klaipeda FSRU';         -- INDEPENDENCE
+UPDATE terminals SET fsru_host_mmsi = 257356000 WHERE terminal_name = 'Mukran (Deutsche Ostsee)'; -- NEPTUNE
+UPDATE terminals SET fsru_host_mmsi = 241838000 WHERE terminal_name = 'Alexandroupolis FSRU';  -- ALEXANDROUPOLIS
+UPDATE terminals SET fsru_host_mmsi = 238048000 WHERE terminal_name = 'Krk (LNG Croatia)';     -- LNG CROATIA
+UPDATE terminals SET fsru_host_mmsi = 247453200 WHERE terminal_name = 'Piombino FSRU';         -- ITALIS LNG
+UPDATE terminals SET fsru_host_mmsi = 235113083 WHERE terminal_name = 'Ravenna FSRU';          -- BW SINGAPORE
+
+-- ---------------------------------------------------------------------------
 -- Verification
 -- ---------------------------------------------------------------------------
 SELECT
