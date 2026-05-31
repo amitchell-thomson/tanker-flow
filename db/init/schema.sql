@@ -170,6 +170,25 @@ CREATE INDEX ix_priority_watchlist_slot_kind_last_fix ON priority_watchlist (slo
 CREATE INDEX ix_priority_watchlist_tier_scan_window ON priority_watchlist (tier, last_scan_window_at ASC NULLS FIRST);
 
 
+-- Tier-promotion log: append-only record of priority_watchlist tier improvements.
+-- Lets the TUI show recent promotions across restarts (not just since it started).
+-- Written by pipeline/scoring.py (via='scoring', periodic re-rank) and
+-- ingestion/aisstream.py (via='inline', instant promotion on a live in-zone fix).
+-- vessel_name + zone are denormalised at write so the panel needs no extra join.
+CREATE TABLE tier_promotions (
+    id            BIGSERIAL    PRIMARY KEY,
+    promoted_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    mmsi          BIGINT       NOT NULL,
+    vessel_name   TEXT,
+    old_tier      SMALLINT,
+    new_tier      SMALLINT     NOT NULL,
+    via           TEXT         NOT NULL CHECK (via IN ('scoring', 'inline')),
+    reason        TEXT,
+    zone          TEXT
+);
+CREATE INDEX ix_tier_promotions_promoted_at ON tier_promotions (promoted_at DESC);
+
+
 -- Ingestion lifecycle events: append-only.
 -- event_type values: 'connect','subscribed','planned_reconnect','disconnect','error','final_flush'
 CREATE TABLE ingestion_events (
