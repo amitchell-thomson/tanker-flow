@@ -105,7 +105,7 @@ last_fix_global AS (
     GROUP BY a.mmsi
 ),
 latest_state AS (
-    SELECT DISTINCT ON (vs.mmsi) vs.mmsi, vs.dest, vs.state_ts
+    SELECT DISTINCT ON (vs.mmsi) vs.mmsi, vs.dest, vs.eta, vs.state_ts
     FROM vessel_state vs
     WHERE vs.state_ts > now() - INTERVAL '90 days'
       AND EXISTS (SELECT 1 FROM lng_fleet l WHERE l.mmsi = vs.mmsi)
@@ -120,12 +120,59 @@ SELECT
     fs.last_polygon_fix_ts,
     fs.last_bbox_fix_ts,
     ls.dest,
+    ls.eta,
     ls.state_ts
 FROM lng_fleet f
 LEFT JOIN last_fix_global lfg USING (mmsi)
 LEFT JOIN fix_stats fs USING (mmsi)
 LEFT JOIN latest_state ls USING (mmsi)
 """
+
+
+def _parse_eta(eta_json: str | dict | None, now: datetime) -> datetime | None:
+    """Parse AIS ETA (Month/Day/Hour/Minute, no year) into a UTC datetime.
+
+    AISstream delivers ETA as JSONB like ``{"Day": 2, "Hour": 14, "Month": 6,
+    "Minute": 0}``. AIS itself has no year field on ETA — we infer the current
+    year unless the month/day has already passed by more than 30 days, in
+    which case the year is bumped (vessels declare ETAs months ahead).
+
+    Returns None when the AIS sentinels for "not available" appear (Month=0,
+    Day=0, Hour=24, Minute=60) or when the components are out of range.
+    """
+    if eta_json is None:
+        return None
+    if isinstance(eta_json, str):
+        try:
+            import json
+
+            eta_json = json.loads(eta_json)
+        except (ValueError, TypeError):
+            return None
+    if not isinstance(eta_json, dict):
+        return None
+    try:
+        month = int(eta_json.get("Month", 0))
+        day = int(eta_json.get("Day", 0))
+        hour = int(eta_json.get("Hour", 24))
+        minute = int(eta_json.get("Minute", 60))
+    except (TypeError, ValueError):
+        return None
+    if month == 0 or day == 0 or hour >= 24 or minute >= 60:
+        return None
+    if not (1 <= month <= 12 and 1 <= day <= 31 and 0 <= hour < 24 and 0 <= minute < 60):
+        return None
+    try:
+        candidate = datetime(now.year, month, day, hour, minute, tzinfo=timezone.utc)
+    except ValueError:
+        # e.g. Feb 30. AIS encoders sometimes pad this — treat as unavailable.
+        return None
+    if candidate < now - timedelta(days=30):
+        try:
+            candidate = candidate.replace(year=now.year + 1)
+        except ValueError:
+            return None
+    return candidate
 
 
 async def load_unlocode_map(conn: asyncpg.Connection) -> dict[str, int]:
@@ -224,7 +271,7 @@ INSERT INTO priority_watchlist (
     parsed_dest_terminal_id, parsed_eta,
     in_slot, slot_kind, computed_at
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, FALSE, NULL, now())
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE, NULL, now())
 ON CONFLICT (mmsi) DO UPDATE SET
     tier                    = EXCLUDED.tier,
     score                   = EXCLUDED.score,
@@ -232,6 +279,7 @@ ON CONFLICT (mmsi) DO UPDATE SET
     last_fix_ts             = EXCLUDED.last_fix_ts,
     last_zone_fix_ts        = EXCLUDED.last_zone_fix_ts,
     parsed_dest_terminal_id = EXCLUDED.parsed_dest_terminal_id,
+    parsed_eta              = EXCLUDED.parsed_eta,
     computed_at             = now()
 """
 
@@ -273,6 +321,8 @@ async def compute_and_upsert(pool: asyncpg.Pool) -> dict[int, int]:
                 )
                 tier_counts[tier] += 1
 
+                parsed_eta = _parse_eta(r["eta"], now)
+
                 await conn.execute(
                     UPSERT_SQL,
                     r["mmsi"],
@@ -282,6 +332,7 @@ async def compute_and_upsert(pool: asyncpg.Pool) -> dict[int, int]:
                     r["last_fix_ts"],
                     last_zone_fix_ts,
                     dest_terminal_id,
+                    parsed_eta,
                 )
 
             # Sweep stale priority_watchlist rows (vessel no longer in scope).
