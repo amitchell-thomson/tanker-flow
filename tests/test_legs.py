@@ -132,3 +132,58 @@ def test_laden_none_propagates():
     events = [ev(9, "departed", at(0), "usgulf", 1, laden=None)]
     legs = pair_legs(events, NOW)
     assert legs[0].laden is None
+
+
+# --- Piece A: enriched per-O-D window + last-fix classifier --------------------
+from pipeline.legs import _classify_overdue, _zone_of  # noqa: E402
+
+
+def test_zone_of_coastal_vs_midocean():
+    assert _zone_of(*ROTTERDAM) == "nweurope"
+    assert _zone_of(*SABINE) == "usgulf"
+    assert _zone_of(35.0, -40.0) is None  # mid-Atlantic
+
+
+def test_classify_overdue_floating_recent_coastal():
+    # Recent fix, inside a coastal region ⇒ genuine on-water floating storage.
+    lf = (NOW - timedelta(days=2), ROTTERDAM[0], ROTTERDAM[1])
+    assert _classify_overdue(lf, "nweurope", NOW) == "open_floating"
+
+
+def test_classify_overdue_arrival_gap_stale_in_dest():
+    # Stale fix, but it's in the declared destination region ⇒ arrived-and-missed.
+    lf = (NOW - timedelta(days=10), ROTTERDAM[0], ROTTERDAM[1])
+    assert _classify_overdue(lf, "nweurope", NOW) == "open_arrival_gap"
+
+
+def test_classify_overdue_censored_midocean_or_no_fix():
+    stale_mid = (NOW - timedelta(days=10), 35.0, -40.0)
+    assert _classify_overdue(stale_mid, "nweurope", NOW) == "open_censored"
+    assert _classify_overdue(None, "nweurope", NOW) == "open_censored"
+    # Stale fix in a region that is NOT the declared destination ⇒ censored.
+    lf_wrong = (NOW - timedelta(days=10), SABINE[0], SABINE[1])
+    assert _classify_overdue(lf_wrong, "nweurope", NOW) == "open_censored"
+
+
+def test_per_od_window_tightens_europe():
+    # Departed 22 days ago to NW Europe (window 18d) ⇒ past window; with a stale
+    # mid-ocean last fix it censors — whereas the flat 30d default would keep it.
+    events = [ev(20, "departed", NOW - timedelta(days=22), "usgulf", 1, laden=True)]
+    legs = pair_legs(
+        events,
+        NOW,
+        dest_regions={20: "nweurope"},
+        last_fixes={20: (NOW - timedelta(days=12), 35.0, -40.0)},
+    )
+    assert legs[0].status == "open_censored"
+    assert legs[0].dest_region == "nweurope"
+    # Same leg with no dest ⇒ flat 30d window ⇒ still in transit at 22 days.
+    legs_flat = pair_legs(events, NOW)
+    assert legs_flat[0].status == "open_in_transit"
+
+
+def test_per_od_window_in_transit_within_window():
+    # 12 days to NW Europe (window 18d) ⇒ still in transit.
+    events = [ev(21, "departed", NOW - timedelta(days=12), "usgulf", 1, laden=True)]
+    legs = pair_legs(events, NOW, dest_regions={21: "nweurope"})
+    assert legs[0].status == "open_in_transit"

@@ -10,16 +10,29 @@ Pure logic (`pair_legs`) + a thin DB loader (`compute_legs`), mirroring the
 state_machine / port_events split.
 
 Classification (see SIGNALS.md and docs/review-2026-05-31-pre-signal-audit.md):
-  - 'closed'          terminating zone_entry in a *different* zone — a real voyage
-  - 'same_zone'       terminating zone_entry in the *same* zone — intra-region hop,
-                      berth shift, or re-entry; ~zero cross-zone ton-miles, so the
-                      signal layer should exclude these from the lane flow
-  - 'open_in_transit' no terminating zone_entry yet, departed <= censor_days ago
-  - 'open_censored'   no terminating zone_entry and departed > censor_days ago —
-                      almost certainly arrived-and-missed (coverage gap) or sitting
-                      in storage, NOT genuinely in transit. Censoring these is the
-                      mandatory guard against the phantom-leg bias that inflates
-                      "laden ton-miles in transit" (#1) and "mean voyage age" (#20).
+  - 'closed'           terminating zone_entry in a *different* zone — a real voyage
+  - 'same_zone'        terminating zone_entry in the *same* zone — intra-region hop,
+                       berth shift, or re-entry; ~zero cross-zone ton-miles, so the
+                       signal layer should exclude these from the lane flow
+  - 'open_in_transit'  no arrival yet, departed within the expected voyage window
+                       for its declared destination (per-O-D; falls back to the
+                       conservative global cap when destination is unknown)
+  - 'open_floating'    past the window but a recent coastal fix shows it still
+                       on-water near a market — *genuine floating storage* (#17/#19/
+                       #20). Age-censoring alone would wrongly discard this.
+  - 'open_arrival_gap' past the window, last fix in the destination region but
+                       stale — almost certainly arrived-and-we-missed-the-entry.
+                       The VF-rescue `floating_check` trigger polls these to
+                       confirm (→ closes the leg or confirms floating).
+  - 'open_censored'    past the window, no recent coastal evidence — a phantom
+                       (arrived-and-dark elsewhere) or invisible mid-ocean idle.
+                       Excluded everywhere (the guard against the phantom-leg bias
+                       that inflates #1/#17/#19/#20).
+
+The enrichment (per-O-D window + last-fix evidence) is *optional*: with no
+`dest_regions`/`last_fixes` supplied, `pair_legs` collapses to the original
+binary `open_in_transit | open_censored` at `censor_days`, so existing callers
+and tests are unaffected.
 """
 
 from __future__ import annotations
@@ -30,17 +43,69 @@ from typing import Literal
 
 import asyncpg
 
-from config import regime_of
+from config import ZONES, regime_of
 
 from .geo import haversine_nm
 
 
-# An open laden leg older than this is treated as censored, not in-transit. Set
-# beyond the longest plausible laden voyage (US Gulf -> Asia ~32d); the signal
-# layer may apply a tighter, destination-specific window on top.
+# Default / unknown-destination open-leg window. Set beyond the longest plausible
+# laden voyage (US Gulf -> Asia ~32d) so we never censor a genuine long haul we
+# can't attribute.
 CENSOR_OPEN_DAYS = 30
 
-LegStatus = Literal["closed", "same_zone", "open_in_transit", "open_censored"]
+# Per-destination-region expected laden-voyage windows (days). Beyond this, an
+# open leg to that region is no longer "in transit" and gets reclassified by
+# last-fix evidence. Only import regions appear — a laden leg's destination is
+# always an import terminal; an unknown/US destination falls back to
+# CENSOR_OPEN_DAYS. (SIGNALS.md §4: "tighter per-O-D window, US->EU ~18 d".)
+OD_WINDOW_DAYS: dict[str, int] = {
+    "nweurope": 18,
+    "baltic": 20,
+    "iberian": 16,
+    "wmed": 20,
+    "emed": 24,
+}
+
+# A fix newer than this, inside coastal AIS range, means we can still *see* the
+# vessel — so a past-window open leg is on-water floating storage, not a phantom.
+RECENT_FIX_DAYS = 4
+
+LegStatus = Literal[
+    "closed",
+    "same_zone",
+    "open_in_transit",
+    "open_floating",
+    "open_arrival_gap",
+    "open_censored",
+]
+
+
+def _zone_of(lat: float | None, lon: float | None) -> str | None:
+    """Which config.ZONES region rectangle contains this point (coastal-AIS
+    range proxy), or None if mid-ocean / outside all tracked regions."""
+    if lat is None or lon is None:
+        return None
+    for name, lat_min, lat_max, lon_min, lon_max in ZONES:
+        if lat_min <= lat <= lat_max and lon_min <= lon <= lon_max:
+            return name
+    return None
+
+
+def _classify_overdue(
+    last_fix: tuple[datetime | None, float | None, float | None] | None,
+    dest_region: str | None,
+    now: datetime,
+) -> LegStatus:
+    """Classify a past-window open leg from its last-fix evidence."""
+    if not last_fix or last_fix[0] is None:
+        return "open_censored"
+    fix_ts, lat, lon = last_fix
+    zone = _zone_of(lat, lon)
+    if fix_ts > now - timedelta(days=RECENT_FIX_DAYS) and zone is not None:
+        return "open_floating"  # still on-water near a coast — real inventory
+    if dest_region is not None and zone == dest_region:
+        return "open_arrival_gap"  # reached the destination region, then went dark
+    return "open_censored"
 
 
 @dataclass(frozen=True)
@@ -77,6 +142,12 @@ class Leg:
     duration_h: float | None = None
     dwt: int | None = None
     gas_capacity_m3: int | None = None
+    # Enrichment (open legs): declared destination region + the vessel's current
+    # last fix, used by the overdue classifier and the VF floating_check trigger.
+    dest_region: str | None = None
+    last_fix_ts: datetime | None = None
+    last_fix_lat: float | None = None
+    last_fix_lon: float | None = None
 
 
 def pair_legs(
@@ -85,24 +156,36 @@ def pair_legs(
     *,
     censor_days: int = CENSOR_OPEN_DAYS,
     weights: dict[int, tuple[int | None, int | None]] | None = None,
+    dest_regions: dict[int, str] | None = None,
+    last_fixes: dict[int, tuple[datetime | None, float | None, float | None]]
+    | None = None,
+    od_windows: dict[str, int] | None = None,
 ) -> list[Leg]:
     """Pair each `departed` with its vessel's next `zone_entry` into a Leg.
 
-    Pure: groups `events` by mmsi, orders by event_time, walks. `weights` maps
-    mmsi -> (dwt, gas_capacity_m3) for ton-mile weighting (attached to each leg).
-    See the module docstring for the status taxonomy.
+    Pure: groups `events` by mmsi, orders by event_time, walks. Optional enrichment
+    (all keyed by mmsi, applied to that vessel's open leg):
+      - `dest_regions`  mmsi -> declared destination region (sets the O-D window
+                        and the arrival-gap test),
+      - `last_fixes`    mmsi -> (fix_ts, lat, lon) of the vessel's latest fix,
+      - `od_windows`    region -> expected-voyage days (defaults to OD_WINDOW_DAYS).
+    Omit them and behaviour collapses to the original `open_in_transit |
+    open_censored` split at `censor_days`. See the module docstring.
     """
     by_mmsi: dict[int, list[LegEvent]] = {}
     for e in events:
         by_mmsi.setdefault(e.mmsi, []).append(e)
 
-    censor_cutoff = now - timedelta(days=censor_days)
     weights = weights or {}
+    dest_regions = dest_regions or {}
+    last_fixes = last_fixes or {}
+    od_windows = od_windows or OD_WINDOW_DAYS
     legs: list[Leg] = []
 
     for mmsi, evs in by_mmsi.items():
         evs = sorted(evs, key=lambda e: e.event_time)
         dwt, gas = weights.get(mmsi, (None, None))
+        dest_region = dest_regions.get(mmsi)
         for i, d in enumerate(evs):
             if d.event_type != "departed":
                 continue
@@ -121,14 +204,28 @@ def pair_legs(
                 regime=regime,
                 dwt=dwt,
                 gas_capacity_m3=gas,
+                dest_region=dest_region,
             )
             if arrival is None:
-                status: LegStatus = (
-                    "open_in_transit"
-                    if d.event_time > censor_cutoff
-                    else "open_censored"
+                window_days = (
+                    od_windows.get(dest_region, censor_days)
+                    if dest_region is not None
+                    else censor_days
                 )
-                legs.append(Leg(status=status, **common))
+                lf = last_fixes.get(mmsi)
+                if d.event_time > now - timedelta(days=window_days):
+                    status: LegStatus = "open_in_transit"
+                else:
+                    status = _classify_overdue(lf, dest_region, now)
+                legs.append(
+                    Leg(
+                        status=status,
+                        last_fix_ts=lf[0] if lf else None,
+                        last_fix_lat=lf[1] if lf else None,
+                        last_fix_lon=lf[2] if lf else None,
+                        **common,
+                    )
+                )
                 continue
 
             distance = None
@@ -170,23 +267,52 @@ FROM vessel_registry
 WHERE is_lng_carrier OR is_fsru
 """
 
+# Declared destination region per vessel: the parsed dest currently on the
+# watchlist (last-known declaration) resolved to its terminal's geographic zone.
+DEST_REGION_SQL = """
+SELECT pw.mmsi, t.zone AS region
+FROM priority_watchlist pw
+JOIN terminals t ON t.terminal_id = pw.parsed_dest_terminal_id
+WHERE pw.parsed_dest_terminal_id IS NOT NULL AND t.zone IS NOT NULL
+"""
+
+# Latest fix per LNG/FSRU vessel — the last-fix evidence for the overdue split.
+LAST_FIX_SQL = """
+SELECT DISTINCT ON (a.mmsi) a.mmsi, a.fix_ts, a.lat, a.lon
+FROM ais_fixes a
+JOIN vessel_registry v ON v.mmsi = a.mmsi
+WHERE v.is_lng_carrier OR v.is_fsru
+ORDER BY a.mmsi, a.fix_ts DESC
+"""
+
 
 async def compute_legs(
     pool: asyncpg.Pool,
     now: datetime | None = None,
     *,
     censor_days: int = CENSOR_OPEN_DAYS,
+    enrich: bool = True,
 ) -> list[Leg]:
-    """Load departed/zone_entry events + dwt/gas weights and pair them.
+    """Load departed/zone_entry events + weights (+ dest-region and last-fix
+    enrichment) and pair them.
 
     Pass an explicit `now` (e.g. the same --as-of used for port_events) for a
-    reproducible, deterministic open/censored split.
+    reproducible, deterministic open/censored split. Set `enrich=False` for the
+    plain binary classification (no dest-region / last-fix joins).
     """
     if now is None:
         now = datetime.now(UTC)
     async with pool.acquire() as conn:
         ev_rows = await conn.fetch(LEG_EVENTS_SQL)
         w_rows = await conn.fetch(WEIGHTS_SQL)
+        dest_regions: dict[int, str] = {}
+        last_fixes: dict[int, tuple[datetime | None, float | None, float | None]] = {}
+        if enrich:
+            for r in await conn.fetch(DEST_REGION_SQL):
+                dest_regions[r["mmsi"]] = r["region"]
+            for r in await conn.fetch(LAST_FIX_SQL):
+                last_fixes[r["mmsi"]] = (r["fix_ts"], r["lat"], r["lon"])
+
     weights = {r["mmsi"]: (r["dwt"], r["gas_capacity_m3"]) for r in w_rows}
     events = [
         LegEvent(
@@ -201,4 +327,11 @@ async def compute_legs(
         )
         for r in ev_rows
     ]
-    return pair_legs(events, now, censor_days=censor_days, weights=weights)
+    return pair_legs(
+        events,
+        now,
+        censor_days=censor_days,
+        weights=weights,
+        dest_regions=dest_regions,
+        last_fixes=last_fixes,
+    )
