@@ -2,7 +2,7 @@
 import { map } from './map.js';
 import { EVENT_COLORS, fmtTimeShort, fmtTimeFull, fmtAge } from './config.js';
 import { selectVessel, dimAllExcept } from './vessels.js';
-import { drawTrack, clearTrackAndEvents, setEventMarkers } from './track.js';
+import { drawTrack, clearTrackAndEvents, setEventMarkers, hasTrack } from './track.js';
 import { setStatus } from './hud.js';
 
 let activeTab = 'events';
@@ -19,9 +19,12 @@ function eventQueryString() {
   return params.toString();
 }
 
-export async function loadEvents() {
+export async function loadEvents({ silent = false } = {}) {
   const list = document.getElementById('events-list');
-  list.innerHTML = 'Loading…';
+  // Silent (background) refreshes skip the placeholder + restore scroll so the
+  // list never flashes or jumps out from under a reading user.
+  const scrollTop = list.scrollTop;
+  if (!silent) list.innerHTML = 'Loading…';
   const events = await fetch('/api/port-events?' + eventQueryString()).then(r => r.json());
   document.getElementById('events-count').textContent = `${events.length}`;
   list.innerHTML = '';
@@ -51,6 +54,7 @@ export async function loadEvents() {
     row.addEventListener('click', () => selectEvent(ev, row));
     list.appendChild(row);
   });
+  if (silent) list.scrollTop = scrollTop;
 }
 
 async function selectEvent(ev, row) {
@@ -163,4 +167,17 @@ export function initEventsPanelHandlers() {
   setInterval(() => {
     if (activeTab === 'fixes' && document.getElementById('fixes-autorefresh').checked) loadFixes();
   }, 15000);
+
+  // Refresh the port-events list every 30 s while its tab is open. Skip while a
+  // track is open or a popup is up so the list never rebuilds out from under an
+  // inspecting user — mirrors the vessel-overview refresh in main.js. The
+  // underlying port_events table rebuilds every ~2 min (PORT_EVENTS_INTERVAL_SECONDS),
+  // so a new event surfaces within a rebuild + one refresh tick rather than only
+  // on a manual page reload.
+  setInterval(() => {
+    if (activeTab !== 'events') return;
+    if (hasTrack()) return;
+    if (document.querySelector('.leaflet-popup')) return;
+    loadEvents({ silent: true });
+  }, 30000);
 }

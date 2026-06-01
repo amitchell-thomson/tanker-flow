@@ -1,14 +1,9 @@
 // Shared constants and pure helpers. No DOM, no Leaflet, no fetch.
 
-// Selectable basemaps (all key-free). "Dark gray" is the default: dark enough
-// to match the HUD but with lighter landmasses than CARTO dark_all, so
-// coastlines/terminals are easy to make out. Esri tiles use {z}/{y}/{x} order;
-// CARTO uses {z}/{x}/{y} with {r} for retina.
+// Selectable basemaps (all key-free). "Voyager" is the default: light, detailed
+// CARTO tiles with clear coastlines/labels so terminals are easy to make out.
+// Esri tiles use {z}/{y}/{x} order; CARTO uses {z}/{x}/{y} with {r} for retina.
 export const BASEMAPS = {
-  'dark-gray': {
-    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
-    opts: { attribution: '&copy; Esri', maxZoom: 16 },
-  },
   'dark': {
     url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
     opts: { attribution: '&copy; OpenStreetMap &copy; CARTO', subdomains: 'abcd', maxZoom: 19 },

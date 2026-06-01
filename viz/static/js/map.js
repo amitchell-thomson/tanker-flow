@@ -5,7 +5,7 @@ export const map = L.map('map').setView([25, -30], 3);
 
 let baseLayer = null;
 export function setBasemap(key) {
-  const b = BASEMAPS[key] || BASEMAPS['dark-gray'];
+  const b = BASEMAPS[key] || BASEMAPS['voyager'];
   if (baseLayer) map.removeLayer(baseLayer);
   baseLayer = L.tileLayer(b.url, b.opts).addTo(map);
   baseLayer.bringToBack();  // keep it under the density raster + markers

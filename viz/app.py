@@ -50,6 +50,18 @@ app = FastAPI(lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
+@app.middleware("http")
+async def revalidate_static(request: Request, call_next):
+    """Force browsers to revalidate /static assets against the ETag instead of
+    serving them straight from cache. StaticFiles sends no Cache-Control, so a
+    plain reload would otherwise keep running stale JS/CSS after an edit. With
+    `no-cache` the browser revalidates and gets a cheap 304 when unchanged."""
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 async def get_pool(request: Request) -> asyncpg.Pool:
     return request.app.state.pool
 

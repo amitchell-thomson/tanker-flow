@@ -7,7 +7,7 @@ import { loadEvents, initEventsPanelHandlers } from './events.js';
 import { toggleDensity } from './density.js';
 import { setStatus, startIngestPulse } from './hud.js';
 
-setBasemap('dark-gray');
+setBasemap('voyager');
 
 // Wire layer-control buttons + basemap dropdown.
 document.getElementById('basemap-select').addEventListener('change', e => setBasemap(e.target.value));
