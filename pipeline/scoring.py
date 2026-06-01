@@ -380,41 +380,97 @@ def assign_tier(
     return (5, "never-seen", last_fix_ts.timestamp() if last_fix_ts else 0.0)
 
 
-# Open-leg pin: vessels with a laden `departed` and no later `zone_entry` get a
-# guaranteed persistent slot (see ingestion.aisstream.load_persistent_mmsis) so
-# we re-acquire them on the return approach rather than losing them to
-# tier-decay — the phantom-open-leg failure (M1). Bound the set: only legs
-# departed within PIN_LOOKBACK_DAYS (older ⇒ almost certainly arrived-and-missed
-# or sitting in storage, won't usefully reappear), capped at PIN_MAX most-recent
-# so pins never crowd out the tier-1/2 persistent slots.
-PIN_LOOKBACK_DAYS = 25
-PIN_MAX = 25
+# Open-leg pin: a vessel with an open leg (a `departed` with no later
+# `zone_entry`) is mid-voyage and will re-enter terrestrial AIS range on its
+# approach to the next terminal. We can't *hear* it mid-ocean, so a persistent
+# slot only does work inside that approach window — holding one across the whole
+# dark crossing just idles a scarce slot. So we pin BOTH directions (laden ->
+# import arrival AND ballast -> export-terminal loading), but only while each
+# leg's expected approach window is open, ranked by closeness to expected
+# arrival (see ingestion.aisstream.load_persistent_mmsis for slot allocation).
+#
+# This shape is from the appear-in-berth audit. The old pin was laden-only and
+# ordered by departed_ts DESC, so it (a) never pinned the ballast return to a US
+# export terminal — the dominant miss (New Apex, SM Bluebird, ...) — and (b)
+# once open legs exceeded the cap, kept the *freshest* departures (still
+# mid-ocean, slot idle) over the vessels actually *due to arrive*. Window-gating
+# + arrival ordering fixes both, and is self-selecting: a short intra-region leg
+# closes (gets a zone_entry) before its window opens, so only genuine long-haul
+# legs ever reach the pin.
+# >= max expected voyage + post-window (cf. legs.CENSOR_OPEN_DAYS).
+PIN_LOOKBACK_DAYS = 30
+PIN_MAX = 30
+# Subscribe up to 4d early (absorbs early arrivals / model error); stay
+# subscribed up to 8d late (late arrival / re-acquire after an arrival-gap).
+PIN_PRE_WINDOW_DAYS = 4
+PIN_POST_WINDOW_DAYS = 8
 
-OPEN_LADEN_PIN_SQL = """
-WITH open_laden AS (
-    SELECT pe.mmsi, max(pe.event_time) AS departed_ts
-    FROM port_events pe
-    WHERE pe.event_type = 'departed'
-      AND pe.laden_flag = TRUE
-      AND pe.event_time > now() - make_interval(days => $1)
-      AND NOT EXISTS (
-          SELECT 1 FROM port_events z
-          WHERE z.mmsi = pe.mmsi
-            AND z.event_type = 'zone_entry'
-            AND z.event_time > pe.event_time
-      )
-    GROUP BY pe.mmsi
-)
-SELECT mmsi FROM open_laden
-ORDER BY departed_ts DESC
-LIMIT $2
+# Expected voyage length keyed by the DEPARTURE zone. An open leg's *destination*
+# isn't known yet, but departure zone + the still-open-this-long condition pins
+# down the haul (US export <-> EU import is the transatlantic ~14-18d spine).
+# Coarse Phase-1 constants; Phase 2 replaces these with rolling medians of
+# observed departed->zone_entry durations per O-D pair (see legs.py).
+EXPECTED_VOYAGE_DAYS: dict[str, int] = {
+    "usgulf": 16,  # US export -> EU import (laden out)
+    "usatlantic": 15,
+    "nweurope": 15,  # EU import -> US export (ballast return)
+    "baltic": 16,
+    "iberian": 15,
+    "wmed": 16,
+    "emed": 17,
+}
+DEFAULT_VOYAGE_DAYS = 16
+
+OPEN_LEG_PIN_SQL = """
+SELECT DISTINCT ON (pe.mmsi)
+       pe.mmsi, pe.event_time AS departed_ts, pe.zone AS depart_zone
+FROM port_events pe
+WHERE pe.event_type = 'departed'
+  AND pe.event_time > now() - make_interval(days => $1)
+  AND NOT EXISTS (
+      SELECT 1 FROM port_events z
+      WHERE z.mmsi = pe.mmsi
+        AND z.event_type = 'zone_entry'
+        AND z.event_time > pe.event_time
+  )
+ORDER BY pe.mmsi, pe.event_time DESC
 """
 
 
+def _select_open_leg_pins(
+    open_legs: list[tuple[int, datetime, str | None]], now: datetime
+) -> set[int]:
+    """Pure pin selection: keep only legs whose approach window is open *now*,
+    rank by closeness to expected arrival, cap at PIN_MAX.
+
+    `open_legs` is [(mmsi, departed_ts, depart_zone), ...] — the most recent
+    open departure per vessel. Returns the pinned MMSI set.
+    """
+    pre = timedelta(days=PIN_PRE_WINDOW_DAYS)
+    post = timedelta(days=PIN_POST_WINDOW_DAYS)
+
+    due: list[tuple[datetime, int]] = []
+    for mmsi, departed_ts, depart_zone in open_legs:
+        voyage = EXPECTED_VOYAGE_DAYS.get(depart_zone, DEFAULT_VOYAGE_DAYS)
+        expected_arrival = departed_ts + timedelta(days=voyage)
+        # In window: close enough that the vessel is plausibly back in
+        # terrestrial range, not yet so overdue it's floating storage.
+        if expected_arrival - pre <= now <= expected_arrival + post:
+            due.append((expected_arrival, mmsi))
+
+    # Earliest expected arrival first — an overdue leg (expected_arrival in the
+    # past) sorts ahead of a not-yet-due one, so when the cap binds the scarce
+    # slots go to the vessels actually approaching now.
+    due.sort(key=lambda t: t[0])
+    return {mmsi for _, mmsi in due[:PIN_MAX]}
+
+
 async def load_open_leg_pins(conn: asyncpg.Connection) -> set[int]:
-    """MMSIs with a recent, bounded open laden leg — see the PIN_* constants."""
-    rows = await conn.fetch(OPEN_LADEN_PIN_SQL, PIN_LOOKBACK_DAYS, PIN_MAX)
-    return {r["mmsi"] for r in rows}
+    """MMSIs on an open leg whose approach window is open now, both directions —
+    see the PIN_* / EXPECTED_VOYAGE_DAYS notes above."""
+    rows = await conn.fetch(OPEN_LEG_PIN_SQL, PIN_LOOKBACK_DAYS)
+    open_legs = [(r["mmsi"], r["departed_ts"], r["depart_zone"]) for r in rows]
+    return _select_open_leg_pins(open_legs, datetime.now(timezone.utc))
 
 
 # In-port pin: a vessel whose most recent port_event is an in-port state (it has
