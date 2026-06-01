@@ -1,4 +1,4 @@
-.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events scoring vf-rescue vf-rescue-dry vf-status refresh-fleet
+.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events scoring signals vf-rescue vf-rescue-dry vf-status refresh-fleet
 
 up:
 	docker compose up -d
@@ -49,6 +49,11 @@ seed-unlocodes:
 
 scoring:
 	uv run python -m pipeline.scoring
+
+# Rebuild the signal_daily panel (laden ton-miles in transit + flow signals)
+# from voyage legs + port_events. Idempotent: TRUNCATEs then rebuilds.
+signals:
+	uv run python -m pipeline.signal
 
 # VesselFinder rescue: fetch live positions for high-value AIS-silent vessels.
 # Credit-budgeted. Use vf-rescue-dry first for a no-spend candidate/cost preview.

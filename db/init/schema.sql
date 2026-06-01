@@ -147,6 +147,40 @@ CREATE INDEX ON port_events (terminal_id, event_time DESC);
 CREATE INDEX ON port_events (zone, event_type, event_time DESC);
 
 
+-- Market-signal daily panel: tidy/long aggregation of voyage legs (pipeline/legs.py)
+-- + port_events into per-day time series, written by pipeline/signal.py (TRUNCATE +
+-- rebuild, like port_events). One row per (signal_key, bucket_date, zone_scope,
+-- regime, basis).
+--   signal_key  e.g. 'laden_ton_miles_in_transit_dwt' / '_gas' (#1/#2),
+--               'mean_laden_voyage_age_h' (#20), 'od_flow_count' (#5),
+--               'eu_arrivals' (#4), 'us_loadings' (#9). See analysis/SIGNALS.md.
+--   zone_scope  the lane/zone the value pertains to: 'usgulf->eu', a single zone,
+--               an O-D pair like 'usgulf->nweurope', or 'all'.
+--   regime      segmented per SIGNALS.md §0.5 — never aggregate a model across the
+--               2026-05-30 seam. Tagged by the *leg's* regime (fixed at departure),
+--               not by the bucket_date. A synthetic 'all' row sums both regimes.
+--   basis       'physical' = hindsight-clean reconstruction (a leg is live on day d
+--               iff departed<=d<arrived, using today's classification); 'knowable'
+--               is reserved for the future leakage-free point-in-time series.
+-- NB: the headline #1/#2 "laden ton-miles in transit" lives here as a signal_key
+-- value, not a dedicated table.
+CREATE TABLE signal_daily (
+    id           BIGSERIAL        PRIMARY KEY,
+    signal_key   TEXT             NOT NULL,
+    bucket_date  DATE             NOT NULL,
+    zone_scope   TEXT             NOT NULL,
+    regime       TEXT             NOT NULL CHECK (regime IN ('bbox','mmsi_filter','all')),
+    value        DOUBLE PRECISION NOT NULL,
+    n_legs       INTEGER,
+    basis        TEXT             NOT NULL DEFAULT 'physical'
+                                  CHECK (basis IN ('physical','knowable')),
+    computed_at  TIMESTAMPTZ      NOT NULL DEFAULT now(),
+    UNIQUE (signal_key, bucket_date, zone_scope, regime, basis)
+);
+CREATE INDEX ix_signal_daily_key_date ON signal_daily (signal_key, bucket_date);
+CREATE INDEX ix_signal_daily_date     ON signal_daily (bucket_date);
+
+
 -- Priority watchlist: derived nightly+hourly by pipeline/scoring.py. One row per
 -- LNG/FSRU vessel in vessel_registry. The ingester reads top-N from this table
 -- to pick the 150 MMSIs to subscribe to (100 persistent + 50 scan rotation).
