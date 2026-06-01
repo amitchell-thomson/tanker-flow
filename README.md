@@ -120,3 +120,28 @@ make viz             # Start FastAPI monitoring web app (localhost:8000)
 | `pipeline/signal.py` | Aggregates `port_events` into laden ton-miles in transit by zone pair |
 | `data/eia.py` | Pulls US natural gas storage data from the EIA API (Henry Hub fundamentals) |
 | `analysis/` | Spread prediction model and exploratory notebooks |
+
+---
+
+## How this was built
+
+I built tanker-flow with AI assistance (Claude Code) as a deliberate part of
+the workflow — and I'd rather show that than hide it. Directing AI well to
+produce a correct, non-trivial system is part of the skillset, not a shortcut
+around it.
+
+**What's mine:** the architecture, the domain model (the port-event state
+machine, the regime-segmented signal, the credit-budgeted VesselFinder rescue
+backstop), and every consequential design call and tradeoff. AI accelerated
+implementation, refactors, and data exploration under that direction.
+
+**How it's kept rigorous:**
+- **Design-doc-first** — [`CLAUDE.md`](CLAUDE.md) is the living architecture
+  spec the assistant (and any reader) works from.
+- **Audit-before-build** — [`docs/`](docs/) holds the data audits I run before
+  committing to a change (e.g. root-causing every "vessel appeared in berth
+  directly" event before touching the scoring pin).
+- **Verify, don't trust** — findings are checked against live query output,
+  never asserted.
+
+Every line is one I can explain and defend.
