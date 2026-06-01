@@ -121,7 +121,7 @@ body { margin: 0; background: #0d1117; font-family: -apple-system, BlinkMacSyste
 }
 #reset-btn {
   display: none;
-  top: 12px;
+  top: 52px;
   right: calc(var(--panel-w) + 12px);
   padding: 7px 13px;
   color: #ecf0f1;
@@ -130,6 +130,19 @@ body { margin: 0; background: #0d1117; font-family: -apple-system, BlinkMacSyste
   font-family: inherit;
 }
 #reset-btn:hover { background: rgba(52, 73, 94, 0.6); }
+/* Link to the market-signals dashboard. Sits top-right above the (transient)
+   reset button so the two never overlap. */
+#nav-signals {
+  top: 12px;
+  right: calc(var(--panel-w) + 12px);
+  padding: 7px 13px;
+  color: #3498db;
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+}
+#nav-signals:hover { background: rgba(52, 152, 219, 0.15); }
 #layer-controls {
   top: 12px;
   left: 52px;

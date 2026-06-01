@@ -1,5 +1,12 @@
 // Shared constants and pure helpers. No DOM, no Leaflet, no fetch.
 
+// Ingestion-regime cutover. Mirrors config.REGIME_CUTOVER (Python) and the
+// port_events.regime generated-column literal — the hard switch from the old
+// bbox+throttle subscription to server-side MMSI filtering. The signals
+// dashboard marks this instant on every time series so the discontinuity is
+// never read as a market move (see analysis/SIGNALS.md §0.5).
+export const REGIME_CUTOVER = '2026-05-30T09:27:00Z';
+
 // Selectable basemaps (all key-free). "Voyager" is the default: light, detailed
 // CARTO tiles with clear coastlines/labels so terminals are easy to make out.
 // Esri tiles use {z}/{y}/{x} order; CARTO uses {z}/{x}/{y} with {r} for retina.

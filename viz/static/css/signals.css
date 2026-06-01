@@ -1,0 +1,86 @@
+/* Dedicated /signals dashboard. Inherits theme + palette from style.css; this
+   file is layout-only (the card grid + card chrome). */
+
+.signals-page { overflow-y: auto; }
+
+#signals-header {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  padding: 14px 22px;
+  background: #1f2733;
+  border-bottom: 1px solid #2c3e50;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+#signals-header h1 { font-size: 17px; font-weight: 600; margin: 0; color: #ecf0f1; }
+#signals-sub { color: #7f8c8d; font-size: 12px; }
+#nav-map {
+  color: #3498db;
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 4px 8px;
+  border: 1px solid rgba(52, 152, 219, 0.4);
+  border-radius: 5px;
+}
+#nav-map:hover { background: rgba(52, 152, 219, 0.15); }
+#regime-toggle {
+  margin-left: auto;
+  color: #95a5a6;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+#signals-status { color: #7f8c8d; font-size: 11px; font-family: monospace; }
+
+#signal-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  gap: 16px;
+  padding: 18px 22px;
+}
+
+.signal-card {
+  background: #1f2733;
+  border: 1px solid #2c3e50;
+  border-radius: 8px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+  padding: 14px 16px 10px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.signal-card-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 2px; }
+.signal-title { font-size: 13px; font-weight: 600; color: #ecf0f1; flex: 1; min-width: 0; }
+.signal-sig { color: #7f8c8d; font-size: 11px; font-family: monospace; }
+.signal-cat {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 3px;
+  color: #11161c;
+}
+.cat-supply    { background: #3498db; }
+.cat-demand    { background: #2ecc71; }
+.cat-inventory { background: #e67e22; }
+.cat-arbitrage { background: #9b59b6; color: #fff; }
+.cat-other     { background: #566573; color: #ecf0f1; }
+
+.signal-value-row { display: flex; align-items: baseline; gap: 8px; margin: 2px 0 8px; }
+.signal-value { font-size: 24px; font-weight: 700; color: #ecf0f1; font-variant-numeric: tabular-nums; }
+.signal-unit { font-size: 11px; color: #7f8c8d; }
+.signal-delta { font-size: 12px; font-weight: 600; font-family: monospace; }
+.signal-delta.up   { color: #2ecc71; }
+.signal-delta.down { color: #e74c3c; }
+.signal-delta.flat { color: #7f8c8d; }
+
+.signal-chart-wrap { position: relative; height: 150px; }
+.signal-card.wide { grid-column: span 2; }
+
+#signal-grid .empty { color: #7f8c8d; padding: 30px; font-size: 14px; }

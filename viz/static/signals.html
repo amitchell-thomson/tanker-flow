@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tanker Flow — Market signals</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/signals.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3"></script>
+</head>
+<body class="signals-page">
+  <header id="signals-header">
+    <a href="/" id="nav-map">&larr; Map</a>
+    <h1>Market signals</h1>
+    <span id="signals-sub">laden ton-miles in transit &amp; flow signals · Henry Hub / TTF</span>
+    <label id="regime-toggle"><input type="checkbox" id="split-regime"> split by ingest regime</label>
+    <span id="signals-status">Loading…</span>
+  </header>
+  <div id="signal-grid"></div>
+  <script type="module" src="/static/js/signals.js"></script>
+</body>
+</html>

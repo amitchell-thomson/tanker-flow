@@ -71,6 +71,11 @@ async def index():
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/signals")
+async def signals_page():
+    return FileResponse(STATIC_DIR / "signals.html")
+
+
 @app.get("/api/vessels")
 async def vessels(pool: asyncpg.Pool = Depends(get_pool)):
     # LNG-centric: only LNG carriers and FSRUs reach the map. Under server-side
@@ -736,6 +741,44 @@ async def port_events(
         {where_sql}
         ORDER BY pe.event_time DESC
         LIMIT ${limit_idx}
+    """
+    rows = await pool.fetch(sql, *args)
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/signals")
+async def signals(
+    signal_key: str | None = None,
+    zone_scope: str | None = None,
+    regime: str | None = None,
+    basis: str = "physical",
+    since_days: int | None = None,
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    """Market-signal daily panel from signal_daily. Small table — returns the
+    whole (filtered) set and lets the dashboard group by signal_key. Pins
+    basis='physical' by default (the only basis built today)."""
+    args: list = [basis]
+    where = ["sd.basis = $1"]
+    if signal_key:
+        args.append(signal_key)
+        where.append(f"sd.signal_key = ${len(args)}")
+    if zone_scope:
+        args.append(zone_scope)
+        where.append(f"sd.zone_scope = ${len(args)}")
+    if regime:
+        args.append(regime)
+        where.append(f"sd.regime = ${len(args)}")
+    if since_days is not None:
+        args.append(since_days)
+        where.append(f"sd.bucket_date >= now()::date - (${len(args)} * INTERVAL '1 day')")
+
+    sql = f"""
+        SELECT sd.signal_key, sd.bucket_date, sd.zone_scope, sd.regime,
+               sd.value, sd.n_legs, sd.basis, sd.computed_at
+        FROM signal_daily sd
+        WHERE {" AND ".join(where)}
+        ORDER BY sd.signal_key, sd.zone_scope, sd.regime, sd.bucket_date
     """
     rows = await pool.fetch(sql, *args)
     return [dict(r) for r in rows]
