@@ -315,6 +315,17 @@ def test_classify_far_not_closing_excluded():
     assert _classify(near_km=40.0, last_cog=270.0, bearing_deg=90.0) is None
 
 
+# --- last_event tie-break (cold-start cluster) --------------------------------
+def test_candidate_sql_breaks_last_event_ties_by_id():
+    """A cold-start cluster can emit zone_entry..zone_exit at one timestamp.
+    Without an id tiebreaker, DISTINCT ON could resolve last_event to the
+    cluster's `zone_entry` and make a long-departed vessel look like an open
+    visit (the spurious PRISM DIVERSITY rescue). The last_event CTE must order
+    event_time DESC THEN id DESC so the most-final event (highest id, inserted
+    in DFA order) wins the tie."""
+    assert "ORDER BY pe.mmsi, pe.event_time DESC, pe.id DESC" in vr.CANDIDATE_SQL
+
+
 # --- merge_candidates (#4/#5 source merge) ------------------------------------
 def _cand(mmsi, cls):
     return vr.Candidate(

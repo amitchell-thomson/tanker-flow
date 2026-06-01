@@ -188,10 +188,15 @@ nearest AS (
     ) n
 ),
 last_event AS (
+    -- id DESC breaks ties when a cold-start cluster emits several events at one
+    -- timestamp (e.g. zone_entry..zone_exit in a single fix gap). Rows are
+    -- inserted in DFA order, so the highest id is the most-final state — without
+    -- this, DISTINCT ON could pick the cluster's `zone_entry` and make a
+    -- long-departed vessel look like an open visit.
     SELECT DISTINCT ON (pe.mmsi) pe.mmsi, pe.event_type, t.flow_direction AS ev_flow
     FROM port_events pe LEFT JOIN terminals t ON t.terminal_id = pe.terminal_id
     WHERE pe.event_time > now() - make_interval(days => $1)
-    ORDER BY pe.mmsi, pe.event_time DESC
+    ORDER BY pe.mmsi, pe.event_time DESC, pe.id DESC
 ),
 -- Cooldown: a vessel is excluded while the latest log row's recheck_at is still
 -- in the future (variable per the moving/settled outcome of that poll, #2).
