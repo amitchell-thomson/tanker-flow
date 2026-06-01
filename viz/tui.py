@@ -32,6 +32,8 @@ from textual.widgets import DataTable, Input, Label, Static
 from textual_hires_canvas import Canvas as _HiResCanvas
 from textual_plot import AxisFormatter, HiResMode, NumericAxisFormatter, PlotWidget
 
+from ingestion.vf_rescue import CREDIT_RESERVE_ESTIMATE, DAILY_CREDIT_CAP
+
 _THEME = Theme(
     name="tanker",
     primary="#888888",
@@ -113,6 +115,20 @@ def _tier_chip(tier: int | None) -> str:
         return "[dim]·[/]"
     colour = _TIER_PALETTE.get(tier, "white")
     return f"[{colour} bold]{tier}[/]"
+
+
+_VF_RESULT_COLOUR = {
+    "rescued": "green",
+    "no_position": "dim",
+    "rejected_stale": "yellow",
+    "rejected_teleport": "yellow",
+    "error": "red",
+    "dry_run": "dim",
+}
+
+
+def _vf_result_chip(result: str) -> str:
+    return f"[{_VF_RESULT_COLOUR.get(result, 'white')}]{result}[/]"
 
 
 def _fmt_age(seconds: int | float | None) -> str:
@@ -366,7 +382,7 @@ class TankerFlowApp(App):
 
     /* FIELD ZONE */
     #field-zone { height: 1.05fr; }
-    #zone-container, #terminal-container, #stale-container {
+    #zone-container, #terminal-container, #stale-container, #vf-rescue-container {
         border: round #7a7a7a;
         border-title-color: #c0c0c0;
         border-title-style: bold;
@@ -374,6 +390,7 @@ class TankerFlowApp(App):
     #zone-container { width: 1fr; }
     #terminal-container { width: 2fr; }
     #stale-container { width: 2fr; }
+    #vf-rescue-container { width: 2fr; }
     #zone-summary {
         height: 1fr;
         padding: 0 1;
@@ -535,6 +552,9 @@ class TankerFlowApp(App):
                 yield DataTable(id="terminal-table")
             with Vertical(id="stale-container"):
                 yield DataTable(id="stale-table")
+            with Vertical(id="vf-rescue-container"):
+                yield Static("[bold cyan]VF rescue[/]", id="vf-credit-status", markup=True)
+                yield DataTable(id="vf-rescue-table")
 
         yield Static(
             "[dim][bold]q[/] quit · [bold]z[/] view-span · "
@@ -559,6 +579,9 @@ class TankerFlowApp(App):
 
         promo_table = self.query_one("#promo-table", DataTable)
         promo_table.add_columns("When", "Vessel", "Tier", "Via", "Where")
+
+        vf_rescue_table = self.query_one("#vf-rescue-table", DataTable)
+        vf_rescue_table.add_columns("When", "Vessel", "Class", "Src", "Cr", "Result")
 
         errors_table = self.query_one("#errors-table", DataTable)
         errors_table.add_columns("Age", "Source", "Kind", "Message")
@@ -598,6 +621,9 @@ class TankerFlowApp(App):
         self.query_one("#stale-container", Vertical).border_title = (
             "Silent vessels · active <24h, gone >30m"
         )
+        self.query_one("#vf-rescue-container", Vertical).border_title = (
+            "VF rescue · live-position backstop"
+        )
 
         self._update_explorer_label()
 
@@ -627,6 +653,8 @@ class TankerFlowApp(App):
         asyncio.create_task(self.refresh_errors_and_reconnects())
         self.set_interval(30, self.refresh_explorer)
         asyncio.create_task(self.refresh_explorer())
+        self.set_interval(30, self.refresh_vf_rescue)
+        asyncio.create_task(self.refresh_vf_rescue())
 
     async def on_unmount(self) -> None:
         if self._pool:
@@ -863,7 +891,8 @@ class TankerFlowApp(App):
                     self._pool.fetchrow(
                         """
                             SELECT
-                                COUNT(*) FILTER (WHERE slot_kind = 'persistent') AS n_persistent,
+                                COUNT(*) FILTER (WHERE slot_kind IN ('persistent', 'pinned')) AS n_persistent,
+                                COUNT(*) FILTER (WHERE slot_kind = 'pinned') AS n_pinned,
                                 COUNT(*) FILTER (WHERE slot_kind = 'scan') AS n_scan
                             FROM priority_watchlist
                             """
@@ -908,18 +937,20 @@ class TankerFlowApp(App):
         # --- Scan progress ---
         last_sub = scan_event["last_sub"] if scan_event else None
         n_persistent = in_slot_summary["n_persistent"] if in_slot_summary else 0
+        n_pinned = in_slot_summary["n_pinned"] if in_slot_summary else 0
         n_scan = in_slot_summary["n_scan"] if in_slot_summary else 0
+        persistent_str = f"[bold]{n_persistent}[/] persistent ({n_pinned} pinned)"
         if last_sub:
             age_s = int((now - last_sub).total_seconds())
             remaining_s = max(0, 3600 - age_s)
             scan_status = (
-                f"Slots: [bold]{n_persistent}[/] persistent, [bold]{n_scan}[/] scan\n"
+                f"Slots: {persistent_str}, [bold]{n_scan}[/] scan\n"
                 f"Scan window age: {age_s // 60}m {age_s % 60}s · "
                 f"next rotation in ~{remaining_s // 60}m"
             )
         else:
             scan_status = (
-                f"Slots: [bold]{n_persistent}[/] persistent, [bold]{n_scan}[/] scan\n"
+                f"Slots: {persistent_str}, [bold]{n_scan}[/] scan\n"
                 "Scan window: no recent subscribe event"
             )
         self.query_one("#scan-progress", Static).update(scan_status)
@@ -944,6 +975,72 @@ class TankerFlowApp(App):
             tier_cell = f"{_tier_chip(r['old_tier'])}[dim]→[/]{_tier_chip(r['new_tier'])}"
             where = r["zone"] or r["reason"] or ""
             promo_table.add_row(ago, name, tier_cell, r["via"], f"[dim]{where}[/]")
+
+    async def refresh_vf_rescue(self) -> None:
+        """VF-rescue credit ledger + recent rescues, on the 30s timer. Shows
+        today's spend vs the daily cap, the live account balance + expiry from
+        the /status snapshot (vf_account_status), and the last 20 attempts."""
+        if not self._pool:
+            return
+        try:
+            budget_row, lifetime_row, status_row, rescues = await asyncio.gather(
+                self._pool.fetchrow(
+                    """
+                    SELECT COALESCE(SUM(credits), 0) AS spent
+                    FROM vf_rescue_log
+                    WHERE requested_at >= date_trunc('day', now() AT TIME ZONE 'UTC')
+                                          AT TIME ZONE 'UTC'
+                    """
+                ),
+                self._pool.fetchrow(
+                    "SELECT COALESCE(SUM(credits), 0) AS lifetime FROM vf_rescue_log"
+                ),
+                self._pool.fetchrow(
+                    "SELECT credits, expiration_date, checked_at "
+                    "FROM vf_account_status ORDER BY checked_at DESC LIMIT 1"
+                ),
+                self._pool.fetch(
+                    """
+                    SELECT requested_at, mmsi, vessel_name, rescue_class, src,
+                           credits, result
+                    FROM vf_rescue_log
+                    ORDER BY requested_at DESC
+                    LIMIT 20
+                    """
+                ),
+            )
+        except Exception:
+            return
+
+        now = datetime.now(timezone.utc)
+        spent = budget_row["spent"]
+        if status_row is not None:
+            # Live balance from the /status endpoint (true remaining + expiry).
+            age = _fmt_age((now - status_row["checked_at"]).total_seconds())
+            exp = status_row["expiration_date"]
+            exp_str = f" [dim]· exp {exp:%Y-%m-%d}[/]" if exp else ""
+            balance = f"[b]{status_row['credits']}[/] credits [dim]({age} ago)[/]{exp_str}"
+        else:
+            # Fallback before the first /status snapshot: rough estimate.
+            left = max(0, CREDIT_RESERVE_ESTIMATE - lifetime_row["lifetime"])
+            balance = f"~[b]{left}[/] credits left [dim](est)[/]"
+        self.query_one("#vf-credit-status", Static).update(
+            f"[bold cyan]VF rescue[/] [dim]·[/] today [b]{spent}[/]/{DAILY_CREDIT_CAP}cr "
+            f"[dim]·[/] {balance}"
+        )
+        table = self.query_one("#vf-rescue-table", DataTable)
+        table.clear()
+        for r in rescues:
+            ago = _fmt_age((now - r["requested_at"]).total_seconds())
+            name = r["vessel_name"].strip() if r["vessel_name"] else f"MMSI {r['mmsi']}"
+            table.add_row(
+                ago,
+                name,
+                r["rescue_class"],
+                r["src"] or "[dim]—[/]",
+                str(r["credits"]),
+                _vf_result_chip(r["result"]),
+            )
 
     async def refresh_slow_stats(self) -> None:
         """Watchlist coverage + silent-vessels table, on the 30s timer.
