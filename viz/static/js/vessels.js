@@ -1,7 +1,7 @@
 // Vessel markers: load, render, freshness fade, selection dimming.
 import { map, registerLayer } from './map.js';
 import {
-  FSRU_COLOR, CARRIER_COLOR,
+  FSRU_COLOR, CARRIER_COLOR, SOG_UNDERWAY_KN, bearingDeg,
   tierColor, tierRadius, freshnessOpacity, fmtAge, fmtTimeFull,
 } from './config.js';
 import { drawTrack, clearTrackAndEvents } from './track.js';
@@ -24,8 +24,38 @@ export async function loadVessels({ silent = false } = {}) {
     const stroke = tierColor(v.tier);
     const fresh = freshnessOpacity(v.fix_ts);
     const r = tierRadius(v.tier);
+
+    // Shape encodes motion (shape only — colour, tier stroke/size, freshness
+    // fade, popup and selection are unchanged). Underway vessels point a
+    // triangle in their travel direction: COG when reported, else the bearing
+    // of the last fix-to-fix step. Stationary vessels stay circles, or squares
+    // for FSRUs. An underway vessel with no determinable heading falls back to
+    // its stationary shape (can't orient a triangle).
+    const underway = v.sog != null && v.sog >= SOG_UNDERWAY_KN;
+    let heading = null;
+    if (underway) {
+      if (v.cog != null) heading = v.cog;
+      else if (v.prev_lat != null && v.prev_lon != null)
+        heading = bearingDeg(v.prev_lat, v.prev_lon, v.lat, v.lon);
+    }
+
     let marker;
-    if (v.is_fsru) {
+    if (heading != null) {
+      // Triangle pointing toward `heading` (deg clockwise from north = up).
+      const size = Math.round(r * 2.6);
+      const half = size / 2;
+      const bw = size * 0.34;  // half base-width — narrowish for an arrow read
+      const pts = `${half},1 ${half + bw},${size - 1} ${half - bw},${size - 1}`;
+      const icon = L.divIcon({
+        className: 'vessel-tri',
+        html: `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" `
+          + `style="display:block;transform:rotate(${heading}deg);transform-origin:50% 50%;">`
+          + `<polygon points="${pts}" fill="${color}" stroke="${stroke}" `
+          + `stroke-width="2" stroke-linejoin="round"/></svg>`,
+        iconSize: [size, size], iconAnchor: [half, half],
+      });
+      marker = L.marker([v.lat, v.lon], { icon, opacity: fresh });
+    } else if (v.is_fsru) {
       // FSRUs are stationary hosts — draw a square, sized by tier like the
       // circles. Tier rings the box; freshness fades the whole marker.
       const box = Math.round(r * 1.9);

@@ -86,7 +86,8 @@ async def vessels(pool: asyncpg.Pool = Depends(get_pool)):
     rows = await pool.fetch(
         """
         SELECT
-            v.mmsi, f.lat, f.lon, f.fix_ts, f.sog, f.nav_status,
+            v.mmsi, f.lat, f.lon, f.fix_ts, f.sog, f.nav_status, f.cog,
+            pf.lat AS prev_lat, pf.lon AS prev_lon,
             v.vessel_name, v.flag, v.imo, v.is_lng_carrier, v.is_fsru,
             v.vf_vessel_type, v.design_draught,
             d.draught AS current_draught,
@@ -95,13 +96,23 @@ async def vessels(pool: asyncpg.Pool = Depends(get_pool)):
         FROM vessel_registry v
         LEFT JOIN priority_watchlist p USING (mmsi)
         CROSS JOIN LATERAL (
-            SELECT lat, lon, fix_ts, sog, nav_status
+            SELECT lat, lon, fix_ts, sog, nav_status, cog
             FROM ais_fixes
             WHERE mmsi = v.mmsi AND lat IS NOT NULL AND lon IS NOT NULL
               AND fix_ts > now() - INTERVAL '48 hours'
             ORDER BY fix_ts DESC
             LIMIT 1
         ) f
+        -- Previous fix: heading fallback for the marker triangle when COG is
+        -- not reported — the bearing of the last step is the travel direction.
+        LEFT JOIN LATERAL (
+            SELECT lat, lon
+            FROM ais_fixes
+            WHERE mmsi = v.mmsi AND lat IS NOT NULL AND lon IS NOT NULL
+              AND fix_ts > now() - INTERVAL '48 hours'
+            ORDER BY fix_ts DESC
+            OFFSET 1 LIMIT 1
+        ) pf ON TRUE
         LEFT JOIN LATERAL (
             SELECT draught, state_ts
             FROM vessel_state

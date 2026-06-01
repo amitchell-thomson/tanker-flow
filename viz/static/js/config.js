@@ -36,6 +36,25 @@ export function tierColor(tier) { return TIER_COLORS[tier] || '#34495e'; }
 const TIER_RADIUS = { 1: 8, 2: 7, 3: 6, 4: 5, 5: 4 };
 export function tierRadius(tier) { return TIER_RADIUS[tier] || 5.5; }
 
+// Vessels with SOG at or above this (knots) are drawn as a heading-pointing
+// triangle; below it they're treated as stationary (circle, or square for
+// FSRUs). 1 kn matches the pipeline's stationary boundary (anchored/moored are
+// detected at sog<1), so the map's "moving vs not" agrees with port_events.
+export const SOG_UNDERWAY_KN = 1.0;
+
+// Initial great-circle bearing from (lat1,lon1) to (lat2,lon2), in degrees
+// clockwise from north (0–360). Used as the triangle heading when COG is
+// unavailable: the direction implied by the step from the previous fix to the
+// current one.
+export function bearingDeg(lat1, lon1, lat2, lon2) {
+  const toRad = d => (d * Math.PI) / 180;
+  const lat1r = toRad(lat1), lat2r = toRad(lat2), dLon = toRad(lon2 - lon1);
+  const y = Math.sin(dLon) * Math.cos(lat2r);
+  const x = Math.cos(lat1r) * Math.sin(lat2r)
+          - Math.sin(lat1r) * Math.cos(lat2r) * Math.cos(dLon);
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
+
 // Fix freshness → fill opacity. Just-seen vessels burn bright; the longer
 // since their last fix, the more they fade.
 export function freshnessOpacity(fixTs) {
