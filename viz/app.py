@@ -4,7 +4,7 @@ import json
 import math
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import asyncpg
@@ -21,7 +21,16 @@ from matplotlib import colormaps
 from PIL import Image
 from starlette.concurrency import run_in_threadpool
 
-from config import AIS_BOUNDING_BOXES, settings
+from config import AIS_BOUNDING_BOXES, regime_of, settings
+from pipeline.legs import compute_legs
+from pipeline.signal import (
+    IMPORT_ZONE_CENTROIDS_SQL,
+    TERMINAL_METADATA_SQL,
+    build_lane_filter,
+    lane_legs,
+    leg_distance_nm,
+    legs_live_on,
+)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -782,3 +791,144 @@ async def signals(
     """
     rows = await pool.fetch(sql, *args)
     return [dict(r) for r in rows]
+
+
+# ── Signal traceability: drill from a charted value down to the legs/events that
+#    produced it, reusing pipeline.signal's exact selection logic so the
+#    drill-down can never disagree with the chart. ──────────────────────────────
+
+# count signal_key -> (port_events.event_type, terminals.flow_direction)
+_COUNT_SIGNALS = {
+    "eu_arrivals": ("moored", "import"),
+    "us_loadings": ("departed", "export"),
+}
+
+
+async def _leg_context(pool: asyncpg.Pool):
+    """Shared setup for the leg-based signal endpoints: recompute the classified
+    legs + the lane filter + import-zone centroids + an mmsi→name map."""
+    now = datetime.now(timezone.utc)
+    legs = await compute_legs(pool, now)
+    async with pool.acquire() as conn:
+        term_rows = await conn.fetch(TERMINAL_METADATA_SQL)
+        cent_rows = await conn.fetch(IMPORT_ZONE_CENTROIDS_SQL)
+        name_rows = await conn.fetch("SELECT mmsi, vessel_name FROM vessel_registry")
+    lane = build_lane_filter(term_rows)
+    centroids = {
+        r["zone"]: (r["lat"], r["lon"])
+        for r in cent_rows
+        if r["lat"] is not None and r["lon"] is not None
+    }
+    names = {r["mmsi"]: r["vessel_name"] for r in name_rows}
+    return now, legs, lane, centroids, names
+
+
+@app.get("/api/signals/overview")
+async def signals_overview(pool: asyncpg.Pool = Depends(get_pool)):
+    """Pipeline-health snapshot for the dashboard status strip: rebuild freshness,
+    panel span, legs in transit (open/closed), and the open-leg fallback-dest
+    share (the known soft spot in #1/#2)."""
+    now, legs, lane, centroids, _ = await _leg_context(pool)
+    base = lane_legs(legs, lane)
+    open_legs = [lg for lg in base if lg.status == "open_in_transit"]
+    fallback = sum(
+        1
+        for lg in open_legs
+        if leg_distance_nm(lg, centroids, fallback_zone=None) is None
+        and leg_distance_nm(lg, centroids) is not None
+    )
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT max(computed_at) AS rebuilt, min(bucket_date) AS pstart, "
+            "max(bucket_date) AS pend FROM signal_daily WHERE basis = 'physical'"
+        )
+        pe_rebuilt = await conn.fetchval("SELECT max(created_at) FROM port_events")
+    return {
+        "signals_rebuilt_at": row["rebuilt"],
+        "panel_start": row["pstart"],
+        "panel_end": row["pend"],
+        "legs_in_transit": len(base),
+        "open_legs": len(open_legs),
+        "closed_legs": len(base) - len(open_legs),
+        "fallback_dest": fallback,
+        "regime_now": regime_of(now),
+        "port_events_rebuilt_at": pe_rebuilt,
+    }
+
+
+@app.get("/api/signals/contributors")
+async def signals_contributors(
+    signal_key: str,
+    day: str | None = None,
+    zone_scope: str | None = None,
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    """The legs/events behind a charted value. Time-series signals drill by `day`
+    (#4/#9 → `kind='events'`; #1/#2/#20 → `kind='legs'`); the O-D matrix (#5) is a
+    lane aggregate, so it drills by `zone_scope` (the clicked lane)."""
+    if signal_key in _COUNT_SIGNALS:
+        target = date.fromisoformat(day)
+        event_type, flow = _COUNT_SIGNALS[signal_key]
+        rows = await pool.fetch(
+            """
+            SELECT pe.mmsi, pe.event_type, pe.event_time, pe.zone, pe.terminal_id,
+                   t.terminal_name, pe.laden_flag, pe.lat, pe.lon, v.vessel_name
+            FROM port_events pe
+            LEFT JOIN terminals t USING (terminal_id)
+            LEFT JOIN vessel_registry v USING (mmsi)
+            WHERE pe.event_type = $1 AND t.flow_direction = $2
+              AND pe.laden_flag IS TRUE AND pe.event_time::date = $3
+            ORDER BY pe.event_time
+            """,
+            event_type,
+            flow,
+            target,
+        )
+        return {"kind": "events", "rows": [dict(r) for r in rows]}
+
+    now, legs, lane, centroids, names = await _leg_context(pool)
+    if signal_key == "od_flow_count":
+        # Lane aggregate: all closed laden export legs in the clicked lane.
+        sel = [
+            lg
+            for lg in legs
+            if lg.status == "closed"
+            and lg.laden is True
+            and lane.is_export(lg.origin_zone)
+            and (zone_scope is None or f"{lg.origin_zone}->{lg.dest_zone}" == zone_scope)
+        ]
+        ref_date = now.date()  # age measured to "now" for completed-flow legs
+    else:
+        ref_date = date.fromisoformat(day)
+        sel = legs_live_on(legs, ref_date, lane)
+        if signal_key == "mean_laden_voyage_age_h":
+            sel = [lg for lg in sel if lg.status == "open_in_transit"]
+
+    out = []
+    for lg in sel:
+        dist = leg_distance_nm(lg, centroids)
+        if lg.status == "closed":
+            dist_source = "observed"
+        elif lg.dest_region and centroids.get(lg.dest_region):
+            dist_source = "declared"
+        else:
+            dist_source = "fallback"
+        out.append(
+            {
+                "mmsi": lg.mmsi,
+                "vessel_name": names.get(lg.mmsi),
+                "origin_zone": lg.origin_zone,
+                "dest_zone": lg.dest_zone or lg.dest_region,
+                "status": lg.status,
+                "departed_ts": lg.departed_ts,
+                "arrived_ts": lg.arrived_ts,
+                "dwt": lg.dwt,
+                "gas_capacity_m3": lg.gas_capacity_m3,
+                "distance_nm": dist,
+                "dist_source": dist_source,
+                "age_days": (ref_date - lg.departed_ts.date()).days,
+                "regime": lg.regime,
+                "ton_miles_dwt": (lg.dwt * dist) if (lg.dwt and dist) else None,
+            }
+        )
+    return {"kind": "legs", "rows": out}

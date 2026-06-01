@@ -1,6 +1,6 @@
 // Entry point: wire modules together, start initial loads + intervals.
 import { map, setBasemap, toggleLayer } from './map.js';
-import { loadVessels, markers, undim } from './vessels.js';
+import { loadVessels, markers, undim, selectVessel } from './vessels.js';
 import { loadTerminalZones, loadBoundingBoxes } from './zones.js';
 import { clearTrackAndEvents, hasTrack } from './track.js';
 import { loadEvents, initEventsPanelHandlers } from './events.js';
@@ -29,8 +29,13 @@ map.on('click', () => { if (hasTrack()) resetView(); });
 
 initEventsPanelHandlers();
 
-// Initial loads.
-loadVessels();
+// Initial loads. If arriving from the signals dashboard with ?focus=<mmsi>,
+// select that vessel once the markers exist so the map opens on the vessel
+// behind the clicked signal value.
+const focusMmsi = new URLSearchParams(location.search).get('focus');
+loadVessels().then(() => {
+  if (focusMmsi) selectVessel(Number(focusMmsi), `MMSI ${focusMmsi}`);
+});
 loadTerminalZones();
 loadBoundingBoxes();
 loadEvents();

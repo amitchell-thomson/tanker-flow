@@ -29,14 +29,15 @@ export const BASEMAPS = {
   },
 };
 
-// Vessel class → fill color. Only LNG carriers and FSRUs reach the map.
-export const FSRU_COLOR = '#e74c3c';
-export const CARRIER_COLOR = '#ff5fa2';
+// Vessel class → fill color (Catppuccin Mocha). Only LNG carriers and FSRUs
+// reach the map.
+export const FSRU_COLOR = '#f38ba8';     // red
+export const CARRIER_COLOR = '#f5c2e7';  // pink
 
-// priority_watchlist tier → marker stroke color. Tier 1 (in a terminal zone)
-// is hottest, tier 5 (stale) coldest; null = not on the watchlist.
-const TIER_COLORS = { 1: '#2ecc71', 2: '#f1c40f', 3: '#e67e22', 4: '#95a5a6', 5: '#566573' };
-export function tierColor(tier) { return TIER_COLORS[tier] || '#34495e'; }
+// priority_watchlist tier → marker stroke color (Mocha). Tier 1 (in a terminal
+// zone) is hottest, tier 5 (stale) coldest; null = not on the watchlist.
+const TIER_COLORS = { 1: '#a6e3a1', 2: '#f9e2af', 3: '#fab387', 4: '#a6adc8', 5: '#6c7086' };
+export function tierColor(tier) { return TIER_COLORS[tier] || '#45475a'; }
 
 // priority_watchlist tier → marker radius (px). Tier 1 (at a terminal) reads
 // largest so "what matters now" carries the most visual weight.
@@ -90,13 +91,13 @@ export function fmtTimeFull(iso) {
   return new Date(iso).toUTCString().replace(' GMT', ' UTC');
 }
 
-// Color per event_type (stays in sync with the .et-* CSS classes).
+// Color per event_type (Catppuccin Mocha; stays in sync with the .et-* CSS classes).
 export const EVENT_COLORS = {
-  zone_entry:      '#27ae60',
-  anchorage_entry: '#2980b9',
-  anchored:        '#1a5490',
-  anchorage_exit:  '#5dade2',
-  moored:          '#e67e22',
-  departed:        '#d35400',
-  zone_exit:       '#c0392b',
+  zone_entry:      '#a6e3a1', // green
+  anchorage_entry: '#74c7ec', // sapphire
+  anchored:        '#89b4fa', // blue
+  anchorage_exit:  '#94e2d5', // teal
+  moored:          '#fab387', // peach
+  departed:        '#eba0ac', // maroon
+  zone_exit:       '#f38ba8', // red
 };

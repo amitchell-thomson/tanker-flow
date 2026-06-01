@@ -1,24 +1,41 @@
-:root { --panel-w: 360px; }
-body { margin: 0; background: #0d1117; font-family: -apple-system, BlinkMacSystemFont, sans-serif; color: #ecf0f1; }
+/* ── Catppuccin Mocha theme tokens (shared by map + signals pages) ───────────
+   Palette: https://catppuccin.com/palette  ·  accent = blue (#89b4fa).
+   Fonts: Hanken Grotesk (UI) + JetBrains Mono (numerics) — loaded via <link>
+   in index.html / signals.html. */
+:root {
+  --base:#1e1e2e; --mantle:#181825; --crust:#11111b;
+  --surface0:#313244; --surface1:#45475a; --surface2:#585b70;
+  --overlay0:#6c7086; --overlay1:#7f849c;
+  --text:#cdd6f4; --subtext1:#bac2de; --subtext0:#a6adc8;
+  --accent:#89b4fa;            /* blue */
+  --green:#a6e3a1; --teal:#94e2d5; --sapphire:#74c7ec; --sky:#89dceb;
+  --peach:#fab387; --yellow:#f9e2af; --maroon:#eba0ac; --red:#f38ba8;
+  --mauve:#cba6f7; --lavender:#b4befe; --pink:#f5c2e7;
+  --sel: rgba(137, 180, 250, 0.14);   /* accent-tinted selection wash */
+  --font-sans: 'Hanken Grotesk', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
+  --panel-w: 360px;
+}
+body { margin: 0; background: var(--base); font-family: var(--font-sans); color: var(--text); }
 #layout { display: flex; height: 100vh; width: 100vw; }
 #map { flex: 1; height: 100vh; }
 #events-panel {
   width: var(--panel-w);
   height: 100vh;
-  background: #1f2733;
-  border-left: 1px solid #2c3e50;
+  background: var(--mantle);
+  border-left: 1px solid var(--surface0);
   display: flex;
   flex-direction: column;
   font-size: 13px;
 }
-#events-count, #fixes-count { color: #7f8c8d; font-weight: normal; font-size: 12px; margin-left: auto; }
+#events-count, #fixes-count { color: var(--subtext0); font-weight: normal; font-size: 12px; margin-left: auto; }
 /* Tab bar switching the panel between Port events and Recent fixes */
-#panel-tabs { display: flex; border-bottom: 1px solid #2c3e50; }
+#panel-tabs { display: flex; border-bottom: 1px solid var(--surface0); }
 .tab-btn {
   flex: 1;
   padding: 10px 12px;
-  background: #1f2733;
-  color: #7f8c8d;
+  background: var(--mantle);
+  color: var(--subtext0);
   border: none;
   border-bottom: 2px solid transparent;
   cursor: pointer;
@@ -26,20 +43,20 @@ body { margin: 0; background: #0d1117; font-family: -apple-system, BlinkMacSyste
   font-weight: 600;
   font-family: inherit;
 }
-.tab-btn:hover { background: #29333f; color: #bdc3c7; }
-.tab-btn.active { color: #3498db; border-bottom-color: #3498db; }
+.tab-btn:hover { background: var(--surface0); color: var(--subtext1); }
+.tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
 .panel-view { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 #events-filters {
   padding: 8px 12px;
-  border-bottom: 1px solid #2c3e50;
+  border-bottom: 1px solid var(--surface0);
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
 }
 #events-filters select {
-  background: #2c3e50;
-  color: #ecf0f1;
-  border: 1px solid #3a4a5a;
+  background: var(--surface0);
+  color: var(--text);
+  border: 1px solid var(--surface1);
   border-radius: 3px;
   padding: 3px 6px;
   font-size: 12px;
@@ -48,72 +65,72 @@ body { margin: 0; background: #0d1117; font-family: -apple-system, BlinkMacSyste
 /* Recent-fixes feed rows */
 #fixes-filters {
   padding: 8px 12px;
-  border-bottom: 1px solid #2c3e50;
+  border-bottom: 1px solid var(--surface0);
   display: flex;
   align-items: center;
   gap: 10px;
 }
 #fixes-filters select {
-  background: #2c3e50;
-  color: #ecf0f1;
-  border: 1px solid #3a4a5a;
+  background: var(--surface0);
+  color: var(--text);
+  border: 1px solid var(--surface1);
   border-radius: 3px;
   padding: 3px 6px;
   font-size: 12px;
 }
-#fixes-filters label { font-size: 12px; color: #95a5a6; display: flex; align-items: center; gap: 4px; }
+#fixes-filters label { font-size: 12px; color: var(--subtext0); display: flex; align-items: center; gap: 4px; }
 .fix-row {
   padding: 7px 12px;
-  border-bottom: 1px solid #2a3340;
+  border-bottom: 1px solid var(--surface0);
   cursor: pointer;
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
-.fix-row:hover { background: #29333f; }
-.fix-row.fresh { border-left: 3px solid #2ecc71; padding-left: 9px; }
+.fix-row:hover { background: var(--surface0); }
+.fix-row.fresh { border-left: 3px solid var(--green); padding-left: 9px; }
 .fix-row-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
 .fix-vessel { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.fix-age { color: #7f8c8d; font-size: 11px; font-family: monospace; white-space: nowrap; }
-.fix-row-bottom { display: flex; gap: 6px; align-items: center; font-size: 11px; color: #95a5a6; font-family: monospace; }
+.fix-age { color: var(--subtext0); font-size: 11px; font-family: var(--font-mono); white-space: nowrap; }
+.fix-row-bottom { display: flex; gap: 6px; align-items: center; font-size: 11px; color: var(--subtext0); font-family: var(--font-mono); }
 /* Vessel-class + tier chips, shared by the fixes feed */
 .chip { padding: 1px 5px; border-radius: 2px; font-size: 10px; font-weight: 600; }
-.chip-fsru    { background: #e74c3c; color: white; }
-.chip-carrier { background: #ff5fa2; color: white; }
-.chip-unknown { background: #34495e; color: #95a5a6; }
-.tier { padding: 1px 5px; border-radius: 2px; font-size: 10px; font-weight: 700; color: #11161c; }
-.tier-1 { background: #2ecc71; }
-.tier-2 { background: #f1c40f; }
-.tier-3 { background: #e67e22; }
-.tier-4 { background: #95a5a6; }
-.tier-5 { background: #566573; color: #ecf0f1; }
+.chip-fsru    { background: var(--red); color: var(--crust); }
+.chip-carrier { background: var(--pink); color: var(--crust); }
+.chip-unknown { background: var(--surface1); color: var(--subtext0); }
+.tier { padding: 1px 5px; border-radius: 2px; font-size: 10px; font-weight: 700; color: var(--crust); }
+.tier-1 { background: var(--green); }
+.tier-2 { background: var(--yellow); }
+.tier-3 { background: var(--peach); }
+.tier-4 { background: var(--subtext0); }
+.tier-5 { background: var(--overlay0); color: var(--text); }
 .event-row {
   padding: 8px 12px;
-  border-bottom: 1px solid #2a3340;
+  border-bottom: 1px solid var(--surface0);
   cursor: pointer;
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
-.event-row:hover { background: #29333f; }
-.event-row.selected { background: #2d3e50; border-left: 3px solid #3498db; padding-left: 9px; }
+.event-row:hover { background: var(--surface0); }
+.event-row.selected { background: var(--sel); border-left: 3px solid var(--accent); padding-left: 9px; }
 .event-row-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
-.event-vessel { font-weight: 600; color: #ecf0f1; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.event-time { color: #7f8c8d; font-size: 11px; font-family: monospace; white-space: nowrap; }
+.event-vessel { font-weight: 600; color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.event-time { color: var(--subtext0); font-size: 11px; font-family: var(--font-mono); white-space: nowrap; }
 .event-row-bottom { display: flex; gap: 6px; align-items: center; font-size: 12px; }
-.event-pill { padding: 1px 6px; border-radius: 3px; font-size: 11px; font-family: monospace; }
-.event-terminal { color: #95a5a6; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.event-pill { padding: 1px 6px; border-radius: 3px; font-size: 11px; font-family: var(--font-mono); color: var(--crust); }
+.event-terminal { color: var(--subtext0); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .badge { padding: 1px 5px; border-radius: 2px; font-size: 10px; font-weight: 600; }
-.badge-laden { background: #16a085; color: white; }
-.badge-ballast { background: #34495e; color: #95a5a6; }
-.badge-cold { background: #e67e22; color: white; }
-.badge-fsru { background: #e74c3c; color: white; }
+.badge-laden { background: var(--teal); color: var(--crust); }
+.badge-ballast { background: var(--surface1); color: var(--subtext0); }
+.badge-cold { background: var(--peach); color: var(--crust); }
+.badge-fsru { background: var(--red); color: var(--crust); }
 /* Floating HUD surfaces — translucent dark cards that read as one system */
 .hud {
   position: absolute;
   z-index: 1000;
-  background: rgba(20, 26, 34, 0.82);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(17, 17, 27, 0.82);   /* crust @ 82% */
+  border: 1px solid rgba(205, 214, 244, 0.10);
   border-radius: 8px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
   backdrop-filter: blur(8px);
@@ -124,25 +141,25 @@ body { margin: 0; background: #0d1117; font-family: -apple-system, BlinkMacSyste
   top: 52px;
   right: calc(var(--panel-w) + 12px);
   padding: 7px 13px;
-  color: #ecf0f1;
+  color: var(--text);
   cursor: pointer;
   font-size: 13px;
   font-family: inherit;
 }
-#reset-btn:hover { background: rgba(52, 73, 94, 0.6); }
+#reset-btn:hover { background: rgba(69, 71, 90, 0.6); }
 /* Link to the market-signals dashboard. Sits top-right above the (transient)
    reset button so the two never overlap. */
 #nav-signals {
   top: 12px;
   right: calc(var(--panel-w) + 12px);
   padding: 7px 13px;
-  color: #3498db;
+  color: var(--accent);
   text-decoration: none;
   font-size: 13px;
   font-weight: 600;
   font-family: inherit;
 }
-#nav-signals:hover { background: rgba(52, 152, 219, 0.15); }
+#nav-signals:hover { background: rgba(137, 180, 250, 0.15); }
 #layer-controls {
   top: 12px;
   left: 52px;
@@ -154,33 +171,33 @@ body { margin: 0; background: #0d1117; font-family: -apple-system, BlinkMacSyste
 .layer-btn {
   padding: 5px 10px;
   background: transparent;
-  color: #bdc3c7;
+  color: var(--subtext1);
   border: 1px solid transparent;
   border-radius: 5px;
   cursor: pointer;
   font-size: 12px;
   font-family: inherit;
 }
-.layer-btn.active { background: rgba(52, 152, 219, 0.18); color: #3498db; }
-.layer-btn:hover:not(.active) { background: rgba(255, 255, 255, 0.06); }
+.layer-btn.active { background: rgba(137, 180, 250, 0.18); color: var(--accent); }
+.layer-btn:hover:not(.active) { background: rgba(205, 214, 244, 0.06); }
 #basemap-select {
   background: transparent;
-  color: #bdc3c7;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--subtext1);
+  border: 1px solid rgba(205, 214, 244, 0.12);
   border-radius: 5px;
   padding: 4px 6px;
   font-size: 12px;
   font-family: inherit;
   cursor: pointer;
 }
-#basemap-select option { background: #1f2733; color: #ecf0f1; }
+#basemap-select option { background: var(--mantle); color: var(--text); }
 #status {
   bottom: 12px;
   left: 12px;
   padding: 6px 12px;
-  color: #bdc3c7;
+  color: var(--subtext1);
   font-size: 11px;
-  font-family: monospace;
+  font-family: var(--font-mono);
   max-width: 40vw;
 }
 /* Live ingestion pulse — fix rate + a dot that breathes while data flows */
@@ -193,15 +210,15 @@ body { margin: 0; background: #0d1117; font-family: -apple-system, BlinkMacSyste
   align-items: center;
   gap: 8px;
   font-size: 12px;
-  font-family: monospace;
-  color: #bdc3c7;
+  font-family: var(--font-mono);
+  color: var(--subtext1);
 }
-#live-dot { width: 9px; height: 9px; border-radius: 50%; background: #7f8c8d; flex: none; }
-#live-dot.live { background: #2ecc71; animation: live-pulse 1.8s ease-in-out infinite; }
-#live-dot.stale { background: #e74c3c; }
+#live-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--overlay0); flex: none; }
+#live-dot.live { background: var(--green); animation: live-pulse 1.8s ease-in-out infinite; }
+#live-dot.stale { background: var(--red); }
 @keyframes live-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(46, 204, 113, 0.55); }
-  50%      { box-shadow: 0 0 0 6px rgba(46, 204, 113, 0); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(166, 227, 161, 0.55); }
+  50%      { box-shadow: 0 0 0 6px rgba(166, 227, 161, 0); }
 }
 /* Map legend — decodes the marker encoding (class / tier ring / freshness) */
 #legend {
@@ -209,48 +226,48 @@ body { margin: 0; background: #0d1117; font-family: -apple-system, BlinkMacSyste
   right: calc(var(--panel-w) + 12px);
   padding: 9px 11px;
   font-size: 11px;
-  color: #bdc3c7;
+  color: var(--subtext1);
   line-height: 1.5;
   width: 150px;
 }
-#legend .legend-title { font-weight: 600; color: #ecf0f1; margin: 7px 0 3px; }
+#legend .legend-title { font-weight: 600; color: var(--text); margin: 7px 0 3px; }
 #legend .legend-title:first-child { margin-top: 0; }
 #legend .legend-row { display: flex; align-items: center; gap: 6px; }
 #legend .swatch { width: 11px; height: 11px; border-radius: 50%; flex: none; }
 #legend .swatch.sq { border-radius: 2px; }
 #legend .tier-scale { display: flex; gap: 3px; margin-top: 2px; }
-#legend .tier-scale span { flex: 1; text-align: center; border-radius: 2px; font-size: 9px; font-weight: 700; color: #11161c; padding: 1px 0; }
-#legend .fade-bar { height: 9px; border-radius: 2px; margin-top: 3px; background: linear-gradient(90deg, #ff5fa2 0%, rgba(255,95,162,0.16) 100%); }
-#legend .fade-labels { display: flex; justify-content: space-between; font-size: 9px; color: #7f8c8d; margin-top: 1px; }
+#legend .tier-scale span { flex: 1; text-align: center; border-radius: 2px; font-size: 9px; font-weight: 700; color: var(--crust); padding: 1px 0; }
+#legend .fade-bar { height: 9px; border-radius: 2px; margin-top: 3px; background: linear-gradient(90deg, var(--pink) 0%, rgba(245, 194, 231, 0.16) 100%); }
+#legend .fade-labels { display: flex; justify-content: space-between; font-size: 9px; color: var(--subtext0); margin-top: 1px; }
 /* Dark-theme the Leaflet chrome (zoom, attribution, popups, tooltips) */
 .leaflet-control-zoom a {
-  background: rgba(20, 26, 34, 0.85); color: #ecf0f1;
-  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(17, 17, 27, 0.85); color: var(--text);
+  border-color: rgba(205, 214, 244, 0.1);
 }
-.leaflet-control-zoom a:hover { background: rgba(52, 73, 94, 0.9); }
-.leaflet-bar { border: 1px solid rgba(255, 255, 255, 0.1); }
+.leaflet-control-zoom a:hover { background: rgba(49, 50, 68, 0.95); }
+.leaflet-bar { border: 1px solid rgba(205, 214, 244, 0.1); }
 .leaflet-control-attribution {
-  background: rgba(20, 26, 34, 0.7) !important; color: #7f8c8d !important;
+  background: rgba(17, 17, 27, 0.7) !important; color: var(--subtext0) !important;
 }
-.leaflet-control-attribution a { color: #95a5a6 !important; }
+.leaflet-control-attribution a { color: var(--subtext0) !important; }
 .leaflet-popup-content-wrapper, .leaflet-popup-tip {
-  background: #1f2733; color: #ecf0f1; box-shadow: 0 3px 14px rgba(0, 0, 0, 0.5);
+  background: var(--mantle); color: var(--text); box-shadow: 0 3px 14px rgba(0, 0, 0, 0.5);
 }
 .leaflet-popup-content { font-size: 12px; }
-.leaflet-container a.leaflet-popup-close-button { color: #95a5a6; }
+.leaflet-container a.leaflet-popup-close-button { color: var(--subtext0); }
 .leaflet-tooltip {
-  background: #1f2733; color: #ecf0f1; border: 1px solid #2c3e50;
+  background: var(--mantle); color: var(--text); border: 1px solid var(--surface0);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
 }
-.leaflet-tooltip-top::before { border-top-color: #1f2733; }
-.leaflet-tooltip-bottom::before { border-bottom-color: #1f2733; }
-.leaflet-tooltip-left::before { border-left-color: #1f2733; }
-.leaflet-tooltip-right::before { border-right-color: #1f2733; }
-/* Event-type color pills (also used as the map icon colors) */
-.et-zone_entry      { background: #27ae60; color: white; }
-.et-anchorage_entry { background: #2980b9; color: white; }
-.et-anchored        { background: #1a5490; color: white; }
-.et-anchorage_exit  { background: #5dade2; color: white; }
-.et-moored          { background: #e67e22; color: white; }
-.et-departed        { background: #d35400; color: white; }
-.et-zone_exit       { background: #c0392b; color: white; }
+.leaflet-tooltip-top::before { border-top-color: var(--mantle); }
+.leaflet-tooltip-bottom::before { border-bottom-color: var(--mantle); }
+.leaflet-tooltip-left::before { border-left-color: var(--mantle); }
+.leaflet-tooltip-right::before { border-right-color: var(--mantle); }
+/* Event-type color pills (also used as the map icon colors; mirror EVENT_COLORS) */
+.et-zone_entry      { background: var(--green); }
+.et-anchorage_entry { background: var(--sapphire); }
+.et-anchored        { background: var(--accent); }
+.et-anchorage_exit  { background: var(--teal); }
+.et-moored          { background: var(--peach); }
+.et-departed        { background: var(--maroon); }
+.et-zone_exit       { background: var(--red); }

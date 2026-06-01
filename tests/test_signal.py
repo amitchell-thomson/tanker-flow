@@ -16,6 +16,7 @@ from pipeline.signal import (
     daily_buckets,
     lane_legs,
     leg_distance_nm,
+    legs_live_on,
     od_matrix,
     reconstruct_ton_miles,
     reconstruct_voyage_age,
@@ -237,6 +238,23 @@ def test_voyage_age_mean():
     d5 = at(5).date()
     # ageA = 5d, ageB = 3d → mean = 4d = 96h.
     assert by[("mean_laden_voyage_age_h", d5, "usgulf->eu", "all")] == 96.0
+
+
+def test_legs_live_on():
+    legs = [
+        mk_leg(status="closed", departed_ts=at(0), arrived_ts=at(3), dest_zone="nweurope"),
+        mk_leg(status="open_in_transit", departed_ts=at(1)),
+        mk_leg(status="same_zone", dest_zone="usgulf"),  # not in lane → excluded
+    ]
+    # Mid-voyage day: both the closed (departed≤d<arrived) and open legs are live.
+    assert sorted(lg.status for lg in legs_live_on(legs, at(2).date(), LANE)) == [
+        "closed",
+        "open_in_transit",
+    ]
+    # Arrival day: the closed leg is no longer live (half-open); the open one is.
+    assert [lg.status for lg in legs_live_on(legs, at(3).date(), LANE)] == ["open_in_transit"]
+    # Before the open leg departed: only the closed leg is live.
+    assert [lg.status for lg in legs_live_on(legs, at(0).date(), LANE)] == ["closed"]
 
 
 def test_voyage_age_ignores_closed_legs():

@@ -230,6 +230,19 @@ def leg_distance_nm(
     return haversine_nm(leg.departed_lat, leg.departed_lon, centroid[0], centroid[1])
 
 
+def legs_live_on(legs: list[Leg], target: date, lane: LaneFilter) -> list[Leg]:
+    """The in-transit-base legs that are live on `target` — i.e. exactly the legs
+    the ton-mile / voyage-age reconstruction counts on that day (`departed ≤ target
+    < arrived`, open legs run through `target`). Used by the viz drill-down so the
+    contributor list can never disagree with the charted value."""
+    out: list[Leg] = []
+    for leg in lane_legs(legs, lane):
+        start, end_excl = _live_interval(leg, target)
+        if start <= target < end_excl:
+            out.append(leg)
+    return out
+
+
 def _accumulate_daily(
     legs: list[Leg],
     days: list[date],
