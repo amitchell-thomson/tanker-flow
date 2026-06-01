@@ -190,6 +190,47 @@ CREATE TABLE tier_promotions (
 CREATE INDEX ix_tier_promotions_promoted_at ON tier_promotions (promoted_at DESC);
 
 
+-- VesselFinder rescue log: append-only audit trail AND credit-budget ledger for
+-- ingestion/vf_rescue.py. Each row records one VF live-positions lookup attempt
+-- for a high-value vessel that went AIS-silent. `credits` is the billed weight
+-- (1 terrestrial / 10 satellite / 0 none); today's SUM(credits) is the
+-- restart-safe daily-spend ledger, and a per-mmsi recency check is the cooldown.
+-- requested_imos/returned_rows let us reconcile the per-returned-row billing
+-- assumption against the VF dashboard on the first live run.
+CREATE TABLE vf_rescue_log (
+    id             BIGSERIAL   PRIMARY KEY,
+    requested_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    mmsi           BIGINT      NOT NULL,
+    imo            BIGINT,
+    vessel_name    TEXT,
+    rescue_class   TEXT        NOT NULL,   -- inport|open_leg|eta|tier2|manual
+    sat            BOOLEAN     NOT NULL DEFAULT FALSE,
+    src            TEXT,                    -- TER|SAT|NULL (no position returned)
+    result         TEXT        NOT NULL CHECK (result IN (
+                       'rescued','no_position','rejected_stale',
+                       'rejected_teleport','error','dry_run')),
+    credits        SMALLINT    NOT NULL DEFAULT 0,
+    requested_imos SMALLINT,
+    returned_rows  SMALLINT,
+    fix_ts         TIMESTAMPTZ,             -- VF position timestamp (NULL if none)
+    detail         TEXT,
+    recheck_at     TIMESTAMPTZ              -- vessel eligible again after this (variable cooldown)
+);
+CREATE INDEX ix_vf_rescue_log_requested_at   ON vf_rescue_log (requested_at DESC);
+CREATE INDEX ix_vf_rescue_log_mmsi_requested ON vf_rescue_log (mmsi, requested_at DESC);
+
+
+-- VesselFinder account balance snapshots from the free /status endpoint. The
+-- rescue worker appends a row each run; the TUI shows the latest credits +
+-- expiry, and consecutive rows give the true burn rate.
+CREATE TABLE vf_account_status (
+    checked_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    credits         INTEGER     NOT NULL,
+    expiration_date TIMESTAMPTZ
+);
+CREATE INDEX ix_vf_account_status_checked_at ON vf_account_status (checked_at DESC);
+
+
 -- Ingestion lifecycle events: append-only.
 -- event_type values: 'connect','subscribed','planned_reconnect','disconnect','error','final_flush'
 CREATE TABLE ingestion_events (

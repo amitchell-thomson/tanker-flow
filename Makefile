@@ -1,4 +1,4 @@
-.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events scoring refresh-fleet
+.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events scoring vf-rescue vf-rescue-dry vf-status refresh-fleet
 
 up:
 	docker compose up -d
@@ -49,6 +49,18 @@ seed-unlocodes:
 
 scoring:
 	uv run python -m pipeline.scoring
+
+# VesselFinder rescue: fetch live positions for high-value AIS-silent vessels.
+# Credit-budgeted. Use vf-rescue-dry first for a no-spend candidate/cost preview.
+vf-rescue:
+	uv run python -m ingestion.vf_rescue
+
+vf-rescue-dry:
+	uv run python -m ingestion.vf_rescue --dry-run
+
+# Fetch + store the VF account balance (free /status call).
+vf-status:
+	uv run python -m ingestion.vf_rescue --status
 
 # Periodic refresh of the global LNG/FSRU fleet from the IGU report.
 # Step 1 (manual): download the latest "IGU World LNG Report" PDF from

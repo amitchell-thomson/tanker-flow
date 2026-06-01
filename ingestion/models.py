@@ -110,3 +110,51 @@ class VesselFinderMasterdata(BaseModel):
 
 class VesselFinderResponse(BaseModel):
     MASTERDATA: VesselFinderMasterdata
+
+
+class VesselFinderAIS(BaseModel):
+    """One live AIS position from the VesselFinder `/vessels` endpoint.
+
+    Fields mirror the API response verbatim (uppercase). Sentinel-nulling follows
+    the same conventions as the AISstream models above: COURSE 360 = "not
+    available", HEADING 511 = "not available", DRAUGHT 0 = "unreported".
+    TIMESTAMP and ETA are kept as raw strings and parsed downstream in
+    ingestion.vf_rescue (parse_vf_timestamp / vf_eta_to_ais_dict). Extra fields
+    in the response (NAME, CALLSIGN, TYPE, ZONE, ECA, A/B/C/D, …) are ignored.
+    """
+
+    MMSI: int
+    IMO: Optional[int] = None
+    TIMESTAMP: str
+    LATITUDE: float
+    LONGITUDE: float
+    COURSE: Optional[float] = None
+    SPEED: Optional[float] = None
+    HEADING: Optional[float] = None
+    NAVSTAT: Optional[int] = None
+    DESTINATION: Optional[str] = None
+    LOCODE: Optional[str] = None
+    ETA: Optional[str] = None
+    DRAUGHT: Optional[float] = None
+    SRC: Optional[str] = None
+
+    @field_validator("COURSE")
+    @classmethod
+    def null_unavailable_course(cls, v):
+        # AIS "course not available" = 360. Valid COG is 0–359.9°.
+        return None if v is None or v == 360.0 else v
+
+    @field_validator("HEADING")
+    @classmethod
+    def null_unavailable_heading(cls, v):
+        # AIS "heading not available" = 511.
+        return None if v is None or v == 511.0 else v
+
+    @field_validator("DRAUGHT")
+    @classmethod
+    def null_zero_draught(cls, v):
+        return None if v == 0.0 else v
+
+
+class VesselFinderLiveResponse(BaseModel):
+    AIS: VesselFinderAIS
