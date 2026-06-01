@@ -10,13 +10,18 @@ Tier definitions (also documented in CLAUDE.md):
     1 — recent fix inside any terminal_zones polygon (within 3d) — must be
         plausibly *currently* in zone, not "was there a week ago and is now
         mid-Atlantic"
-    2 — vessel_state.dest parses to a known terminal, state_ts < 14d old
-    3 — recent fix inside any config.ZONES rectangle (within 14d), not 1/2
+    2 — vessel_state.dest parses to a known terminal AND (state_ts < 14d old
+        OR a parsed ETA within ETA_IMMINENT_HOURS — the ETA path rescues
+        long-voyage vessels whose declaration is stale but arrival is near)
+    3 — recent fix inside any config.ZONES rectangle (within 14d), not 1/2;
+        ordered within-tier by closing-ness (proximity + heading to the nearest
+        zone, see _closing_bonus) so the scarce slots go to vessels approaching
     4 — any fix in the last 7d (not 1-3) — recently active globally
     5 — fix in 7-90d OR no fix at all (everything else)
 
-Tiers 1-3 fill the persistent slot pool (top 100 by score). Tiers 4-5 fill the
-scan rotation pool (50 oldest first).
+Tiers 1-3 fill the persistent slot pool (top 100 by score). Tier-3 vessels that
+don't win a persistent slot, plus tiers 4-5, fill the scan rotation pool — see
+ingestion.aisstream.load_scan_mmsis.
 
 Run via `make scoring` or as a background task inside `aisstream.py`. Sub-second
 runtime; idempotent (full UPSERT each pass).
@@ -62,7 +67,7 @@ WITH lng_fleet AS (
     WHERE (is_lng_carrier OR is_fsru) AND NOT excluded
 ),
 candidate_fixes AS (
-    SELECT a.mmsi, a.fix_ts, a.lat, a.lon
+    SELECT a.mmsi, a.fix_ts, a.lat, a.lon, a.cog
     FROM ais_fixes a
     WHERE a.fix_ts > now() - INTERVAL '14 days'
       AND EXISTS (SELECT 1 FROM lng_fleet l WHERE l.mmsi = a.mmsi)
@@ -110,6 +115,38 @@ latest_state AS (
     WHERE vs.state_ts > now() - INTERVAL '90 days'
       AND EXISTS (SELECT 1 FROM lng_fleet l WHERE l.mmsi = vs.mmsi)
     ORDER BY vs.mmsi, vs.state_ts DESC
+),
+-- Most recent position (+ course) per candidate vessel, used to measure how
+-- close it is to entering a terminal and whether it is heading that way.
+-- Drives the tier-3 closing-ness ordering (see _closing_bonus).
+latest_pos AS (
+    SELECT DISTINCT ON (mmsi) mmsi, lat, lon, cog
+    FROM candidate_fixes
+    ORDER BY mmsi, fix_ts DESC
+),
+nearest_zone AS (
+    SELECT
+        lp.mmsi,
+        lp.cog,
+        d.dist_km,
+        -- Bearing from the vessel to the nearest zone's centroid (0-360).
+        -- Compared against cog to decide if the vessel is closing on it.
+        degrees(ST_Azimuth(
+            ST_SetSRID(ST_Point(lp.lon, lp.lat), 4326)::geography,
+            d.centroid::geography
+        )) AS bearing_deg
+    FROM latest_pos lp
+    CROSS JOIN LATERAL (
+        SELECT
+            ST_Distance(
+                ST_SetSRID(ST_Point(lp.lon, lp.lat), 4326)::geography,
+                tz.geom::geography
+            ) / 1000.0 AS dist_km,
+            ST_Centroid(tz.geom) AS centroid
+        FROM terminal_zones tz
+        ORDER BY ST_SetSRID(ST_Point(lp.lon, lp.lat), 4326) <-> tz.geom
+        LIMIT 1
+    ) d
 )
 SELECT
     f.mmsi,
@@ -121,11 +158,15 @@ SELECT
     fs.last_bbox_fix_ts,
     ls.dest,
     ls.eta,
-    ls.state_ts
+    ls.state_ts,
+    nz.dist_km,
+    nz.bearing_deg,
+    nz.cog AS last_cog
 FROM lng_fleet f
 LEFT JOIN last_fix_global lfg USING (mmsi)
 LEFT JOIN fix_stats fs USING (mmsi)
 LEFT JOIN latest_state ls USING (mmsi)
+LEFT JOIN nearest_zone nz USING (mmsi)
 """
 
 
@@ -184,6 +225,54 @@ async def load_unlocode_map(conn: asyncpg.Connection) -> dict[str, int]:
     return {r["unlocode"]: r["terminal_id"] for r in rows}
 
 
+# --- Predictive promotion + closing-ness tuning (watchlist coverage) ---
+#
+# Item 2 — imminent-ETA promotion. A vessel with a destination that resolves to
+# a known terminal AND a parsed ETA within this horizon is force-promoted into
+# the persistent band (tier 2) even when its vessel_state is older than the
+# 14-day tier-2 freshness window. An imminent ETA is itself a freshness signal,
+# and these are exactly the inbound vessels we must not lose to tier-decay on a
+# long voyage. Gated on a resolved terminal: an ETA to an unrecognised port is
+# not actionable enough to spend a scarce persistent slot on.
+ETA_IMMINENT_HOURS = 48
+# Large base so imminent-ETA vessels sort above plain dest-declarations within
+# tier 2 (sooner ETA ⇒ higher score). Well above epoch-second scores (~1.7e9)
+# yet representable in the REAL score column.
+ETA_SCORE_BASE = 1.0e10
+
+# Item 3 — tier-3 closing-ness. Tier 3 ("seen in the wider zone bbox within
+# 14d") has more vessels than persistent slots, so the within-tier ordering
+# decides which ones hold a slot. Bias it toward vessels physically near a
+# terminal and heading toward it, rather than pure fix-recency. Bonuses are in
+# seconds so they compose with the epoch-second score base (same convention as
+# _ZONE_TYPE_BONUS_S below).
+PROX_RANGE_KM = 300.0  # only vessels within this of the nearest zone earn a bonus
+PROX_BONUS_MAX_S = (
+    3 * 86400
+)  # at 0 km from the nearest zone edge, scaled to 0 at PROX_RANGE_KM
+CLOSING_BONUS_S = (
+    1 * 86400
+)  # cog points within CLOSING_MAX_ANGLE_DEG of the bearing to the zone
+CLOSING_MAX_ANGLE_DEG = 60.0
+
+
+def _closing_bonus(
+    dist_km: float | None, bearing_deg: float | None, cog: float | None
+) -> float:
+    """Seconds-equivalent score bonus for a tier-3 vessel that is near a
+    terminal zone and (optionally) heading toward it. Zero outside PROX_RANGE_KM
+    or when position is unknown."""
+    if dist_km is None or dist_km >= PROX_RANGE_KM:
+        return 0.0
+    bonus = PROX_BONUS_MAX_S * (1.0 - dist_km / PROX_RANGE_KM)
+    if cog is not None and bearing_deg is not None:
+        # Smallest signed angle between course and bearing-to-zone, in [0, 180].
+        diff = abs((cog - bearing_deg + 180.0) % 360.0 - 180.0)
+        if diff <= CLOSING_MAX_ANGLE_DEG:
+            bonus += CLOSING_BONUS_S
+    return bonus
+
+
 # Within-tier-1 score bonus by zone_type. Berth fixes mean the vessel is
 # actively at a terminal — the highest-signal state for `moored`/`departed`
 # event timing. Bonuses are in seconds so they're directly comparable with
@@ -227,6 +316,10 @@ def assign_tier(
     last_fix_ts: datetime | None,
     dest_terminal_id: int | None,
     state_ts: datetime | None,
+    parsed_eta: datetime | None,
+    dist_km: float | None,
+    bearing_deg: float | None,
+    last_cog: float | None,
     now: datetime,
 ) -> tuple[int, str, float]:
     """Return (tier, reason, score_value) for a single vessel.
@@ -247,7 +340,21 @@ def assign_tier(
         )
         return (1, f"in-zone:{label} @ {ts:%Y-%m-%d}", score)
 
-    if dest_terminal_id and state_ts and state_ts > fourteen_days:
+    # Tier 2 — declared inbound to a known terminal. Fires on EITHER a fresh
+    # vessel_state (state_ts < 14d) OR an imminent parsed ETA regardless of
+    # state age. The ETA path rescues long-voyage vessels whose "bound for X"
+    # declaration is now stale but whose arrival is imminent (Item 2).
+    eta_imminent = parsed_eta is not None and now <= parsed_eta <= now + timedelta(
+        hours=ETA_IMMINENT_HOURS
+    )
+    if dest_terminal_id and ((state_ts and state_ts > fourteen_days) or eta_imminent):
+        if eta_imminent:
+            hours_to_eta = (parsed_eta - now).total_seconds() / 3600.0
+            return (
+                2,
+                f"eta:terminal_id={dest_terminal_id} in {hours_to_eta:.0f}h",
+                ETA_SCORE_BASE - (parsed_eta - now).total_seconds(),
+            )
         return (
             2,
             f"dest:terminal_id={dest_terminal_id} @ {state_ts:%Y-%m-%d}",
@@ -255,10 +362,13 @@ def assign_tier(
         )
 
     if last_bbox_fix_ts and last_bbox_fix_ts > fourteen_days:
+        score = last_bbox_fix_ts.timestamp() + _closing_bonus(
+            dist_km, bearing_deg, last_cog
+        )
         return (
             3,
             f"in-zone:bbox @ {last_bbox_fix_ts:%Y-%m-%d}",
-            last_bbox_fix_ts.timestamp(),
+            score,
         )
 
     if last_fix_ts and last_fix_ts > seven_days:
@@ -307,6 +417,38 @@ async def load_open_leg_pins(conn: asyncpg.Connection) -> set[int]:
     return {r["mmsi"] for r in rows}
 
 
+# In-port pin: a vessel whose most recent port_event is an in-port state (it has
+# entered/anchored/moored and not yet departed) is physically in a berth queue
+# or alongside, generating the moored/departed events the signal needs. The
+# 3-day tier-1 window plus the self-referential watchlist (a vessel only emits
+# in-zone fixes while subscribed) means a long port queue can decay out of the
+# persistent block and then stay dark — a self-reinforcing blind spot. Pinning
+# any vessel still "open" in a visit guarantees its slot until it departs.
+# Bounded by recency + a cap so it can't crowd out the tier band (see Item 4).
+INPORT_PIN_LOOKBACK_DAYS = 20
+INPORT_PIN_MAX = 30
+
+INPORT_PIN_SQL = """
+WITH last_event AS (
+    SELECT DISTINCT ON (pe.mmsi) pe.mmsi, pe.event_type, pe.event_time
+    FROM port_events pe
+    WHERE pe.event_time > now() - make_interval(days => $1)
+    ORDER BY pe.mmsi, pe.event_time DESC
+)
+SELECT mmsi FROM last_event
+WHERE event_type NOT IN ('departed', 'zone_exit')
+ORDER BY event_time DESC
+LIMIT $2
+"""
+
+
+async def load_inport_pins(conn: asyncpg.Connection) -> set[int]:
+    """MMSIs currently 'open' in a port visit (last event is not a departure) —
+    see INPORT_PIN_* and the SQL comment above."""
+    rows = await conn.fetch(INPORT_PIN_SQL, INPORT_PIN_LOOKBACK_DAYS, INPORT_PIN_MAX)
+    return {r["mmsi"] for r in rows}
+
+
 # A promotion is "notable" (worth logging) when a vessel moves UP into the
 # persistent-subscription band (tiers 1-3) — i.e. it just became important
 # enough to hold a guaranteed slot. Movements within 4/5 aren't logged.
@@ -351,8 +493,13 @@ async def compute_and_upsert(pool: asyncpg.Pool) -> dict[int, int]:
         rows = await conn.fetch(SCORING_SQL)
         logger.info(f"Scoring {len(rows)} LNG/FSRU vessels")
 
-        pinned = await load_open_leg_pins(conn)
-        logger.info(f"Open-leg pins: {len(pinned)} vessel(s)")
+        open_leg_pins = await load_open_leg_pins(conn)
+        inport_pins = await load_inport_pins(conn)
+        pinned = open_leg_pins | inport_pins
+        logger.info(
+            f"Pins: {len(open_leg_pins)} open-leg + {len(inport_pins)} in-port "
+            f"= {len(pinned)} unique"
+        )
 
         # Snapshot current tiers + names BEFORE the upsert so we can detect
         # promotions into the persistent band and log them to tier_promotions.
@@ -383,6 +530,8 @@ async def compute_and_upsert(pool: asyncpg.Pool) -> dict[int, int]:
                 # the wider bbox fix; readers don't need to know which.
                 last_zone_fix_ts = r["last_polygon_fix_ts"] or r["last_bbox_fix_ts"]
 
+                parsed_eta = _parse_eta(r["eta"], now)
+
                 tier, reason, score = assign_tier(
                     last_berth_fix_ts=r["last_berth_fix_ts"],
                     last_anchorage_fix_ts=r["last_anchorage_fix_ts"],
@@ -392,11 +541,13 @@ async def compute_and_upsert(pool: asyncpg.Pool) -> dict[int, int]:
                     last_fix_ts=r["last_fix_ts"],
                     dest_terminal_id=dest_terminal_id,
                     state_ts=r["state_ts"],
+                    parsed_eta=parsed_eta,
+                    dist_km=r["dist_km"],
+                    bearing_deg=r["bearing_deg"],
+                    last_cog=r["last_cog"],
                     now=now,
                 )
                 tier_counts[tier] += 1
-
-                parsed_eta = _parse_eta(r["eta"], now)
 
                 # Notable promotion: moved up INTO the persistent band. old_tier
                 # absent (first time seen) counts as a promotion iff it lands in
