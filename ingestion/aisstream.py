@@ -14,6 +14,7 @@ from config import settings
 
 from pipeline import port_events, scoring
 
+from . import vf_rescue
 from .dynamic_enrichment import EnrichmentState, enrichment_worker, load_known_mmsis
 from .metrics import MinuteAggregator, classify_zone, record_event
 from .models import AISMessage, PositionReport, ShipStaticData
@@ -51,14 +52,25 @@ PERSISTENT_CONNECTIONS = 2
 PERSISTENT_SLOTS = PERSISTENT_CONNECTIONS * MMSI_CAP_PER_CONNECTION  # 100
 SCAN_CHUNK_INDEX = NUM_CONNECTIONS - 1
 SCAN_SLOTS = MMSI_CAP_PER_CONNECTION  # 50
-# Of the scan slots, reserve a quota for tier-5 vessels (stale / never-seen)
-# so they actually cycle. Without this, tier 4 (~400-500 vessels) keeps
-# consuming all 50 slots under `(tier ASC, last_scan_window_at ASC)` and
-# tier-5 vessels starve forever — they can never accrue a fix to be promoted
-# out. With 10 reserved slots, every tier-5 vessel cycles within ~10-22h
-# while tier-4 cycle time goes from ~3.7h to ~4.6h.
+# The scan connection rotates through three priority-ordered pools, each with a
+# reserved quota (with roll-over so SCAN_SLOTS is always filled when candidates
+# exist). Picks within a pool take the least-recently-scanned vessels.
+#
+#   overflow — persistent-band vessels (tier<=3) that did NOT win one of the
+#       100 persistent slots this cycle. Tier-1/2 almost always fit, so in
+#       practice this is the tier-3 overflow: vessels seen in the wider zone
+#       bbox but crowded out of the persistent block. Before this pool existed
+#       they fell into a coverage hole — too low-tier for a persistent slot,
+#       excluded from the old tier>=4-only scan — so they went fully dark with
+#       no path back to a slot. These are the highest-value unsubscribed
+#       vessels (near a zone), so they get first call on the scan slots.
+#   tier4 — recently-active-anywhere rotation.
+#   tier5 — stale / never-seen discovery. A reserved quota stops tier 4 (~400
+#       candidates) from consuming every slot and starving tier-5 vessels,
+#       which could then never accrue a fix to be promoted out.
+SCAN_OVERFLOW_SLOTS = 15
 SCAN_TIER5_SLOTS = 10
-SCAN_TIER4_SLOTS = SCAN_SLOTS - SCAN_TIER5_SLOTS  # 40
+SCAN_TIER4_SLOTS = SCAN_SLOTS - SCAN_OVERFLOW_SLOTS - SCAN_TIER5_SLOTS  # 25
 
 # Reconnect every hour. Each reconnect:
 #   1. Triggers a fresh scoring run (see scoring_loop) just beforehand
@@ -174,70 +186,69 @@ async def load_persistent_mmsis(pool: asyncpg.Pool) -> list[int]:
     return [r["mmsi"] for r in rows]
 
 
+# A vessel is "scannable" if it is not already held in a persistent slot and is
+# either persistent-band overflow (tier<=3 that didn't win a slot — slot_kind is
+# NULL or 'scan' from the previous cycle) or tier>=4. slot_kind is one cycle
+# stale, so a vessel newly promoted to persistent may be briefly double-covered;
+# that is harmless (one wasted scan slot for <=1h) and self-corrects next cycle.
+_SCANNABLE = "((tier <= 3 AND (slot_kind IS NULL OR slot_kind = 'scan')) OR tier >= 4)"
+
+
 async def load_scan_mmsis(pool: asyncpg.Pool) -> list[int]:
-    """Next SCAN_SLOTS vessels from priority_watchlist, split between a
-    tier-4 quota (SCAN_TIER4_SLOTS) and a tier-5 discovery quota
-    (SCAN_TIER5_SLOTS). Each sub-pool is ordered by
-    `last_scan_window_at ASC NULLS FIRST` so the least-recently-scanned
-    vessels are picked. After picking, write back `last_scan_window_at = now()`
-    in the same transaction so this exact batch won't be re-picked on the
-    very next reconnect.
+    """Next SCAN_SLOTS vessels for the scan-rotation connection, drawn from
+    three priority-ordered pools (overflow → tier-4 → tier-5; see the
+    SCAN_*_SLOTS constants) with roll-over so the slots are always filled when
+    candidates exist. Each pool takes the least-recently-scanned vessels
+    (`last_scan_window_at ASC NULLS FIRST`); a final write-back stamps the
+    picked batch with now() so it isn't re-picked on the next reconnect.
 
-    This is what makes scan rotation actually rotate. Without the write-back,
-    watchdog reconnects (every ~5 min when scan vessels are silent) would
-    keep re-selecting the same 50 MMSIs forever.
+    The write-back is what makes rotation actually rotate: without it, watchdog
+    reconnects (~every 5 min when scan vessels are silent) would re-select the
+    same MMSIs forever.
 
-    The two-pool split exists because the previous single
-    `WHERE tier >= 4 ORDER BY tier ASC, ...` query exhausted the 50 slots
-    on tier 4 alone (which has hundreds of candidates), so tier-5 vessels
-    never got subscribed and could never accrue a fix to promote out of
-    tier 5. Reserving 10 slots breaks that starvation.
-
-    If tier 5 doesn't have enough candidates to fill its quota, the spare
-    slots roll over to tier 4 (and vice versa) so we always subscribe to
-    SCAN_SLOTS vessels when possible.
-    """
-    # NOT is_pinned: pinned vessels already hold a persistent slot
-    # (load_persistent_mmsis), so excluding them here avoids double-picking a
-    # tier-4/5 pin into the scan pool (wasted slot + a 'scan' relabel).
-    pick_sql = """
-        SELECT mmsi FROM priority_watchlist
-        WHERE tier = $1 AND NOT is_pinned
-        ORDER BY last_scan_window_at ASC NULLS FIRST
-        LIMIT $2
-        FOR UPDATE
+    NOT is_pinned throughout: pinned vessels already hold a persistent slot
+    (load_persistent_mmsis), so picking them here would waste a scan slot.
     """
     async with pool.acquire() as conn:
         async with conn.transaction():
-            tier4_rows = await conn.fetch(pick_sql, 4, SCAN_TIER4_SLOTS)
-            tier5_rows = await conn.fetch(pick_sql, 5, SCAN_TIER5_SLOTS)
+            picked: list[int] = []
 
-            # Roll-over: if either pool came up short, top up from the other
-            # so SCAN_SLOTS gets fully filled.
-            mmsis = [r["mmsi"] for r in tier4_rows] + [r["mmsi"] for r in tier5_rows]
-            shortfall = SCAN_SLOTS - len(mmsis)
-            if shortfall > 0:
-                already = set(mmsis)
-                topup = await conn.fetch(
-                    """
+            async def pick(where: str, quota: int) -> None:
+                if quota <= 0:
+                    return
+                rows = await conn.fetch(
+                    f"""
                     SELECT mmsi FROM priority_watchlist
-                    WHERE tier >= 4 AND NOT is_pinned AND mmsi <> ALL($1::BIGINT[])
+                    WHERE {where} AND NOT is_pinned
+                      AND mmsi <> ALL($1::BIGINT[])
                     ORDER BY tier ASC, last_scan_window_at ASC NULLS FIRST
                     LIMIT $2
                     FOR UPDATE
                     """,
-                    list(already),
-                    shortfall,
+                    picked,
+                    quota,
                 )
-                mmsis.extend(r["mmsi"] for r in topup)
+                picked.extend(r["mmsi"] for r in rows)
 
-            if mmsis:
+            # Persistent-band overflow first (highest-value unsubscribed
+            # vessels), then the tier-4/5 rotation quotas.
+            await pick(
+                "tier <= 3 AND (slot_kind IS NULL OR slot_kind = 'scan')",
+                SCAN_OVERFLOW_SLOTS,
+            )
+            await pick("tier = 4", SCAN_TIER4_SLOTS)
+            await pick("tier = 5", SCAN_TIER5_SLOTS)
+            # Roll over any shortfall onto whatever is scannable, tier-first so
+            # leftover overflow is preferred over tier-4 over tier-5.
+            await pick(_SCANNABLE, SCAN_SLOTS - len(picked))
+
+            if picked:
                 await conn.execute(
                     "UPDATE priority_watchlist SET last_scan_window_at = now() "
                     "WHERE mmsi = ANY($1::BIGINT[])",
-                    mmsis,
+                    picked,
                 )
-    return mmsis
+    return picked
 
 
 async def mark_slot_assignments(
@@ -653,6 +664,21 @@ async def ingest():
 
     port_events_task = asyncio.create_task(port_events_loop())
 
+    async def vf_rescue_loop():
+        # Backstop for AIS gaps: periodically fetch live positions from
+        # VesselFinder for high-value vessels that have gone AIS-silent and inject
+        # them as ais_fixes so the pipeline re-acquires them. Credit-budgeted (see
+        # ingestion/vf_rescue.py). No initial run — it needs a populated
+        # priority_watchlist + port_events, which the loops above produce first.
+        while True:
+            await asyncio.sleep(vf_rescue.VF_RESCUE_INTERVAL_SECONDS)
+            try:
+                await vf_rescue.run_rescue(pool)
+            except Exception as e:
+                logger.warning(f"vf_rescue run failed: {e}")
+
+    vf_rescue_task = asyncio.create_task(vf_rescue_loop())
+
     async def connection_loop(source_name: str, chunk_index: int):
         """Reconnect loop owning one MMSI-filtered subscription. On each
         (re)connect:
@@ -719,10 +745,14 @@ async def ingest():
             ]
         )
     finally:
-        for t in (enrichment_task, scoring_task, port_events_task):
+        for t in (enrichment_task, scoring_task, port_events_task, vf_rescue_task):
             t.cancel()
         await asyncio.gather(
-            enrichment_task, scoring_task, port_events_task, return_exceptions=True
+            enrichment_task,
+            scoring_task,
+            port_events_task,
+            vf_rescue_task,
+            return_exceptions=True,
         )
         await pool.close()
 
