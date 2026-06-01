@@ -263,6 +263,50 @@ def test_ais_dropout_during_mooring_no_spurious_events():
 
 
 # ----------------------------------------------------------------------
+# Reacquisition after a coverage gap: vessel was anchored, we lose AIS for
+# hours, and the only fix back is a single rescue fix already at the berth.
+# The 30-min moored dwell can't be observed from one isolated fix, so moored
+# must still be emitted (gap >= dwell window => confirm immediately).
+# Regression for the LNG JUNO / Freeport case.
+# ----------------------------------------------------------------------
+
+
+def test_single_berth_rescue_fix_after_gap_emits_moored():
+    fixes = [
+        # Anchored in the anchorage (cold-start, dwell-confirmed at sog<1).
+        fix(0, ((1, "anchorage", 0), (1, "approach", 0)), sog=0.1),
+        fix(35, ((1, "anchorage", 0), (1, "approach", 0)), sog=0.1),
+        # ~8h AIS gap, then a single rescue fix already at the berth, sog 0.
+        fix(35 + 8 * 60, ((1, "berth", 0), (1, "approach", 0)), sog=0.0),
+    ]
+    events = walk(iter(fixes), NEAREST_BERTH)
+    validate_sequence(events)
+    types = [(e.event_type, e.event_time) for e in events]
+    assert types == [
+        ("zone_entry", at(0)),
+        ("anchorage_entry", at(0)),
+        ("anchored", at(0)),
+        ("anchorage_exit", at(35 + 8 * 60)),
+        ("moored", at(35 + 8 * 60)),  # confirmed on the lone berth fix
+    ]
+    assert {e.terminal_id for e in events} == {1}
+
+
+def test_berth_arrival_under_continuous_coverage_still_needs_dwell():
+    """The gap shortcut must NOT fire when coverage is continuous: a single
+    berth fix with a normal inter-fix gap stays pending until dwell."""
+    fixes = [
+        fix(0, ((1, "approach", 0),), sog=5.0),
+        # First berth fix, normal 5-min gap from the previous one.
+        fix(5, ((1, "berth", 0), (1, "approach", 0)), sog=0.1),
+    ]
+    events = walk(iter(fixes), NEAREST_BERTH)
+    validate_sequence(events)
+    # No moored yet — only one berth fix, dwell not satisfied, no gap shortcut.
+    assert [e.event_type for e in events] == ["zone_entry"]
+
+
+# ----------------------------------------------------------------------
 # Cold-end: vessel still moored at the end of the data window. No synthetic
 # departed should be emitted.
 # ----------------------------------------------------------------------

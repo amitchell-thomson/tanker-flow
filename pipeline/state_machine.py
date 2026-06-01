@@ -74,7 +74,9 @@ class Thresholds:
     anchored_min_dwell: timedelta = timedelta(minutes=30)
     anchored_max_sog: float = 1.0
     moored_min_dwell: timedelta = timedelta(minutes=30)
-    moored_max_sog: float = 0.5
+    # A vessel inside a berth polygon below 1 kn is effectively alongside —
+    # the slow creep onto/at the berth shouldn't disqualify it from mooring.
+    moored_max_sog: float = 1.0
     departed_min_dwell: timedelta = timedelta(minutes=15)
     departed_min_sog: float = 1.0
 
@@ -536,7 +538,34 @@ class _Walker:
         # In ANCHORED or IN_ENVELOPE — both can transition to MOORED on berth.
         if self.state in (State.IN_ENVELOPE, State.ANCHORED):
             if zt == "berth" and sog < t.moored_max_sog:
-                if self.pending_state != State.MOORED:
+                # Reacquisition after a coverage gap longer than the dwell
+                # window: the vessel moored sometime during the gap and we've
+                # picked it back up already stationary at the berth (e.g. a
+                # one-off VesselFinder rescue fix after a mid-visit AIS dropout).
+                # A single isolated fix can never exhibit the 30-min dwell, so
+                # confirm immediately — same reasoning as cold-start — back-dated
+                # to this first observed berth fix (a lower bound on berth time).
+                # Only when THIS is the first berth fix of the arming sequence
+                # (no pending moored yet) — otherwise an earlier berth fix
+                # already started the dwell clock and the normal dwell path must
+                # back-date to it rather than to this later fix.
+                reacquired_after_gap = (
+                    self.pending_state != State.MOORED
+                    and self.last_fix_ts is not None
+                    and (fix.fix_ts - self.last_fix_ts) >= t.moored_min_dwell
+                )
+                if reacquired_after_gap:
+                    self.state = State.MOORED
+                    self.emit(
+                        "moored",
+                        fix.fix_ts,
+                        self.terminal_id,
+                        fix.lat,
+                        fix.lon,
+                        candidate_terminal_ids=_candidate_terminals(fix.zones),
+                    )
+                    self.clear_pending()
+                elif self.pending_state != State.MOORED:
                     self.start_pending(State.MOORED, fix)
                 elif self.dwell_satisfied(fix, t.moored_min_dwell):
                     self.state = State.MOORED
