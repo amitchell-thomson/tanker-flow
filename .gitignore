@@ -3,7 +3,6 @@ __pycache__/
 *.pyc
 .venv/
 .DS_Store
-CLAUDE.md
 .claude/
 *.gpkg-shm
 *.gpkg-wal
