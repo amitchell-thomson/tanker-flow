@@ -314,6 +314,7 @@ def parse_message(
                 msg.Message.Longitude,
                 msg.Message.NavigationalStatus,
                 msg.Message.Sog,
+                msg.Message.Cog,
                 ingest_state.source_name,
             )
         )
@@ -421,8 +422,8 @@ async def flush_buffers(pool: asyncpg.Pool, ingest_state: IngestionState) -> Non
                 await conn.executemany(
                     """
                     INSERT INTO ais_fixes
-                        (fix_ts, mmsi, lat, lon, nav_status, sog, source)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        (fix_ts, mmsi, lat, lon, nav_status, sog, cog, source)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                     ON CONFLICT (fix_ts, mmsi) DO NOTHING
                     """,
                     fix_batch,

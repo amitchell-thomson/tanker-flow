@@ -32,6 +32,14 @@ class PositionReportMessage(BaseModel):
     Sog: float
     Latitude: float
     Longitude: float
+    Cog: Optional[float] = None
+
+    @field_validator("Cog")
+    @classmethod
+    def null_unavailable_cog(cls, v):
+        # AIS encodes "course not available" as 360 (raw 3600 ÷ 10). Valid COG is
+        # 0–359.9°, so treat 360 as NULL rather than a real bearing.
+        return None if v is None or v == 360.0 else v
 
 
 class ShipStaticDataMessage(BaseModel):

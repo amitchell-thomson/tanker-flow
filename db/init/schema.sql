@@ -10,6 +10,7 @@ CREATE TABLE ais_fixes (
     lon             DOUBLE PRECISION,
     nav_status      SMALLINT,
     sog             REAL,
+    cog             REAL,                       -- course over ground (deg); AIS 360 ("not available") stored as NULL
     source          TEXT             NOT NULL  -- 'aisstream-mmsi-{1,2,3}' | 'vesselfinder'
 );
 
