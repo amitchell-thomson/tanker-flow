@@ -22,6 +22,7 @@ from rich.logging import RichHandler
 
 from config import settings
 
+from .geo import haversine_nm
 from .laden import Side, build_draught_lookup, infer_laden
 from .state_machine import (
     Event,
@@ -200,6 +201,7 @@ async def run(pool: asyncpg.Pool, now: datetime | None = None) -> None:
         "open_visits": 0,
         "cold_start_events": 0,
         "vessels_with_zero_events": 0,
+        "teleport_fixes_dropped": 0,
     }
 
     # Stream the spatial join in a single cursor and split at MMSI boundaries.
@@ -262,6 +264,41 @@ async def run(pool: asyncpg.Pool, now: datetime | None = None) -> None:
                 await conn.executemany(INSERT_SQL, event_rows)
 
     _log_summary(summary, time.monotonic() - t_start)
+
+
+# A fix implying a speed above this from the previous *accepted* fix is a
+# teleport — almost always an MMSI collision (a second vessel transmitting the
+# same MMSI) or a GPS spoof, not real motion. The fastest LNG carriers cruise at
+# ~20 kn, so 45 sits well above any real vessel yet far below the thousands of
+# knots an MMSI-collision spike implies. The distance floor stops near-stationary
+# GPS jitter (tiny dt, sub-mile hops) from tripping the gate.
+TELEPORT_MAX_KN = 45.0
+TELEPORT_MIN_NM = 8.0
+
+
+def _drop_teleports(fixes: list[Fix], summary: dict[str, Any]) -> list[Fix]:
+    """Drop fixes implying an impossible speed from the last accepted position.
+
+    Gates against the last *accepted* fix (not the raw previous one), so a run of
+    spurious spikes is rejected relative to the real track rather than dragging it
+    off course. A fix is dropped only when it is both far (> TELEPORT_MIN_NM) and
+    fast (> TELEPORT_MAX_KN); the conjunction immunises near-stationary jitter,
+    and using speed (not raw distance) preserves legitimate long hops after an AIS
+    dropout — a vessel that sailed 600 nm over three dark days is slow, not a jump.
+    """
+    kept: list[Fix] = []
+    last: Fix | None = None
+    for fix in fixes:
+        if last is not None:
+            dt_h = (fix.fix_ts - last.fix_ts).total_seconds() / 3600.0
+            if dt_h > 0:
+                nm = haversine_nm(last.lat, last.lon, fix.lat, fix.lon)
+                if nm > TELEPORT_MIN_NM and nm / dt_h > TELEPORT_MAX_KN:
+                    summary["teleport_fixes_dropped"] += 1
+                    continue
+        kept.append(fix)
+        last = fix
+    return kept
 
 
 def _row_to_fix(row: asyncpg.Record) -> Fix:
@@ -337,6 +374,7 @@ def _process_vessel(
         summary["vessels_with_zero_events"] += 1
         return
 
+    fixes = _drop_teleports(fixes, summary)
     events = walk(iter(fixes), nearest_berth, now=now)
     if not events:
         summary["vessels_with_zero_events"] += 1
@@ -479,6 +517,7 @@ def _log_summary(summary: dict[str, Any], wall_seconds: float) -> None:
         summary["vessels_with_zero_events"],
     )
     logger.info("  fsru moored emits: %d", summary["fsru_vessels_emitted"])
+    logger.info("  teleport fixes dropped: %d", summary["teleport_fixes_dropped"])
     logger.info("  cold-start events: %d", summary["cold_start_events"])
     logger.info("  open visits (moored, no departed): %d", summary["open_visits"])
     if summary["events_by_kind"]:
