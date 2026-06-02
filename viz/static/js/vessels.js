@@ -127,6 +127,8 @@ export async function selectVessel(mmsi, name) {
   map.fitBounds(L.latLngBounds(history.map(h => [h.lat, h.lon])).pad(0.2));
   document.getElementById('reset-btn').style.display = 'block';
   setStatus(`${name} — last ${history.length} fixes`);
+  // Let the shell surface which signals this vessel currently feeds.
+  window.dispatchEvent(new CustomEvent('app:vessel-selected', { detail: { mmsi, name } }));
 }
 
 export function dimAllExcept(mmsi) {

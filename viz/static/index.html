@@ -2,103 +2,159 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Tanker Flow</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap">
   <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/signals.css">
 </head>
-<body>
-  <div id="layout">
-    <div id="map"></div>
-    <div id="events-panel">
-      <div id="panel-tabs">
-        <button class="tab-btn active" id="tab-events">Port events</button>
-        <button class="tab-btn"        id="tab-fixes">Recent fixes</button>
+<body data-view="map">
+  <!-- ── Shared top bar: wordmark · view nav · provenance chip · live pulse ── -->
+  <header id="topbar">
+    <div class="brand"><span class="brand-mark"></span>Tanker&nbsp;Flow</div>
+    <nav id="view-nav">
+      <button class="nav-btn active" data-view="map">Map</button>
+      <button class="nav-btn" data-view="signals">Signals</button>
+    </nav>
+    <button id="trace-chip" hidden></button>
+    <div id="live-hud"><span id="live-dot"></span><span id="live-text">…</span></div>
+  </header>
+
+  <div id="views">
+    <!-- ── Map view ── -->
+    <section id="view-map" class="view">
+      <div id="layout">
+        <div id="map"></div>
+        <div id="events-panel">
+          <div id="panel-head">
+            <span id="panel-title">Live feed</span>
+            <span id="panel-sub"></span>
+          </div>
+          <div id="panel-tabs">
+            <button class="tab-btn active" id="tab-events">Port events</button>
+            <button class="tab-btn"        id="tab-fixes">Recent fixes</button>
+          </div>
+
+          <div id="events-view" class="panel-view">
+            <div id="events-filters">
+              <select id="filter-zone">
+                <option value="">All zones</option>
+                <option value="usgulf">usgulf</option>
+                <option value="usatlantic">usatlantic</option>
+                <option value="nweurope">nweurope</option>
+                <option value="baltic">baltic</option>
+                <option value="iberian">iberian</option>
+                <option value="wmed">wmed</option>
+                <option value="emed">emed</option>
+              </select>
+              <select id="filter-event-type">
+                <option value="">All types</option>
+                <option value="zone_entry">zone_entry</option>
+                <option value="anchorage_entry">anchorage_entry</option>
+                <option value="anchored">anchored</option>
+                <option value="anchorage_exit">anchorage_exit</option>
+                <option value="moored">moored</option>
+                <option value="departed">departed</option>
+                <option value="zone_exit">zone_exit</option>
+              </select>
+              <select id="filter-since">
+                <option value="">All time</option>
+                <option value="6">last 6h</option>
+                <option value="24" selected>last 24h</option>
+                <option value="168">last 7d</option>
+              </select>
+              <span id="events-count">…</span>
+            </div>
+            <div id="events-list">Loading…</div>
+          </div>
+
+          <div id="fixes-view" class="panel-view" style="display:none;">
+            <div id="fixes-filters">
+              <select id="filter-fixes-since">
+                <option value="0.25">last 15m</option>
+                <option value="1" selected>last 1h</option>
+                <option value="6">last 6h</option>
+                <option value="24">last 24h</option>
+              </select>
+              <label><input type="checkbox" id="fixes-autorefresh" checked> auto-refresh</label>
+              <span id="fixes-count">…</span>
+            </div>
+            <div id="fixes-list">Loading…</div>
+          </div>
+        </div>
       </div>
 
-      <div id="events-view" class="panel-view">
-        <div id="events-filters">
-          <select id="filter-zone">
-            <option value="">All zones</option>
-            <option value="usgulf">usgulf</option>
-            <option value="usatlantic">usatlantic</option>
-            <option value="nweurope">nweurope</option>
-            <option value="baltic">baltic</option>
-            <option value="iberian">iberian</option>
-            <option value="wmed">wmed</option>
-            <option value="emed">emed</option>
-          </select>
-          <select id="filter-event-type">
-            <option value="">All types</option>
-            <option value="zone_entry">zone_entry</option>
-            <option value="anchorage_entry">anchorage_entry</option>
-            <option value="anchored">anchored</option>
-            <option value="anchorage_exit">anchorage_exit</option>
-            <option value="moored">moored</option>
-            <option value="departed">departed</option>
-            <option value="zone_exit">zone_exit</option>
-          </select>
-          <select id="filter-since">
-            <option value="">All time</option>
-            <option value="6">last 6h</option>
-            <option value="24" selected>last 24h</option>
-            <option value="168">last 7d</option>
-          </select>
-          <span id="events-count">…</span>
-        </div>
-        <div id="events-list">Loading…</div>
+      <button id="reset-btn" class="hud">Show all vessels</button>
+      <div id="layer-controls" class="hud">
+        <select id="basemap-select" title="Basemap">
+          <option value="dark">Dark</option>
+          <option value="voyager">Voyager</option>
+          <option value="ocean">Ocean</option>
+          <option value="satellite">Satellite</option>
+        </select>
+        <button class="layer-btn active" id="btn-zones">Terminal zones</button>
+        <button class="layer-btn active" id="btn-boxes">AIS boxes</button>
+        <button class="layer-btn active" id="btn-vessels">Vessels</button>
+        <button class="layer-btn" id="btn-density">Density</button>
       </div>
+      <div id="legend" class="hud">
+        <div class="legend-title">Vessel class</div>
+        <div class="legend-row"><span class="swatch" style="background:#f5c2e7;"></span> LNG carrier</div>
+        <div class="legend-row"><span class="swatch sq" style="background:#f38ba8;"></span> FSRU</div>
+        <div class="legend-title">Watchlist tier (ring)</div>
+        <div class="tier-scale">
+          <span class="tier-1">1</span><span class="tier-2">2</span><span class="tier-3">3</span><span class="tier-4">4</span><span class="tier-5">5</span>
+        </div>
+        <div class="fade-labels"><span>at terminal</span><span>stale</span></div>
+        <div class="legend-title">Fix freshness</div>
+        <div class="fade-bar"></div>
+        <div class="fade-labels"><span>just seen</span><span>&gt;24h</span></div>
+      </div>
+      <div id="status" class="hud">Loading…</div>
+      <div id="vessel-feeds" class="hud" hidden></div>
+    </section>
 
-      <div id="fixes-view" class="panel-view" style="display:none;">
-        <div id="fixes-filters">
-          <select id="filter-fixes-since">
-            <option value="0.25">last 15m</option>
-            <option value="1" selected>last 1h</option>
-            <option value="6">last 6h</option>
-            <option value="24">last 24h</option>
-          </select>
-          <label><input type="checkbox" id="fixes-autorefresh" checked> auto-refresh</label>
-          <span id="fixes-count">…</span>
-        </div>
-        <div id="fixes-list">Loading…</div>
+    <!-- ── Signals view ── -->
+    <section id="view-signals" class="view">
+      <div id="signals-subhead">
+        <span class="subhead-title">Market signals</span>
+        <span class="subhead-blurb">LNG carrier positions &rarr; Henry&nbsp;Hub&nbsp;/&nbsp;TTF spread</span>
+        <label id="regime-toggle"><input type="checkbox" id="split-regime"> split by ingest regime</label>
+        <span id="signals-status">Loading…</span>
       </div>
+      <div id="status-strip">
+        <div class="stat"><span class="stat-label">signals rebuilt</span><span class="stat-val" id="st-rebuilt">—</span></div>
+        <div class="stat"><span class="stat-label">panel</span><span class="stat-val" id="st-panel">—</span></div>
+        <div class="stat"><span class="stat-label">legs in transit</span><span class="stat-val" id="st-transit">—</span></div>
+        <div class="stat"><span class="stat-label">est. destination</span><span class="stat-val" id="st-fallback">—</span></div>
+        <div class="stat"><span class="stat-label">regime now</span><span class="stat-val" id="st-regime">—</span></div>
+        <div class="stat"><span class="stat-label">port events rebuilt</span><span class="stat-val" id="st-pe">—</span></div>
+      </div>
+      <main id="signal-sections"></main>
+    </section>
+  </div>
+
+  <!-- Contributor drawer (signals view) -->
+  <div id="drawer-scrim"></div>
+  <aside id="contrib-drawer">
+    <div class="drawer-head">
+      <div>
+        <div class="drawer-title" id="drawer-title">—</div>
+        <div class="drawer-sub" id="drawer-sub"></div>
+      </div>
+      <button id="drawer-close" title="Close">&times;</button>
     </div>
-  </div>
-  <div id="live-hud" class="hud">
-    <span id="live-dot"></span>
-    <span id="live-text">…</span>
-  </div>
-  <button id="reset-btn" class="hud">Show all vessels</button>
-  <div id="layer-controls" class="hud">
-    <select id="basemap-select" title="Basemap">
-      <option value="voyager">Voyager</option>
-      <option value="dark">Dark</option>
-      <option value="ocean">Ocean</option>
-      <option value="satellite">Satellite</option>
-    </select>
-    <button class="layer-btn active" id="btn-zones">Terminal zones</button>
-    <button class="layer-btn active" id="btn-boxes">AIS boxes</button>
-    <button class="layer-btn active" id="btn-vessels">Vessels</button>
-    <button class="layer-btn" id="btn-density">Density</button>
-  </div>
-  <div id="legend" class="hud">
-    <div class="legend-title">Vessel class</div>
-    <div class="legend-row"><span class="swatch" style="background:#f5c2e7;"></span> LNG carrier</div>
-    <div class="legend-row"><span class="swatch sq" style="background:#f38ba8;"></span> FSRU</div>
-    <div class="legend-title">Watchlist tier (ring)</div>
-    <div class="tier-scale">
-      <span class="tier-1">1</span><span class="tier-2">2</span><span class="tier-3">3</span><span class="tier-4">4</span><span class="tier-5">5</span>
-    </div>
-    <div class="fade-labels"><span>at terminal</span><span>stale</span></div>
-    <div class="legend-title">Fix freshness</div>
-    <div class="fade-bar"></div>
-    <div class="fade-labels"><span>just seen</span><span>&gt;24h</span></div>
-  </div>
-  <div id="status" class="hud">Loading…</div>
-  <a id="nav-signals" class="hud" href="/signals">Signals &rarr;</a>
+    <div id="drawer-actions"></div>
+    <div id="drawer-body"></div>
+  </aside>
+
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script type="module" src="/static/js/main.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3"></script>
+  <script type="module" src="/static/js/app.js"></script>
 </body>
 </html>

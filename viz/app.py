@@ -17,13 +17,14 @@ import numpy as np
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
-from matplotlib import colormaps
+from matplotlib.colors import LinearSegmentedColormap
 from PIL import Image
 from starlette.concurrency import run_in_threadpool
 
 from config import AIS_BOUNDING_BOXES, regime_of, settings
 from pipeline.legs import compute_legs
 from pipeline.signal import (
+    FALLBACK_DEST_ZONE,
     IMPORT_ZONE_CENTROIDS_SQL,
     TERMINAL_METADATA_SQL,
     build_lane_filter,
@@ -33,6 +34,12 @@ from pipeline.signal import (
 )
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+# Catppuccin Mocha density ramp (low → high traffic): base → sapphire → blue →
+# mauve → pink, so the shipping-lane raster reads on the dark basemap.
+_MOCHA_DENSITY = LinearSegmentedColormap.from_list(
+    "mocha_density", ["#1e1e2e", "#74c7ec", "#89b4fa", "#cba6f7", "#f5c2e7"]
+)
 
 
 @asynccontextmanager
@@ -82,7 +89,8 @@ async def index():
 
 @app.get("/signals")
 async def signals_page():
-    return FileResponse(STATIC_DIR / "signals.html")
+    # Same single-page shell as "/"; the client router shows the signals view.
+    return FileResponse(STATIC_DIR / "index.html")
 
 
 @app.get("/api/vessels")
@@ -592,7 +600,7 @@ def _render_density(
         grid = grid.reshape(h, ss, w, ss).mean(axis=(1, 3))
 
     normed = np.clip(np.log1p(grid) / p99, 0.0, 1.0)
-    rgba = colormaps["plasma"](normed)
+    rgba = _MOCHA_DENSITY(normed)
     rgba[:, :, 3] = np.power(normed, 0.5)
     img = Image.fromarray((rgba * 255).astype(np.uint8), "RGBA")
     buf = io.BytesIO()
@@ -907,12 +915,17 @@ async def signals_contributors(
     out = []
     for lg in sel:
         dist = leg_distance_nm(lg, centroids)
+        # Endpoint coords for drawing the leg as an arc on the map.
         if lg.status == "closed":
             dist_source = "observed"
+            dest_lat, dest_lon = lg.arrived_lat, lg.arrived_lon
         elif lg.dest_region and centroids.get(lg.dest_region):
             dist_source = "declared"
+            dest_lat, dest_lon = centroids[lg.dest_region]
         else:
             dist_source = "fallback"
+            c = centroids.get(FALLBACK_DEST_ZONE)
+            dest_lat, dest_lon = c if c else (None, None)
         out.append(
             {
                 "mmsi": lg.mmsi,
@@ -922,6 +935,10 @@ async def signals_contributors(
                 "status": lg.status,
                 "departed_ts": lg.departed_ts,
                 "arrived_ts": lg.arrived_ts,
+                "departed_lat": lg.departed_lat,
+                "departed_lon": lg.departed_lon,
+                "dest_lat": dest_lat,
+                "dest_lon": dest_lon,
                 "dwt": lg.dwt,
                 "gas_capacity_m3": lg.gas_capacity_m3,
                 "distance_nm": dist,
@@ -932,3 +949,45 @@ async def signals_contributors(
             }
         )
     return {"kind": "legs", "rows": out}
+
+
+@app.get("/api/vessel/{mmsi}/signals")
+async def vessel_signals(mmsi: int, pool: asyncpg.Pool = Depends(get_pool)):
+    """Which signal_keys this vessel currently feeds — the map→signals
+    cross-highlight. Reuses the same leg/event membership the dashboard uses."""
+    now, legs, lane, _, _ = await _leg_context(pool)
+    today = now.date()
+    feeds: list[str] = []
+
+    live = [lg for lg in legs_live_on(legs, today, lane) if lg.mmsi == mmsi]
+    if live:
+        feeds += ["laden_ton_miles_in_transit_dwt", "laden_ton_miles_in_transit_gas"]
+        if any(lg.status == "open_in_transit" for lg in live):
+            feeds.append("mean_laden_voyage_age_h")
+    if any(
+        lg.mmsi == mmsi and lg.status == "closed" and lg.laden is True
+        and lane.is_export(lg.origin_zone)
+        for lg in legs
+    ):
+        feeds.append("od_flow_count")
+
+    ev = await pool.fetch(
+        """
+        SELECT DISTINCT pe.event_type
+        FROM port_events pe JOIN terminals t USING (terminal_id)
+        WHERE pe.mmsi = $1 AND pe.laden_flag IS TRUE
+          AND pe.event_time > now() - INTERVAL '7 days'
+          AND ((pe.event_type = 'moored'   AND t.flow_direction = 'import')
+            OR (pe.event_type = 'departed' AND t.flow_direction = 'export'))
+        """,
+        mmsi,
+    )
+    types = {r["event_type"] for r in ev}
+    if "moored" in types:
+        feeds.append("eu_arrivals")
+    if "departed" in types:
+        feeds.append("us_loadings")
+
+    seen: set[str] = set()
+    ordered = [f for f in feeds if not (f in seen or seen.add(f))]
+    return {"mmsi": mmsi, "signals": ordered}

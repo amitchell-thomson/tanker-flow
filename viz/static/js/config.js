@@ -63,6 +63,27 @@ export function bearingDeg(lat1, lon1, lat2, lon2) {
   return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
 }
 
+// Great-circle path (slerp) from (lat1,lon1) to (lat2,lon2) as an array of
+// [lat,lon] points — for drawing voyage legs as true geodesic arcs on the map
+// (L.polyline alone draws straight Mercator lines). No deps; mirrors bearingDeg.
+export function greatCircle(lat1, lon1, lat2, lon2, n = 48) {
+  const toRad = d => (d * Math.PI) / 180, toDeg = r => (r * 180) / Math.PI;
+  const p1 = toRad(lat1), l1 = toRad(lon1), p2 = toRad(lat2), l2 = toRad(lon2);
+  const d = 2 * Math.asin(Math.sqrt(
+    Math.sin((p2 - p1) / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin((l2 - l1) / 2) ** 2));
+  if (!d || !isFinite(d)) return [[lat1, lon1], [lat2, lon2]];
+  const pts = [];
+  for (let i = 0; i <= n; i++) {
+    const f = i / n;
+    const A = Math.sin((1 - f) * d) / Math.sin(d), B = Math.sin(f * d) / Math.sin(d);
+    const x = A * Math.cos(p1) * Math.cos(l1) + B * Math.cos(p2) * Math.cos(l2);
+    const y = A * Math.cos(p1) * Math.sin(l1) + B * Math.cos(p2) * Math.sin(l2);
+    const z = A * Math.sin(p1) + B * Math.sin(p2);
+    pts.push([toDeg(Math.atan2(z, Math.hypot(x, y))), toDeg(Math.atan2(y, x))]);
+  }
+  return pts;
+}
+
 // Fix freshness → fill opacity. Just-seen vessels burn bright; the longer
 // since their last fix, the more they fade.
 export function freshnessOpacity(fixTs) {

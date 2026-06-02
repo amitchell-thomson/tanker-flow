@@ -16,12 +16,47 @@
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
   --panel-w: 360px;
 }
-body { margin: 0; background: var(--base); font-family: var(--font-sans); color: var(--text); }
-#layout { display: flex; height: 100vh; width: 100vw; }
-#map { flex: 1; height: 100vh; }
+body { margin: 0; background: var(--base); font-family: var(--font-sans); color: var(--text);
+  height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+/* ── Shared top bar + view switching ── */
+#topbar {
+  flex: none; height: 50px; display: flex; align-items: center; gap: 16px;
+  padding: 0 18px; background: var(--mantle); border-bottom: 1px solid var(--surface0);
+  z-index: 50;
+}
+.brand { display: flex; align-items: center; gap: 9px; font-weight: 800; font-size: 15px; letter-spacing: -0.01em; color: var(--text); }
+.brand-mark { width: 11px; height: 11px; border-radius: 3px; background: var(--accent); box-shadow: 0 0 10px rgba(137,180,250,0.6); }
+#view-nav { display: flex; gap: 3px; background: var(--surface0); border-radius: 9px; padding: 3px; }
+.nav-btn {
+  padding: 5px 15px; border: none; background: transparent; color: var(--subtext0);
+  font-family: inherit; font-weight: 600; font-size: 13px; border-radius: 6px; cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.nav-btn:hover { color: var(--subtext1); }
+.nav-btn.active { background: var(--base); color: var(--accent); }
+#trace-chip {
+  display: inline-flex; align-items: center; gap: 6px; font-family: inherit; font-size: 12px;
+  color: var(--accent); background: rgba(137,180,250,0.13); border: 1px solid rgba(137,180,250,0.32);
+  border-radius: 8px; padding: 4px 11px; cursor: pointer;
+}
+#trace-chip[hidden] { display: none; }
+#trace-chip .chip-back { color: var(--subtext0); }
+#trace-chip:hover { background: rgba(137,180,250,0.2); }
+
+#views { flex: 1; min-height: 0; position: relative; }
+.view { height: 100%; }
+body[data-view="map"]     #view-signals { display: none; }
+body[data-view="map"]     #view-map     { display: flex; flex-direction: column; }
+body[data-view="signals"] #view-map     { display: none; }
+body[data-view="signals"] #view-signals { display: block; overflow-y: auto; }
+#view-map { position: relative; }
+
+#layout { display: flex; flex: 1; min-height: 0; width: 100%; }
+#map { flex: 1; height: 100%; }
 #events-panel {
   width: var(--panel-w);
-  height: 100vh;
+  height: 100%;
   background: var(--mantle);
   border-left: 1px solid var(--surface0);
   display: flex;
@@ -29,6 +64,10 @@ body { margin: 0; background: var(--base); font-family: var(--font-sans); color:
   font-size: 13px;
 }
 #events-count, #fixes-count { color: var(--subtext0); font-weight: normal; font-size: 12px; margin-left: auto; }
+/* Sidebar header */
+#panel-head { display: flex; align-items: baseline; gap: 8px; padding: 11px 12px 9px; border-bottom: 1px solid var(--surface0); }
+#panel-title { font-weight: 700; font-size: 13px; color: var(--text); }
+#panel-sub { font-size: 11px; color: var(--overlay0); font-family: var(--font-mono); margin-left: auto; }
 /* Tab bar switching the panel between Port events and Recent fixes */
 #panel-tabs { display: flex; border-bottom: 1px solid var(--surface0); }
 .tab-btn {
@@ -131,14 +170,14 @@ body { margin: 0; background: var(--base); font-family: var(--font-sans); color:
   z-index: 1000;
   background: rgba(17, 17, 27, 0.82);   /* crust @ 82% */
   border: 1px solid rgba(205, 214, 244, 0.10);
-  border-radius: 8px;
+  border-radius: 12px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
 }
 #reset-btn {
   display: none;
-  top: 52px;
+  top: 12px;
   right: calc(var(--panel-w) + 12px);
   padding: 7px 13px;
   color: var(--text);
@@ -147,19 +186,6 @@ body { margin: 0; background: var(--base); font-family: var(--font-sans); color:
   font-family: inherit;
 }
 #reset-btn:hover { background: rgba(69, 71, 90, 0.6); }
-/* Link to the market-signals dashboard. Sits top-right above the (transient)
-   reset button so the two never overlap. */
-#nav-signals {
-  top: 12px;
-  right: calc(var(--panel-w) + 12px);
-  padding: 7px 13px;
-  color: var(--accent);
-  text-decoration: none;
-  font-size: 13px;
-  font-weight: 600;
-  font-family: inherit;
-}
-#nav-signals:hover { background: rgba(137, 180, 250, 0.15); }
 #layer-controls {
   top: 12px;
   left: 52px;
@@ -200,12 +226,23 @@ body { margin: 0; background: var(--base); font-family: var(--font-sans); color:
   font-family: var(--font-mono);
   max-width: 40vw;
 }
-/* Live ingestion pulse — fix rate + a dot that breathes while data flows */
+/* "Feeds" strip — which signals the selected vessel contributes to (→ signals) */
+#vessel-feeds {
+  bottom: 12px; left: 50%; transform: translateX(-50%);
+  padding: 7px 12px; display: flex; align-items: center; gap: 8px;
+  font-size: 12px; color: var(--subtext1); max-width: 64vw; flex-wrap: wrap;
+}
+#vessel-feeds[hidden] { display: none; }
+#vessel-feeds .feeds-label { color: var(--overlay0); font-family: var(--font-mono); font-size: 11px; }
+.feed-chip {
+  cursor: pointer; font-family: var(--font-mono); font-size: 11px; font-weight: 600;
+  padding: 2px 9px; border-radius: 6px; background: rgba(137, 180, 250, 0.13);
+  color: var(--accent); border: 1px solid rgba(137, 180, 250, 0.3);
+}
+.feed-chip:hover { background: rgba(137, 180, 250, 0.22); }
+/* Live ingestion pulse — now lives in the shared top bar (not a floating HUD) */
 #live-hud {
-  top: 12px;
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 6px 12px;
+  margin-left: auto;
   display: flex;
   align-items: center;
   gap: 8px;

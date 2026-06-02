@@ -250,6 +250,7 @@ function renderCard(parent, key, spec, byScope, split, openFor) {
 
   const card = document.createElement('div');
   card.className = 'signal-card' + (spec.wide ? ' wide' : '');
+  card.dataset.key = key;
   card.style.animationDelay = (parent.querySelectorAll('.signal-card').length * 40) + 'ms';
   card.innerHTML = `
     <div class="signal-card-head">
@@ -312,31 +313,50 @@ async function openFor(key, sel) {
   catch (_) { body.innerHTML = '<div class="empty">Failed to load.</div>'; return; }
 
   const rows = data.rows || [];
-  if (!rows.length) { body.innerHTML = '<div class="empty">No contributors for this bucket.</div>'; return; }
+  const actions = document.getElementById('drawer-actions');
+  const day = sel.day || null;
+  if (!rows.length) { actions.innerHTML = ''; body.innerHTML = '<div class="empty">No contributors for this bucket.</div>'; return; }
   body.innerHTML = '';
+
+  // Leg buckets can be drawn as arcs on the map all at once.
+  if (data.kind === 'legs') {
+    actions.innerHTML = `<button class="drawer-action" id="trace-all">⟿ Show ${rows.length} legs on the map</button>`;
+    document.getElementById('trace-all').addEventListener('click', () => {
+      window.dispatchEvent(new CustomEvent('app:trace-arcs', {
+        detail: { legs: rows, label: `${spec.label || key} ${spec.sig || ''}`.trim(), day },
+      }));
+      closeDrawer();
+    });
+  } else {
+    actions.innerHTML = '';
+  }
   for (const r of rows) {
     const name = (r.vessel_name || '').trim() || `MMSI ${r.mmsi}`;
-    const a = document.createElement('a');
-    a.className = 'contrib-row';
+    const row = document.createElement('div');
+    row.className = 'contrib-row';
     if (data.kind === 'events') {
-      a.href = `/?focus=${r.mmsi}&ts=${encodeURIComponent(r.event_time)}`;
-      a.innerHTML = `
+      row.innerHTML = `
         <div class="contrib-top"><span class="contrib-vessel">${name}</span><span class="contrib-when">${fmtTimeShort(r.event_time)}</span></div>
-        <div class="contrib-meta"><span>${r.terminal_name || ''} · ${r.zone}</span><span class="contrib-arrow">on map →</span></div>`;
+        <div class="contrib-meta"><span>${r.terminal_name || ''} · ${r.zone}</span><span class="contrib-arrow">trace on map →</span></div>`;
     } else {
-      a.href = `/?focus=${r.mmsi}`;
       const dist = r.distance_nm != null ? `${Math.round(r.distance_nm)} nm` : '? nm';
-      a.innerHTML = `
+      row.innerHTML = `
         <div class="contrib-top"><span class="contrib-vessel">${name}</span><span class="contrib-when">${r.age_days}d out</span></div>
         <div class="contrib-meta">
           <span>${r.origin_zone} → ${r.dest_zone || '?'}</span>
           <span class="tag ${r.status}">${r.status.replace('open_in_transit', 'in transit')}</span>
           <span>${dist}</span>
           <span class="tag ${r.dist_source}">${r.dist_source}</span>
-          <span class="contrib-arrow">on map →</span>
+          <span class="contrib-arrow">trace on map →</span>
         </div>`;
     }
-    body.appendChild(a);
+    // No page nav — hand off to the shell, which switches to the map view and
+    // focuses this vessel (keeping the dashboard alive behind a back-chip).
+    row.addEventListener('click', () => {
+      window.dispatchEvent(new CustomEvent('app:trace', { detail: { mmsi: r.mmsi, label: name, day } }));
+      closeDrawer();
+    });
+    body.appendChild(row);
   }
 }
 
@@ -392,10 +412,27 @@ async function loadAll() {
   }
 }
 
-document.getElementById('split-regime').addEventListener('change', () => { if (lastRows) render(lastRows); });
-document.getElementById('drawer-close').addEventListener('click', closeDrawer);
-document.getElementById('drawer-scrim').addEventListener('click', closeDrawer);
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
+// Scroll to + flash a signal card by key (map→signals cross-highlight target).
+export function focusSignalCard(key) {
+  const card = document.querySelector(`.signal-card[data-key="${key}"]`);
+  if (!card) return false;
+  card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  card.classList.remove('flash');
+  void card.offsetWidth;  // restart the animation
+  card.classList.add('flash');
+  return true;
+}
 
-loadAll();
-setInterval(loadAll, 60000);
+// Exposed to the app shell; runs once when the signals view is first shown
+// (not at import, so it doesn't poll while the map view is up).
+let started = false;
+export function initSignals() {
+  if (started) return;
+  started = true;
+  document.getElementById('split-regime').addEventListener('change', () => { if (lastRows) render(lastRows); });
+  document.getElementById('drawer-close').addEventListener('click', closeDrawer);
+  document.getElementById('drawer-scrim').addEventListener('click', closeDrawer);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
+  loadAll();
+  setInterval(loadAll, 60000);
+}
