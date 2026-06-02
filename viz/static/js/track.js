@@ -54,29 +54,33 @@ export function clearSignalArcs() {
   if (arcLayer) { map.removeLayer(arcLayer); arcLayer = null; }
 }
 
-// Draw a signal's contributing legs as great-circle arcs (origin → destination):
-// width ∝ dwt, dashed when the destination is an estimate (dist_source==='fallback'),
-// so soft estimates are visually obvious. Returns the bounds for fit-to.
+// Draw a signal's contributing legs as great-circle arcs: width ∝ dwt. A closed
+// leg draws origin → observed arrival (solid); an open leg draws origin → the
+// vessel's current position (dashed, the voyage so far — destination unknown).
+// The origin is always marked so a bucket of all-open legs (most recent days)
+// still renders something and can be fit-to. Returns the bounds for fit-to.
 export function drawSignalArcs(legs, { color = '#89b4fa' } = {}) {
   clearSignalArcs();
   arcLayer = L.layerGroup();
   const bounds = [];
   for (const lg of legs) {
-    if (lg.departed_lat == null || lg.dest_lat == null) continue;
-    const pts = greatCircle(lg.departed_lat, lg.departed_lon, lg.dest_lat, lg.dest_lon);
-    const dashed = lg.dist_source === 'fallback';
-    const weight = lg.dwt ? Math.max(1, Math.min(5, lg.dwt / 45000)) : 1.5;
+    if (lg.departed_lat == null) continue;  // need at least an origin
     const name = (lg.vessel_name || '').trim() || `MMSI ${lg.mmsi}`;
-    L.polyline(pts, {
-      color, weight, opacity: 0.6, dashArray: dashed ? '4 7' : null, bubblingMouseEvents: false,
-    }).bindTooltip(
-      `${name} · ${lg.origin_zone}→${lg.dest_zone || '?'}${dashed ? ' · est. dest' : ''}`,
-      { sticky: true },
-    ).addTo(arcLayer);
-    L.circleMarker([lg.departed_lat, lg.departed_lon], {
+    const open = lg.dist_source !== 'observed';
+    if (lg.dest_lat != null && lg.dest_lon != null) {
+      const pts = greatCircle(lg.departed_lat, lg.departed_lon, lg.dest_lat, lg.dest_lon);
+      const weight = lg.dwt ? Math.max(1, Math.min(5, lg.dwt / 45000)) : 1.5;
+      const head = open ? 'in transit · position so far' : (lg.dest_zone || '?');
+      L.polyline(pts, {
+        color, weight, opacity: 0.6, dashArray: open ? '4 7' : null, bubblingMouseEvents: false,
+      }).bindTooltip(`${name} · ${lg.origin_zone}→${head}`, { sticky: true }).addTo(arcLayer);
+      pts.forEach(p => bounds.push(p));
+    }
+    const origin = [lg.departed_lat, lg.departed_lon];
+    L.circleMarker(origin, {
       radius: 3, color, fillColor: color, fillOpacity: 0.9, weight: 0, bubblingMouseEvents: false,
-    }).addTo(arcLayer);
-    pts.forEach(p => bounds.push(p));
+    }).bindTooltip(`${name} · departed ${lg.origin_zone}`, { sticky: true }).addTo(arcLayer);
+    bounds.push(origin);
   }
   arcLayer.addTo(map);
   return bounds;

@@ -207,7 +207,9 @@ details.signal-why > summary:hover { color: var(--subtext1); }
 }
 #drawer-scrim.open { opacity: 1; pointer-events: auto; }
 #contrib-drawer {
-  position: fixed; top: 0; right: 0; height: 100vh; width: 460px; max-width: 92vw;
+  /* Sit below the 50px #topbar (z-index 50) so the drawer title isn't occluded
+     by the page header. */
+  position: fixed; top: 50px; right: 0; height: calc(100vh - 50px); width: 460px; max-width: 92vw;
   background: var(--mantle); border-left: 1px solid var(--surface1);
   box-shadow: -12px 0 32px rgba(0, 0, 0, 0.5);
   transform: translateX(100%); transition: transform 0.24s cubic-bezier(0.22, 1, 0.36, 1);

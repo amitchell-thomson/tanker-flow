@@ -29,10 +29,10 @@ Chart.defaults.font.size = 10;
 // labelled/coloured: 'terminal' (berth signals) vs 'zone' (at-sea signals).
 const META = {
   gas_loading_us: {
-    label: 'Gas loading — US', unit: 'm³', sig: 'load', cat: 'supply',
+    label: 'Gas loading — US', unit: 'm³/d', sig: 'load', cat: 'supply',
     bandType: 'terminal',
-    what: 'LNG being loaded at US export berths right now, stacked by terminal — each vessel in berth contributes its full cargo capacity.',
-    mech: 'The leading edge of US supply. A terminal band collapsing is an early outage tell; a broad rise means more gas about to hit the water → softer Henry Hub, narrower spread.',
+    what: 'US loading rate, stacked by terminal — each cargo is amortized across its berth hours, so the stack height is gas leaving US berths per day (not a count of vessels in berth).',
+    mech: 'The leading edge of US supply. A terminal band collapsing is an early outage tell; a broad rise means more gas hitting the water → softer Henry Hub, narrower spread.',
   },
   gas_in_transit_volume: {
     label: 'Gas at sea → destination', unit: 'm³', sig: 'transit', cat: 'arbitrage',
@@ -41,9 +41,9 @@ const META = {
     mech: 'Gas already committed and en route. The destination split is the arbitrage — a fat EU stack precedes European supply; a swelling unknown band is gas that may not be coming to TTF.',
   },
   gas_discharging_eu: {
-    label: 'Gas discharging — EU', unit: 'm³', sig: 'disch', cat: 'demand',
+    label: 'Gas discharging — EU', unit: 'm³/d', sig: 'disch', cat: 'demand',
     bandType: 'terminal',
-    what: 'Laden LNG being discharged at EU import berths right now, stacked by terminal.',
+    what: 'EU discharge rate, stacked by terminal — each laden cargo is amortized across its berth hours, so the stack height is gas landing in EU berths per day.',
     mech: 'European absorption in real volume. Sustained low discharge = tight supply landing → TTF firms, spread widens; berths backing up = local oversupply, spread narrows.',
   },
   gas_ballast_to_us: {
@@ -147,13 +147,21 @@ function fillDaily(points) {
   for (let t = panelStartMs; t <= panelEndMs; t += DAY_MS) out.push({ x: new Date(t), y: byDay.get(t) ?? 0 });
   return out;
 }
-// Sum every band's latest-day value (the headline stock) + the day before it.
+// The headline stock = the stacked total on the panel's last day, and the day
+// before it for the delta. Read both at the actual calendar days (today /
+// yesterday), treating a band with no row that day as 0 — exactly what the
+// chart stacks via fillDaily. (Summing each band's own *last-present* row
+// instead would forward-fill stale terminals that had a vessel days ago into
+// "now", overstating the stock and inverting the delta sign.)
 function totalsLatest(byScope, regime) {
+  const lastDay = panelEndMs, prevDay = panelEndMs - DAY_MS;
   let cur = 0, prev = 0;
   for (const rg of Object.values(byScope)) {
-    const pts = rg[regime] || [];
-    if (pts.length) cur += pts[pts.length - 1].y;
-    if (pts.length > 1) prev += pts[pts.length - 2].y;
+    for (const p of rg[regime] || []) {
+      const t = p.x.getTime();
+      if (t === lastDay) cur += p.y;
+      else if (t === prevDay) prev += p.y;
+    }
   }
   return { cur, prev };
 }
@@ -184,8 +192,8 @@ function stackedOptions(spec, onClick) {
       tooltip: {
         filter: (item) => item.parsed.y > 0,
         callbacks: {
-          label: (c) => `${c.dataset.label}: ${fmtCompact(c.parsed.y)} m³`,
-          footer: (items) => `total ${fmtCompact(items.reduce((s, i) => s + i.parsed.y, 0))} m³ · click to trace →`,
+          label: (c) => `${c.dataset.label}: ${fmtCompact(c.parsed.y)} ${spec.unit}`,
+          footer: (items) => `total ${fmtCompact(items.reduce((s, i) => s + i.parsed.y, 0))} ${spec.unit} · click to trace →`,
         },
       },
       annotation: { annotations: seamAnnotation() },
@@ -203,8 +211,11 @@ function buildStackedArea(canvas, key, spec, byScope, regime, openFor) {
     return {
       label: bandLabel(band, spec),
       data: fillDaily(byScope[band][regime] || []),
-      borderColor: color, backgroundColor: hexFade(color, 0.45),
-      borderWidth: 1, fill: true, stack: 'gas',
+      // Fill to the band below (i-1), not to origin — otherwise every band's
+      // translucent area overlaps the ones beneath it and the composited colour
+      // drifts off the legend swatch. datasets[0] is the bottom of the stack.
+      borderColor: color, backgroundColor: hexFade(color, 0.7),
+      borderWidth: 1, fill: i === 0 ? 'origin' : '-1', stack: 'gas',
       tension: 0.25, pointRadius: 0, pointHoverRadius: 3,
       _band: band,
     };
@@ -213,17 +224,23 @@ function buildStackedArea(canvas, key, spec, byScope, regime, openFor) {
     const hit = chart.getElementsAtEventForMode(evt, 'index', { intersect: false }, true);
     if (!hit.length) return;
     const idx = hit[0].index;
-    // Resolve which stacked band the click fell in by its y-value — NOT
-    // datasets[0]. The datasets stack bottom→top in draw order, so walk the
-    // cumulative band value at this x until it passes the clicked y-value.
-    const rel = Chart.helpers ? Chart.helpers.getRelativePosition(evt, chart) : { y: evt.offsetY };
+    // Resolve which stacked band the click fell in by its y-value. The datasets
+    // stack bottom→top in draw order, so walk the cumulative band value at this
+    // x until it passes the clicked y. Skip bands that are zero on this day, and
+    // for a click *above* the column resolve to the topmost populated band — so
+    // clicking the whitespace over a short column traces that day instead of
+    // hitting a false-empty top band. A day with nothing at all is a no-op.
+    const rel = Chart.helpers ? Chart.helpers.getRelativePosition(evt, chart) : { y: evt.y };
     const yVal = chart.scales.y.getValueForPixel(rel.y);
     let cum = 0, chosen = null;
     for (const ds of chart.data.datasets) {
-      cum += ds.data[idx]?.y ?? 0;
-      if (yVal <= cum) { chosen = ds; break; }
+      const v = ds.data[idx]?.y ?? 0;
+      if (v <= 0) continue;
+      cum += v;
+      chosen = ds;
+      if (yVal <= cum) break;
     }
-    if (!chosen) chosen = chart.data.datasets[chart.data.datasets.length - 1];
+    if (!chosen) return;
     const pt = chosen.data[idx];
     if (pt) openFor(key, { day: toISODate(pt.x), zone_scope: chosen._band, regime }, pt.y);
   };
@@ -325,11 +342,15 @@ async function openFor(key, sel, bandValue) {
   // Reconciliation line: the clicked band's charted height vs the sum of the
   // contributors below. They should agree (this is the same selection logic);
   // a visible gap means the panel is stale relative to the live recompute.
-  const sum = rows.reduce((s, r) => s + (r.gas_capacity_m3 || 0), 0);
+  // Berth signals are an amortized daily flow, so a visit reconciles by its
+  // per-day deposit (contribution_m3); at-sea/ballast stocks by full capacity.
+  const unit = data.kind === 'visits' ? 'm³/d' : 'm³';
+  const reconField = (r) => (data.kind === 'visits' ? r.contribution_m3 : r.gas_capacity_m3) || 0;
+  const sum = rows.reduce((s, r) => s + reconField(r), 0);
   const recon = document.createElement('div');
   recon.className = 'contrib-recon';
-  const chart = bandValue != null ? `charted <b>${fmtCompact(bandValue)} m³</b> · ` : '';
-  recon.innerHTML = `${chart}${rows.length} vessel${rows.length === 1 ? '' : 's'} = <b>${fmtCompact(sum)} m³</b>`;
+  const chart = bandValue != null ? `charted <b>${fmtCompact(bandValue)} ${unit}</b> · ` : '';
+  recon.innerHTML = `${chart}${rows.length} vessel${rows.length === 1 ? '' : 's'} = <b>${fmtCompact(sum)} ${unit}</b>`;
   body.appendChild(recon);
 
   // Leg buckets can be drawn as arcs on the map all at once; visits are points.
@@ -352,11 +373,14 @@ async function openFor(key, sel, bandValue) {
     const gas = r.gas_capacity_m3 != null ? `${fmtCompact(r.gas_capacity_m3)} m³` : '? m³';
     if (data.kind === 'visits') {
       const berth = r.in_berth ? '<span class="tag in-berth">in berth</span>' : `${r.days_in_berth}d`;
+      // The day's amortized deposit (what this visit added to the charted band),
+      // with the full cargo as context.
+      const dep = r.contribution_m3 != null ? `${fmtCompact(r.contribution_m3)} m³/d` : gas;
       row.innerHTML = `
         <div class="contrib-top"><span class="contrib-vessel">${name}</span><span class="contrib-when">${berth}</span></div>
         <div class="contrib-meta">
           <span>${r.terminal_name || ''} · ${r.zone}</span>
-          <span>${gas}</span>
+          <span>${dep} <span class="contrib-dim">/ ${gas} cargo</span></span>
           <span class="contrib-arrow">trace on map →</span>
         </div>`;
     } else {

@@ -23,9 +23,17 @@ Design decisions:
   - The unit is gas capacity (`vessel_registry.gas_capacity_m3`); there is NO
     distance weighting (this replaces the ton-mile headline). Legs/visits with a
     NULL gas capacity are skipped and counted in the summary.
-  - "Currently loading / unloading / at sea" is reconstructed as a daily stock:
-    a leg/visit contributes its gas to its band on every day it is *live*
-    (in berth, or in transit). Open intervals run through the panel end.
+  - At-sea signals are a daily **stock**: a leg contributes its full gas to its
+    band on every day it is *live* (in transit / ballasting). Open intervals run
+    through the panel end.
+  - Berth signals (loading/discharging) are an amortized daily **flow**: a visit's
+    cargo is spread across its berth hours at a constant rate so it integrates to
+    exactly one cargo (`hours-on-day-d / total-berth-hours × capacity`). Total
+    berth hours = the visit's observed dwell once it has departed; while it is
+    still open, the terminal's mean dwell is the estimate (cumulative deposit
+    capped at one cargo, so an open visit lingering past its estimated dwell
+    plateaus instead of over-counting). This de-biases the old in-berth stock,
+    where a visit straddling midnight registered its full cargo on both days.
   - basis='physical' only: one compute_legs(now=as_of) call; an item is live on
     day d iff its interval covers d, using today's classification (hindsight-
     clean, not leakage-free). The 'knowable' point-in-time series is deferred.
@@ -75,6 +83,10 @@ BASIS_PHYSICAL = "physical"
 # still "open" after a working week is almost always a dropped departure (it also
 # stops a synthetic FSRU `moored` from pinning its host terminal forever).
 OPEN_VISIT_CEILING_DAYS = 5
+
+# Nominal LNG load/discharge dwell, used only to amortize an open visit at a
+# terminal that has no closed visit yet to average (cold start).
+DEFAULT_BERTH_HOURS = 24.0
 
 # Band used for an in-transit / ballast leg whose destination was never declared
 # (terrestrial AIS loses the mid-ocean dest broadcast — ~90% of open legs). The
@@ -180,6 +192,37 @@ def visit_interval(visit: Visit, panel_end: date) -> tuple[date, date]:
         end_excl = min(panel_end + timedelta(days=1), ceiling)
         end_excl = max(end_excl, start + timedelta(days=1))  # always count moored day
     return start, end_excl
+
+
+def visit_berth_interval(visit: Visit, panel_end: date) -> tuple[date, date]:
+    """Day span a berth visit deposits its (amortized) cargo over: the mooring
+    day through the departure day *inclusive* — unlike `visit_interval`, the
+    departure day is included because it carries real berth hours (midnight →
+    departed_ts) over which loading is still happening. An open visit runs to
+    panel_end, capped at OPEN_VISIT_CEILING_DAYS."""
+    start = visit.moored_ts.date()
+    if visit.departed_ts is not None:
+        end_day = max(visit.departed_ts.date(), start)
+    else:
+        end_day = min(panel_end, start + timedelta(days=OPEN_VISIT_CEILING_DAYS))
+    return start, end_day + timedelta(days=1)
+
+
+def terminal_dwell_hours(visits: list[Visit]) -> tuple[dict[int, float], float]:
+    """Mean observed berth dwell (hours) per terminal from *closed* visits, plus
+    a global-mean fallback for terminals with no closed visit yet. Used to amortize
+    an *open* visit's cargo over an estimated total dwell until its real duration
+    is known (closed visits use their own observed dwell)."""
+    per: dict[int, list[float]] = defaultdict(list)
+    for v in visits:
+        if v.departed_ts is None or v.terminal_id is None:
+            continue
+        hours = (v.departed_ts - v.moored_ts).total_seconds() / 3600.0
+        if hours > 0:
+            per[v.terminal_id].append(hours)
+    means = {t: sum(h) / len(h) for t, h in per.items()}
+    allh = [h for hs in per.values() for h in hs]
+    return means, (sum(allh) / len(allh) if allh else DEFAULT_BERTH_HOURS)
 
 
 def items_live_on(items, target: date, interval_of) -> list:
@@ -294,8 +337,59 @@ def visit_terminal_band(visit: Visit) -> str:
 
 def _gas(item, _d: date) -> float | None:
     """Per-day contribution = the item's gas capacity (constant while live).
-    None ⇒ the item is skipped (and not counted in n_legs)."""
+    None ⇒ the item is skipped (and not counted in n_legs). Used by the at-sea
+    *stock* signals."""
     return item.gas_capacity_m3
+
+
+def amortized_cargo_contribution(
+    dwell_means: dict[int, float], global_mean: float, now: datetime
+) -> Callable[[Visit, date], float | None]:
+    """Per-day contribution for a *berth* signal as an amortized **flow**: a
+    visit's cargo (`gas_capacity_m3`) is spread across its berth hours at a
+    constant rate so the visit integrates to exactly one cargo. The per-day value
+    is the cargo deposited between that day's bounds:
+
+        rate = capacity / total_berth_hours
+        total_berth_hours = observed (departed - moored) for a closed visit, else
+            the terminal's mean dwell (global-mean fallback) for an open one.
+
+    The cumulative deposit is capped at one cargo, so an open visit lingering past
+    its estimated dwell plateaus at full capacity and then contributes 0/day (it
+    stops showing once it is "loaded" on estimate) rather than over-counting; a
+    closed visit re-normalizes to its true dwell on the next rebuild. None ⇒ no
+    contribution that day (skipped, uncounted), so n_legs counts the vessels
+    *actively* loading/discharging that day."""
+
+    def contribution(visit: Visit, d: date) -> float | None:
+        cap = visit.gas_capacity_m3
+        if cap is None:
+            return None
+        t0 = visit.moored_ts
+        if visit.departed_ts is not None:
+            t_end = visit.departed_ts
+            total_h = (t_end - t0).total_seconds() / 3600.0
+        else:
+            est = dwell_means.get(visit.terminal_id, global_mean)
+            total_h = est if est > 0 else DEFAULT_BERTH_HOURS
+            t_end = min(now, t0 + timedelta(days=OPEN_VISIT_CEILING_DAYS))
+        if total_h <= 0:
+            total_h = DEFAULT_BERTH_HOURS
+        rate = cap / total_h  # m³ per hour
+
+        def deposited_by(t: datetime) -> float:
+            h = (t - t0).total_seconds() / 3600.0
+            return min(float(cap), rate * h) if h > 0 else 0.0
+
+        day_start = datetime(d.year, d.month, d.day, tzinfo=UTC)
+        lo = max(day_start, t0)
+        hi = min(day_start + timedelta(days=1), t_end)
+        if hi <= lo:
+            return None
+        c = deposited_by(hi) - deposited_by(lo)
+        return c if c > 1e-9 else None
+
+    return contribution
 
 
 def accumulate_daily(
@@ -372,20 +466,27 @@ async def build_signals(
         panel_start = min(starts) if starts else panel_end
     days = daily_buckets(panel_start, panel_end)
 
+    # Berth signals amortize each cargo across the visit's berth hours (flow);
+    # open visits estimate total dwell from the terminal's closed-visit mean.
+    load_means, load_global = terminal_dwell_hours(loading)
+    disch_means, disch_global = terminal_dwell_hours(discharging)
+
     rows: list[SignalRow] = []
     rows += accumulate_daily(
         loading,
         days,
         signal_key="gas_loading_us",
-        interval_of=visit_interval,
+        interval_of=visit_berth_interval,
         band_of=visit_terminal_band,
+        contribution=amortized_cargo_contribution(load_means, load_global, now),
     )
     rows += accumulate_daily(
         discharging,
         days,
         signal_key="gas_discharging_eu",
-        interval_of=visit_interval,
+        interval_of=visit_berth_interval,
         band_of=visit_terminal_band,
+        contribution=amortized_cargo_contribution(disch_means, disch_global, now),
     )
     rows += accumulate_daily(
         transit,

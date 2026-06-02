@@ -5,7 +5,9 @@ Pure-logic: synthetic Leg / Visit objects, no DB. Mirrors tests/test_legs.py.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from config import REGIME_CUTOVER
 from pipeline.legs import Leg
@@ -13,6 +15,7 @@ from pipeline.signal import (
     UNKNOWN_BAND,
     LaneFilter,
     accumulate_daily,
+    amortized_cargo_contribution,
     ballast_dest_band,
     ballast_to_us_legs,
     daily_buckets,
@@ -21,7 +24,9 @@ from pipeline.signal import (
     lane_legs,
     leg_interval,
     loading_us_visits,
+    terminal_dwell_hours,
     transit_dest_band,
+    visit_berth_interval,
     visit_interval,
     visit_terminal_band,
 )
@@ -321,3 +326,74 @@ def test_accumulate_daily_regime_split_at_seam():
     by = index(rows)
     post = (REGIME_CUTOVER + timedelta(days=3)).date()
     assert by[("g", post, "nweurope", "bbox")] == by[("g", post, "nweurope", "all")]
+
+
+# --- berth signals as amortized flow ------------------------------------------
+
+
+def test_visit_berth_interval_includes_departure_day():
+    # Unlike visit_interval (half-open on departure), the amortized-flow interval
+    # includes the departure day, which carries real berth hours.
+    v = mk_visit(moored_ts=at(0), departed_ts=at(2))
+    start, end_excl = visit_berth_interval(v, at(10).date())
+    assert start == at(0).date()
+    assert end_excl == at(2).date() + timedelta(days=1)
+
+
+def test_terminal_dwell_hours_mean_and_fallback():
+    visits = [
+        mk_visit(terminal_id=10, moored_ts=at(0), departed_ts=at(1)),    # 24h
+        mk_visit(terminal_id=10, moored_ts=at(2), departed_ts=at(2.5)),  # 12h
+        mk_visit(terminal_id=11, moored_ts=at(0), departed_ts=None),     # open → ignored
+    ]
+    means, global_mean = terminal_dwell_hours(visits)
+    assert means[10] == pytest.approx(18.0)  # (24 + 12) / 2
+    assert 11 not in means                   # only-open terminal has no observed mean
+    assert global_mean == pytest.approx(18.0)
+
+
+def test_amortized_closed_visit_integrates_to_one_cargo():
+    # A closed visit spanning several days deposits its cargo exactly once.
+    v = mk_visit(terminal_id=10, moored_ts=at(0), departed_ts=at(2), gas_capacity_m3=170_000)
+    days = daily_buckets(at(0).date(), at(10).date())
+    rows = accumulate_daily(
+        [v], days, signal_key="gas_loading_us",
+        interval_of=visit_berth_interval, band_of=visit_terminal_band,
+        contribution=amortized_cargo_contribution({}, 24.0, NOW),
+    )
+    total = sum(r.value for r in rows if r.regime == "all")
+    assert total == pytest.approx(170_000)
+
+
+def test_amortized_midnight_straddle_splits_not_doubles():
+    # A 2h visit straddling midnight splits its cargo across the two days rather
+    # than registering full capacity on both (the old in-berth stock bug).
+    moored = datetime(2026, 6, 1, 23, 0, tzinfo=timezone.utc)
+    departed = datetime(2026, 6, 2, 1, 0, tzinfo=timezone.utc)
+    v = mk_visit(terminal_id=10, moored_ts=moored, departed_ts=departed, gas_capacity_m3=170_000)
+    days = daily_buckets(moored.date(), departed.date() + timedelta(days=2))
+    rows = accumulate_daily(
+        [v], days, signal_key="gas_loading_us",
+        interval_of=visit_berth_interval, band_of=visit_terminal_band,
+        contribution=amortized_cargo_contribution({}, 24.0, NOW),
+    )
+    by = index(rows)
+    assert by[("gas_loading_us", moored.date(), "10", "all")] == pytest.approx(85_000)
+    assert by[("gas_loading_us", departed.date(), "10", "all")] == pytest.approx(85_000)
+
+
+def test_amortized_open_visit_estimates_dwell_and_caps_at_one_cargo():
+    # An open visit estimates total dwell from the terminal mean and never
+    # deposits more than one cargo, even after lingering past the estimate.
+    moored = NOW - timedelta(days=3)
+    v = mk_visit(terminal_id=10, moored_ts=moored, departed_ts=None, gas_capacity_m3=170_000)
+    days = daily_buckets(moored.date(), NOW.date())
+    rows = accumulate_daily(
+        [v], days, signal_key="gas_loading_us",
+        interval_of=visit_berth_interval, band_of=visit_terminal_band,
+        contribution=amortized_cargo_contribution({10: 24.0}, 24.0, NOW),
+    )
+    total = sum(r.value for r in rows if r.regime == "all")
+    assert total == pytest.approx(170_000)  # capped at exactly one cargo
+    active_days = sum(1 for r in rows if r.regime == "all" and r.value > 1e-6)
+    assert active_days <= 2  # ~24h of estimated dwell spans at most 2 calendar days

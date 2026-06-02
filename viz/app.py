@@ -25,6 +25,7 @@ from config import AIS_BOUNDING_BOXES, regime_of, settings
 from pipeline.legs import compute_legs
 from pipeline.signal import (
     TERMINAL_METADATA_SQL,
+    amortized_cargo_contribution,
     ballast_dest_band,
     ballast_to_us_legs,
     build_lane_filter,
@@ -33,7 +34,9 @@ from pipeline.signal import (
     lane_legs,
     leg_interval,
     loading_us_visits,
+    terminal_dwell_hours,
     transit_dest_band,
+    visit_berth_interval,
     visit_interval,
     visit_terminal_band,
 )
@@ -905,10 +908,14 @@ async def signals_overview(pool: asyncpg.Pool = Depends(get_pool)):
 
 def _leg_row(lg, names, ref_date) -> dict:
     """A leg contributor, with endpoint coords for drawing it as an arc on the
-    map. Open legs have no observed arrival, so the dest point is unknown."""
-    dest_lat, dest_lon = (
-        (lg.arrived_lat, lg.arrived_lon) if lg.status == "closed" else (None, None)
-    )
+    map. A closed leg draws origin → observed arrival; an open leg has no arrival
+    yet, so it draws origin → the vessel's *latest* position (the voyage so far) —
+    otherwise recent buckets, which are almost all open legs, would render an
+    empty map."""
+    if lg.status == "closed":
+        dest_lat, dest_lon, dist_source = lg.arrived_lat, lg.arrived_lon, "observed"
+    else:
+        dest_lat, dest_lon, dist_source = lg.last_fix_lat, lg.last_fix_lon, "current"
     return {
         "mmsi": lg.mmsi,
         "vessel_name": names.get(lg.mmsi),
@@ -924,7 +931,7 @@ def _leg_row(lg, names, ref_date) -> dict:
         "dest_lon": dest_lon,
         "dwt": lg.dwt,
         "gas_capacity_m3": lg.gas_capacity_m3,
-        "dist_source": "observed" if lg.status == "closed" else "declared",
+        "dist_source": dist_source,
         "age_days": (ref_date - lg.departed_ts.date()).days,
         "regime": lg.regime,
     }
@@ -969,13 +976,24 @@ async def signals_contributors(
             if _VISIT_SIGNALS[signal_key] == "discharging"
             else loading_us_visits(visits)
         )
-        live = items_live_on(base, ref_date, visit_interval)
+        # Reconcile against the chart, which now amortizes each cargo across its
+        # berth hours (a flow): a visit contributes its per-day *deposit*
+        # (`contribution_m3`), not its full cargo. Same dwell-mean basis as the
+        # rebuild, and the same berth interval, so the drawer's sum matches the
+        # clicked band. Visits whose deposit is 0 on `day` (e.g. an open visit
+        # already capped at one cargo) drop out — exactly the chart's set.
+        means, global_mean = terminal_dwell_hours(base)
+        contribution = amortized_cargo_contribution(means, global_mean, now)
+        live = items_live_on(base, ref_date, visit_berth_interval)
         if rg is not None:
             live = [v for v in live if v.regime == rg]
         if zone_scope is not None:
             live = [v for v in live if visit_terminal_band(v) == zone_scope]
         rows = []
         for v in live:
+            deposit = contribution(v, ref_date)
+            if deposit is None:
+                continue
             rows.append(
                 {
                     "mmsi": v.mmsi,
@@ -988,6 +1006,7 @@ async def signals_contributors(
                     "departed_ts": v.departed_ts,
                     "in_berth": v.departed_ts is None,
                     "gas_capacity_m3": v.gas_capacity_m3,
+                    "contribution_m3": deposit,
                     "dwt": v.dwt,
                     "regime": v.regime,
                     "days_in_berth": (ref_date - v.moored_ts.date()).days,
