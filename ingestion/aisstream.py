@@ -441,7 +441,14 @@ async def flush_buffers(pool: asyncpg.Pool, ingest_state: IngestionState) -> Non
                 )
                 ingest_state.fix_inserts += len(fix_batch)
             except Exception as e:
-                logger.warning(f"Batch fix insert failed ({len(fix_batch)} rows): {e}")
+                logger.warning(
+                    f"Batch fix insert failed ({len(fix_batch)} rows): {e} — "
+                    f"re-queuing for retry"
+                )
+                # Re-queue ahead of anything that arrived during the failed write so
+                # a transient DB error doesn't silently drop fixes. Safe to replay:
+                # the insert is ON CONFLICT (fix_ts, mmsi) DO NOTHING.
+                ingest_state.fix_buf = fix_batch + ingest_state.fix_buf
 
         if registry_batch:
             try:
@@ -461,7 +468,10 @@ async def flush_buffers(pool: asyncpg.Pool, ingest_state: IngestionState) -> Non
             except Exception as e:
                 logger.warning(
                     f"Batch registry upsert failed ({len(registry_batch)} rows): {e}"
+                    f" — re-queuing for retry"
                 )
+                # Idempotent upsert (ON CONFLICT (mmsi) DO UPDATE) — safe to replay.
+                ingest_state.registry_buf = registry_batch + ingest_state.registry_buf
 
         if state_batch:
             try:
@@ -478,7 +488,10 @@ async def flush_buffers(pool: asyncpg.Pool, ingest_state: IngestionState) -> Non
             except Exception as e:
                 logger.warning(
                     f"Batch state insert failed ({len(state_batch)} rows): {e}"
+                    f" — re-queuing for retry"
                 )
+                # ON CONFLICT (state_ts, mmsi) DO NOTHING — safe to replay.
+                ingest_state.state_buf = state_batch + ingest_state.state_buf
 
         if inzone:
             try:
