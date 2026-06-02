@@ -71,6 +71,15 @@ export function bearingDeg(lat1, lon1, lat2, lon2) {
   return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
 }
 
+// Great-circle distance in nautical miles. Mirrors pipeline/geo.py haversine_nm.
+export function haversineNm(lat1, lon1, lat2, lon2) {
+  const toRad = d => (d * Math.PI) / 180, rNm = 3440.065;
+  const dPhi = toRad(lat2 - lat1), dLam = toRad(lon2 - lon1);
+  const a = Math.sin(dPhi / 2) ** 2
+          + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLam / 2) ** 2;
+  return 2 * rNm * Math.asin(Math.sqrt(a));
+}
+
 // Great-circle path (slerp) from (lat1,lon1) to (lat2,lon2) as an array of
 // [lat,lon] points — for drawing voyage legs as true geodesic arcs on the map
 // (L.polyline alone draws straight Mercator lines). No deps; mirrors bearingDeg.

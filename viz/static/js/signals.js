@@ -388,12 +388,22 @@ function render(rows) {
   if (!rows.length) { root.innerHTML = '<div class="empty">No signals yet — run <code>make signals</code>.</div>'; return; }
 
   const times = rows.map((r) => new Date(r.bucket_date + 'T00:00:00Z').getTime());
-  panelStartMs = Math.min(...times); panelEndMs = Math.max(...times);
   const grouped = groupRows(rows);
 
   // The regime toggle picks which series we stack. 'split' shows the live
   // (mmsi_filter) regime alone — segmented; otherwise the pooled 'all' series.
-  const regime = document.getElementById('split-regime').checked ? 'mmsi_filter' : 'all';
+  const split = document.getElementById('split-regime').checked;
+  const regime = split ? 'mmsi_filter' : 'all';
+
+  // Split-by-regime clamps the x-range to the live regime — regime change → today
+  // (both floored to UTC midnight so the daily grid in fillDaily still aligns on
+  // the bucket_date points). Pooled view spans the full panel (oldest→newest row).
+  if (split) {
+    panelStartMs = Math.floor(SEAM_MS / DAY_MS) * DAY_MS;
+    panelEndMs = Math.floor(Date.now() / DAY_MS) * DAY_MS;
+  } else {
+    panelStartMs = Math.min(...times); panelEndMs = Math.max(...times);
+  }
 
   // 2×2 grid: the four headline gas-volume signals in story order, then any
   // unknown keys appended.

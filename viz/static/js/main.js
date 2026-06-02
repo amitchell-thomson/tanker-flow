@@ -4,6 +4,7 @@ import { map, setBasemap, toggleLayer } from './map.js';
 import { loadVessels, markers, undim } from './vessels.js';
 import { loadTerminalZones, loadBoundingBoxes } from './zones.js';
 import { clearTrackAndEvents, clearSignalArcs, hasTrack } from './track.js';
+import { stopPlayback } from './playback.js';
 import { loadEvents, initEventsPanelHandlers } from './events.js';
 import { toggleDensity } from './density.js';
 import { setStatus, startIngestPulse } from './hud.js';
@@ -14,6 +15,7 @@ let started = false;
 function resetView() {
   undim();
   clearTrackAndEvents();
+  stopPlayback();
   clearSignalArcs();
   document.getElementById('reset-btn').style.display = 'none';
   document.getElementById('vessel-feeds').hidden = true;

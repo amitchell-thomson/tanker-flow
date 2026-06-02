@@ -231,6 +231,28 @@ body[data-view="signals"] #view-signals { display: flex; flex-direction: column;
   font-family: var(--font-mono);
   max-width: 40vw;
 }
+/* Track playback scrubber — bottom-center when a vessel is selected, stacked
+   just above the #vessel-feeds strip. */
+#playback-bar {
+  bottom: 54px; left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 12px; width: min(560px, 72vw);
+}
+#playback-bar[hidden] { display: none; }
+#playback-bar button {
+  background: transparent; color: var(--subtext1);
+  border: 1px solid rgba(205, 214, 244, 0.12); border-radius: 6px;
+  padding: 4px 9px; font-size: 13px; font-family: inherit; cursor: pointer; line-height: 1;
+}
+#playback-bar button:hover { background: rgba(205, 214, 244, 0.06); color: var(--text); }
+#pb-play { min-width: 30px; }
+#pb-speed { min-width: 36px; font-family: var(--font-mono); font-size: 12px; }
+#pb-close { color: var(--overlay1); }
+#pb-time {
+  flex: none; min-width: 150px; text-align: right;
+  color: var(--subtext1); font-family: var(--font-mono); font-size: 11px; white-space: nowrap;
+}
+#pb-slider { flex: 1; accent-color: var(--accent); height: 4px; cursor: pointer; }
 /* "Feeds" strip — which signals the selected vessel contributes to (→ signals) */
 #vessel-feeds {
   bottom: 12px; left: 50%; transform: translateX(-50%);

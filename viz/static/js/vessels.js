@@ -5,6 +5,7 @@ import {
   tierColor, tierRadius, freshnessOpacity, fmtAge, fmtTimeFull,
 } from './config.js';
 import { drawTrack, clearTrackAndEvents, setEventMarkers } from './track.js';
+import { startPlayback, stopPlayback } from './playback.js';
 import { setStatus } from './hud.js';
 
 export const vesselLayer = L.layerGroup().addTo(map);
@@ -121,6 +122,7 @@ export async function selectVessel(mmsi, name) {
   setStatus(`Loading track for ${name} (${mmsi})…`);
   dimAllExcept(mmsi);
   clearTrackAndEvents();
+  stopPlayback();
   // Full available track + the vessel's whole event history (drawn along it).
   const [history, events] = await Promise.all([
     fetch(`/api/vessel/${mmsi}/history`).then(r => r.json()),
@@ -131,7 +133,7 @@ export async function selectVessel(mmsi, name) {
     window.dispatchEvent(new CustomEvent('app:vessel-selected', { detail: { mmsi, name } }));
     return;
   }
-  drawTrack(history);
+  const track = drawTrack(history);
 
   // Port events along the track.
   if (events && events.length) {
@@ -150,8 +152,10 @@ export async function selectVessel(mmsi, name) {
     setEventMarkers(layer);
   }
 
-  map.fitBounds(L.latLngBounds(history.map(h => [h.lat, h.lon])).pad(0.2));
+  const fitPts = track.length ? track.map(f => [f.lat, f.lon]) : history.map(h => [h.lat, h.lon]);
+  map.fitBounds(L.latLngBounds(fitPts).pad(0.2));
   document.getElementById('reset-btn').style.display = 'block';
+  startPlayback(track);
   const ev = events && events.length ? ` · ${events.length} events` : '';
   setStatus(`${name} — ${history.length} fixes${ev}`);
   // Let the shell surface which signals this vessel currently feeds.

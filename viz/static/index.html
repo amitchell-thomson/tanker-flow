@@ -122,6 +122,13 @@
       </div>
       <div id="status" class="hud">Loading…</div>
       <div id="vessel-feeds" class="hud" hidden></div>
+      <div id="playback-bar" class="hud" hidden>
+        <button id="pb-play" title="Play / pause (space)">▶</button>
+        <input id="pb-slider" type="range" min="0" max="1000" value="0" step="1" title="Scrub">
+        <span id="pb-time">—</span>
+        <button id="pb-speed" title="Playback speed">1×</button>
+        <button id="pb-close" title="Close playback" aria-label="Close">✕</button>
+      </div>
     </section>
 
     <!-- ── Signals view ── -->

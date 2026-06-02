@@ -1,11 +1,34 @@
 // Vessel track polyline + per-event markers + signal-leg arcs.
 import { map } from './map.js';
-import { greatCircle, bearingDeg, fmtTimeShort } from './config.js';
+import { greatCircle, bearingDeg, haversineNm, fmtTimeShort } from './config.js';
 
 const GAP_HOURS = 6;          // dt above this between fixes = AIS dropout
 const TRACK_OLD = '#585b70';  // surface2 — oldest fix
 const TRACK_NEW = '#89dceb';  // sky — newest (reads as "now")
-const N_ARROWS = 7;
+// Teleport gate — mirrors pipeline/port_events.py (_drop_teleports). The history
+// endpoint serves raw ais_fixes, which carry MMSI-collision/spoof spikes; drop
+// any fix implying > TELEPORT_MAX_KN from the last *accepted* fix, gated by a
+// distance floor so near-stationary GPS jitter survives. Keeps the drawn track
+// true without touching the raw data.
+const TELEPORT_MAX_KN = 45;
+const TELEPORT_MIN_NM = 8;
+
+function dropTeleports(fixes) {
+  const kept = [];
+  let last = null;
+  for (const f of fixes) {
+    if (last) {
+      const dtH = (new Date(f.fix_ts) - new Date(last.fix_ts)) / 3.6e6;
+      if (dtH > 0) {
+        const nm = haversineNm(last.lat, last.lon, f.lat, f.lon);
+        if (nm > TELEPORT_MIN_NM && nm / dtH > TELEPORT_MAX_KN) continue;
+      }
+    }
+    kept.push(f);
+    last = f;
+  }
+  return kept;
+}
 
 function lerpHex(a, b, t) {
   const pa = parseInt(a.slice(1), 16), pb = parseInt(b.slice(1), 16);
@@ -60,10 +83,11 @@ export function drawSignalArcs(legs, { color = '#89b4fa' } = {}) {
 }
 
 export function drawTrack(fixes) {
-  // /api/vessel/{mmsi}/history returns newest-first; sort to chronological.
-  const s = fixes.slice().sort((a, b) => new Date(a.fix_ts) - new Date(b.fix_ts));
+  // /api/vessel/{mmsi}/history returns newest-first; sort to chronological,
+  // then strip teleport spikes so the drawn track follows the real vessel.
+  const s = dropTeleports(fixes.slice().sort((a, b) => new Date(a.fix_ts) - new Date(b.fix_ts)));
   trackLayer = L.layerGroup();
-  if (!s.length) { trackLayer.addTo(map); return; }
+  if (!s.length) { trackLayer.addTo(map); return []; }
   const renderer = L.canvas({ padding: 0.5 });  // fast for long tracks
   const n = s.length;
 
@@ -86,42 +110,40 @@ export function drawTrack(fixes) {
     }
   }
 
-  // Direction arrows spaced along the track.
-  for (let k = 1; k <= N_ARROWS; k++) {
-    const i = Math.floor((k * n) / (N_ARROWS + 1));
-    if (i < 1 || i >= n) continue;
-    const brg = bearingDeg(s[i - 1].lat, s[i - 1].lon, s[i].lat, s[i].lon);
-    const icon = L.divIcon({
-      className: 'track-arrow',
-      html: `<svg width="14" height="14" viewBox="0 0 14 14" style="transform:rotate(${brg}deg)">`
-        + `<path d="M7 1 L11 12 L7 9 L3 12 Z" fill="#89dceb"/></svg>`,
-      iconSize: [14, 14], iconAnchor: [7, 7],
-    });
-    L.marker([s[i].lat, s[i].lon], { icon, interactive: false }).addTo(trackLayer);
-  }
-
-  // Per-fix dots (downsampled) with hover detail; VF-rescue fixes + the newest
-  // fix are always drawn and stand out.
+  // Per-fix direction arrows (downsampled): each fix is drawn as an arrow
+  // pointing to the next fix — a flow field along the track, time-coloured
+  // old→new. VF-rescue fixes are always drawn and stand out (pink, outlined);
+  // the newest fix has no onward fix, so it stays a dot ("you are here").
   const step = Math.max(1, Math.floor(n / 350));
   s.forEach((f, i) => {
     const rescue = (f.source || '').includes('vesselfinder');
     const newest = i === n - 1;
     if (!rescue && !newest && i % step !== 0) return;
     const sog = f.sog != null ? `${f.sog.toFixed(1)} kn` : '? kn';
-    L.circleMarker([f.lat, f.lon], {
-      renderer,
-      radius: newest ? 5 : rescue ? 4 : 2.5,
-      color: newest ? '#a6e3a1' : rescue ? '#f5c2e7' : '#cdd6f4',
-      weight: rescue ? 2 : 0,
-      fillColor: newest ? '#a6e3a1' : rescue ? '#11111b' : lerpHex(TRACK_OLD, TRACK_NEW, i / Math.max(1, n - 1)),
-      fillOpacity: rescue ? 1 : 0.85, bubblingMouseEvents: false,
-    }).bindTooltip(
-      `${fmtTimeShort(f.fix_ts)} · ${sog} · ${srcLabel(f.source)}${rescue ? ' ⛑' : ''}${newest ? ' · latest' : ''}`,
-      { sticky: true },
-    ).addTo(trackLayer);
+    const tip = `${fmtTimeShort(f.fix_ts)} · ${sog} · ${srcLabel(f.source)}${rescue ? ' ⛑' : ''}${newest ? ' · latest' : ''}`;
+
+    if (newest) {
+      L.circleMarker([f.lat, f.lon], {
+        renderer, radius: 5, color: '#a6e3a1', weight: 0,
+        fillColor: '#a6e3a1', fillOpacity: 0.95, bubblingMouseEvents: false,
+      }).bindTooltip(tip, { sticky: true }).addTo(trackLayer);
+      return;
+    }
+
+    const brg = bearingDeg(f.lat, f.lon, s[i + 1].lat, s[i + 1].lon);
+    const fill = rescue ? '#f5c2e7' : lerpHex(TRACK_OLD, TRACK_NEW, i / Math.max(1, n - 1));
+    const sz = rescue ? 16 : 12;
+    const icon = L.divIcon({
+      className: 'track-arrow',
+      html: `<svg width="${sz}" height="${sz}" viewBox="0 0 14 14" style="transform:rotate(${brg}deg)">`
+        + `<path d="M7 1 L11 12 L7 9 L3 12 Z" fill="${fill}"${rescue ? ' stroke="#11111b" stroke-width="1"' : ''}/></svg>`,
+      iconSize: [sz, sz], iconAnchor: [sz / 2, sz / 2],
+    });
+    L.marker([f.lat, f.lon], { icon }).bindTooltip(tip, { sticky: true }).addTo(trackLayer);
   });
 
   trackLayer.addTo(map);
+  return s;  // cleaned, chronological fixes — for fit-to-bounds + playback
 }
 
 export function setEventMarkers(layer) {
