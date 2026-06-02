@@ -35,10 +35,11 @@ from pipeline.signal import (
 
 STATIC_DIR = Path(__file__).parent / "static"
 
-# Catppuccin Mocha density ramp (low → high traffic): base → sapphire → blue →
-# mauve → pink, so the shipping-lane raster reads on the dark basemap.
+# Catppuccin Mocha density ramp (low → high traffic): a warm "heat" glow —
+# low/rare traffic is dim neutral grey, ramping through mauve and rose to bright
+# pink where many tracks overlap, so the busiest areas pop on the dark basemap.
 _MOCHA_DENSITY = LinearSegmentedColormap.from_list(
-    "mocha_density", ["#1e1e2e", "#74c7ec", "#89b4fa", "#cba6f7", "#f5c2e7"]
+    "mocha_density", ["#313244", "#585b70", "#cba6f7", "#f38ba8", "#f5c2e7"]
 )
 
 
@@ -601,7 +602,9 @@ def _render_density(
 
     normed = np.clip(np.log1p(grid) / p99, 0.0, 1.0)
     rgba = _MOCHA_DENSITY(normed)
-    rgba[:, :, 3] = np.power(normed, 0.5)
+    # Lift the alpha curve (0.5 → 0.4) so faint lanes glow instead of vanishing
+    # on the dark basemap, while the busiest stay near-opaque.
+    rgba[:, :, 3] = np.power(normed, 0.4)
     img = Image.fromarray((rgba * 255).astype(np.uint8), "RGBA")
     buf = io.BytesIO()
     img.save(buf, format="PNG")

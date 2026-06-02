@@ -32,17 +32,17 @@ export const BASEMAPS = {
 // Vessel class → fill color (Catppuccin Mocha). Only LNG carriers and FSRUs
 // reach the map.
 export const FSRU_COLOR = '#f38ba8';     // red
-export const CARRIER_COLOR = '#f5c2e7';  // pink
+export const CARRIER_COLOR = '#cba6f7';  // mauve — vivid + distinct on the dark map
 
 // priority_watchlist tier → marker stroke color (Mocha). Tier 1 (in a terminal
 // zone) is hottest, tier 5 (stale) coldest; null = not on the watchlist.
-const TIER_COLORS = { 1: '#a6e3a1', 2: '#f9e2af', 3: '#fab387', 4: '#a6adc8', 5: '#6c7086' };
-export function tierColor(tier) { return TIER_COLORS[tier] || '#45475a'; }
+const TIER_COLORS = { 1: '#a6e3a1', 2: '#f9e2af', 3: '#fab387', 4: '#a6adc8', 5: '#7f849c' };
+export function tierColor(tier) { return TIER_COLORS[tier] || '#585b70'; }
 
 // priority_watchlist tier → marker radius (px). Tier 1 (at a terminal) reads
 // largest so "what matters now" carries the most visual weight.
-const TIER_RADIUS = { 1: 8, 2: 7, 3: 6, 4: 5, 5: 4 };
-export function tierRadius(tier) { return TIER_RADIUS[tier] || 5.5; }
+const TIER_RADIUS = { 1: 9, 2: 8, 3: 7, 4: 6, 5: 5 };
+export function tierRadius(tier) { return TIER_RADIUS[tier] || 6; }
 
 // Vessels with SOG at or above this (knots) are drawn as a heading-pointing
 // triangle; below it they're treated as stationary (circle, or square for
@@ -88,11 +88,13 @@ export function greatCircle(lat1, lon1, lat2, lon2, n = 48) {
 // since their last fix, the more they fade.
 export function freshnessOpacity(fixTs) {
   const ageMin = (Date.now() - new Date(fixTs).getTime()) / 60000;
-  if (ageMin < 30)   return 0.95;
-  if (ageMin < 120)  return 0.70;
-  if (ageMin < 360)  return 0.45;
-  if (ageMin < 1440) return 0.28;
-  return 0.16;
+  // Floors raised for the dark basemap — even stale ships stay legible
+  // (on the old light basemap a 0.16 marker was still visible; on dark it vanished).
+  if (ageMin < 30)   return 1.0;
+  if (ageMin < 120)  return 0.9;
+  if (ageMin < 360)  return 0.78;
+  if (ageMin < 1440) return 0.64;
+  return 0.5;
 }
 
 export function fmtAge(ts) {

@@ -68,8 +68,8 @@ export async function loadVessels({ silent = false } = {}) {
     } else {
       marker = L.circleMarker([v.lat, v.lon], {
         radius: r, color: stroke, fillColor: color,
-        fillOpacity: fresh, opacity: Math.max(0.5, fresh), weight: 2,
-        bubblingMouseEvents: false,
+        fillOpacity: fresh, opacity: Math.max(0.7, fresh), weight: 2,
+        className: 'vessel-dot', bubblingMouseEvents: false,
       });
     }
     // Remember the freshness baseline so dim/undim restores to it rather
