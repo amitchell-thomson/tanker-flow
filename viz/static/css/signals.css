@@ -68,7 +68,17 @@
 #status-strip .stat-val.bad { color: var(--red); }
 
 /* ── Sections ── */
-#signal-sections { padding: 22px 26px 60px; max-width: 1500px; }
+/* One grid that fills the remaining viewport — the whole dashboard on one
+   screen, no scroll. 3 columns; rows set by JS (--rows) to fit the card count. */
+#signal-sections {
+  flex: 1;
+  min-height: 0;
+  padding: 14px 22px;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: repeat(var(--rows, 2), minmax(0, 1fr));
+  gap: 13px;
+}
 .signal-section { margin-bottom: 30px; }
 .section-head {
   display: flex;
@@ -102,10 +112,12 @@
   background: var(--mantle);
   border: 1px solid var(--surface0);
   border-radius: 12px;
-  padding: 15px 17px 12px;
+  padding: 13px 16px 11px;
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;       /* fit the grid cell */
+  overflow: hidden;
   position: relative;
   transition: border-color 0.15s ease, transform 0.15s ease;
   /* staggered entrance */
@@ -150,7 +162,7 @@
 .flag-warn { background: rgba(250, 179, 135, 0.16); color: var(--peach); }
 .flag-info { background: rgba(137, 180, 250, 0.14); color: var(--accent); }
 
-.signal-chart-wrap { position: relative; height: 150px; }
+.signal-chart-wrap { position: relative; flex: 1; min-height: 60px; }
 
 details.signal-why { margin-top: 9px; }
 details.signal-why > summary {

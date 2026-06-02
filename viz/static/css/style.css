@@ -49,7 +49,7 @@ body { margin: 0; background: var(--base); font-family: var(--font-sans); color:
 body[data-view="map"]     #view-signals { display: none; }
 body[data-view="map"]     #view-map     { display: flex; flex-direction: column; }
 body[data-view="signals"] #view-map     { display: none; }
-body[data-view="signals"] #view-signals { display: block; overflow-y: auto; }
+body[data-view="signals"] #view-signals { display: flex; flex-direction: column; overflow: hidden; }
 #view-map { position: relative; }
 
 #layout { display: flex; flex: 1; min-height: 0; width: 100%; }

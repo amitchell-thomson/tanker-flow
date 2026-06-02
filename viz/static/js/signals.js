@@ -249,9 +249,12 @@ function renderCard(parent, key, spec, byScope, split, openFor) {
   if (latestN != null && latestN > 0 && latestN < 3) flags.push(`<span class="flag flag-warn">⚑ thin volume · ${latestN}</span>`);
 
   const card = document.createElement('div');
-  card.className = 'signal-card' + (spec.wide ? ' wide' : '');
+  card.className = 'signal-card';
   card.dataset.key = key;
   card.style.animationDelay = (parent.querySelectorAll('.signal-card').length * 40) + 'ms';
+  // Mechanism (→ spread) lives in a hover tooltip to keep the card compact so
+  // the whole dashboard fits one screen; the one-line "what" stays visible.
+  if (spec.what || spec.mech) card.title = [spec.what, spec.mech && `→ ${spec.mech}`].filter(Boolean).join('\n\n');
   card.innerHTML = `
     <div class="signal-card-head">
       <div style="flex:1;min-width:0;">
@@ -271,7 +274,6 @@ function renderCard(parent, key, spec, byScope, split, openFor) {
       ${flags.join('')}
     </div>
     <div class="signal-chart-wrap"><canvas></canvas></div>
-    ${spec.mech ? `<details class="signal-why"><summary>how it moves the spread</summary><div class="signal-mechanism">${spec.mech}</div></details>` : ''}
   `;
   parent.appendChild(card);
 
@@ -372,27 +374,16 @@ function render(rows) {
   panelStartMs = Math.min(...times); panelEndMs = Math.max(...times);
   const grouped = groupRows(rows);
   const split = document.getElementById('split-regime').checked;
-  const placed = new Set();
 
-  for (const sec of SECTIONS) {
-    const keys = sec.keys.filter((k) => grouped[k]);
-    if (!keys.length) continue;
-    const section = document.createElement('section');
-    section.className = `signal-section sec-${sec.id}`;
-    section.innerHTML = `<div class="section-head"><span class="section-name">${sec.name}</span><span class="section-blurb">${sec.blurb}</span></div><div class="section-grid"></div>`;
-    const grid = section.querySelector('.section-grid');
-    for (const k of keys) { renderCard(grid, k, META[k], grouped[k], split, openFor); placed.add(k); }
-    root.appendChild(section);
-  }
-  // any unknown signal_keys → Other section (data-driven fallback)
-  const extra = Object.keys(grouped).filter((k) => !placed.has(k)).sort();
-  if (extra.length) {
-    const section = document.createElement('section');
-    section.className = 'signal-section sec-other';
-    section.innerHTML = `<div class="section-head"><span class="section-name">Other</span></div><div class="section-grid"></div>`;
-    const grid = section.querySelector('.section-grid');
-    for (const k of extra) renderCard(grid, k, fallbackSpec(k, grouped[k]), grouped[k], split, openFor);
-    root.appendChild(section);
+  // One grid that fills the viewport (no scroll). Order by market role
+  // (supply→demand→inventory→arbitrage via SECTIONS), then any unknown keys;
+  // the colored category tag on each card carries the grouping.
+  const ordered = [];
+  for (const sec of SECTIONS) for (const k of sec.keys) if (grouped[k]) ordered.push(k);
+  for (const k of Object.keys(grouped).sort()) if (!ordered.includes(k)) ordered.push(k);
+  root.style.setProperty('--rows', Math.max(1, Math.ceil(ordered.length / 3)));
+  for (const k of ordered) {
+    renderCard(root, k, META[k] || fallbackSpec(k, grouped[k]), grouped[k], split, openFor);
   }
 }
 
