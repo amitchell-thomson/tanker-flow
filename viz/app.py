@@ -35,11 +35,11 @@ from pipeline.signal import (
 
 STATIC_DIR = Path(__file__).parent / "static"
 
-# Catppuccin Mocha density ramp (low → high traffic): a warm "heat" glow —
-# low/rare traffic is dim neutral grey, ramping through mauve and rose to bright
-# pink where many tracks overlap, so the busiest areas pop on the dark basemap.
+# Catppuccin Mocha density ramp (low → high traffic): warm + saturated end to
+# end (no grey low end), so a lone track already reads as mauve and the busiest
+# overlaps burn bright pink. Intensity is carried by alpha (see below).
 _MOCHA_DENSITY = LinearSegmentedColormap.from_list(
-    "mocha_density", ["#313244", "#585b70", "#cba6f7", "#f38ba8", "#f5c2e7"]
+    "mocha_density", ["#cba6f7", "#eba0ac", "#f38ba8", "#f5c2e7"]
 )
 
 
@@ -602,9 +602,12 @@ def _render_density(
 
     normed = np.clip(np.log1p(grid) / p99, 0.0, 1.0)
     rgba = _MOCHA_DENSITY(normed)
-    # Lift the alpha curve (0.5 → 0.4) so faint lanes glow instead of vanishing
-    # on the dark basemap, while the busiest stay near-opaque.
-    rgba[:, :, 3] = np.power(normed, 0.4)
+    # Alpha floor so even a single (non-overlapping) track reads clearly as a
+    # mauve line, ramping to opaque bright pink where many overlap. Empty pixels
+    # stay fully transparent so the ocean is untouched.
+    alpha = np.clip(0.45 + 0.55 * np.sqrt(normed), 0.0, 1.0)
+    alpha[grid <= 0] = 0.0
+    rgba[:, :, 3] = alpha
     img = Image.fromarray((rgba * 255).astype(np.uint8), "RGBA")
     buf = io.BytesIO()
     img.save(buf, format="PNG")
