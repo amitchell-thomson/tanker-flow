@@ -27,7 +27,7 @@ export function initMap() {
   if (started) return Promise.resolve();
   started = true;
 
-  setBasemap('dark');
+  setBasemap('darkgray');
 
   document.getElementById('basemap-select').addEventListener('change', e => setBasemap(e.target.value));
   document.getElementById('btn-zones').addEventListener('click',   () => toggleLayer('zones'));
