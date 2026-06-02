@@ -208,10 +208,15 @@ async def ingest_status(pool: asyncpg.Pool = Depends(get_pool)):
 async def terminal_zones(pool: asyncpg.Pool = Depends(get_pool)):
     rows = await pool.fetch(
         """
-        SELECT t.terminal_name, tz.zone_type, tz.sub_zone, tz.source,
-               ST_AsGeoJSON(tz.geom) AS geometry
+        SELECT t.terminal_name, t.flow_direction, tz.zone_type, tz.sub_zone, tz.source,
+               ST_AsGeoJSON(tz.geom) AS geometry,
+               le.last_event
         FROM terminal_zones tz
         JOIN terminals t USING (terminal_id)
+        LEFT JOIN LATERAL (
+            SELECT max(pe.event_time) AS last_event
+            FROM port_events pe WHERE pe.terminal_id = t.terminal_id
+        ) le ON TRUE
         ORDER BY t.terminal_name, tz.zone_type, tz.sub_zone
         """
     )
@@ -221,9 +226,13 @@ async def terminal_zones(pool: asyncpg.Pool = Depends(get_pool)):
             "geometry": json.loads(r["geometry"]),
             "properties": {
                 "terminal_name": r["terminal_name"],
+                "flow_direction": r["flow_direction"],
                 "zone_type": r["zone_type"],
                 "sub_zone": r["sub_zone"],
                 "source": r["source"],
+                # Most recent port event at this terminal — drives the activity-
+                # health colouring on the map (silent terminal = likely outage).
+                "last_event": r["last_event"].isoformat() if r["last_event"] else None,
             },
         }
         for r in rows
@@ -256,20 +265,30 @@ async def bounding_boxes():
 
 
 @app.get("/api/vessel/{mmsi}/history")
-async def vessel_history(mmsi: int, pool: asyncpg.Pool = Depends(get_pool)):
+async def vessel_history(
+    mmsi: int,
+    days: int | None = None,
+    limit: int = 6000,
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    """Track for a vessel. Default = full available history (capped to `limit`
+    most-recent fixes); pass ?days=N for a trailing window. Includes `source` so
+    the client can flag VF-rescue fixes and detect AIS gaps along the track."""
+    args: list = [mmsi]
+    where = "mmsi = $1 AND lat IS NOT NULL AND lon IS NOT NULL"
+    if days is not None:
+        args.append(days)
+        where += f" AND fix_ts > now() - (${len(args)} * INTERVAL '1 day')"
+    args.append(limit)
     rows = await pool.fetch(
-        """
-        WITH last_fix AS (
-            SELECT MAX(fix_ts) AS ts FROM ais_fixes WHERE mmsi = $1
-        )
-        SELECT lat, lon, fix_ts, sog, nav_status
-        FROM ais_fixes, last_fix
-        WHERE mmsi = $1
-          AND lat IS NOT NULL AND lon IS NOT NULL
-          AND fix_ts > last_fix.ts - INTERVAL '24 hours'
+        f"""
+        SELECT lat, lon, fix_ts, sog, nav_status, source
+        FROM ais_fixes
+        WHERE {where}
         ORDER BY fix_ts DESC
+        LIMIT ${len(args)}
         """,
-        mmsi,
+        *args,
     )
     return [dict(r) for r in rows]
 
@@ -307,27 +326,30 @@ async def vessel_track_around(
 @app.get("/api/vessel/{mmsi}/events")
 async def vessel_events(
     mmsi: int,
-    ts: str,
+    ts: str | None = None,
     hours: float = 6.0,
     pool: asyncpg.Pool = Depends(get_pool),
 ):
-    """port_events for a vessel in [ts - hours, ts + hours]. Joined with
-    terminals for a human-readable name."""
+    """port_events for a vessel, joined with terminals for a human-readable name.
+    With `ts`, returns events in [ts - hours, ts + hours] (event-viewer window);
+    without it, returns the vessel's full event history (for the full track)."""
+    select = """
+        SELECT pe.event_type, pe.zone, pe.terminal_id, t.terminal_name,
+               pe.event_time, pe.lat, pe.lon, pe.laden_flag, pe.cold_start
+        FROM port_events pe
+        LEFT JOIN terminals t USING (terminal_id)
+        WHERE pe.mmsi = $1
+    """
+    if ts is None:
+        rows = await pool.fetch(select + " ORDER BY pe.event_time ASC", mmsi)
+        return [dict(r) for r in rows]
     # ' ' in `ts` is a URL-decoded '+' (timezone sign); restore it.
     center = datetime.fromisoformat(ts.replace("Z", "+00:00").replace(" ", "+"))
     if center.tzinfo is None:
         center = center.replace(tzinfo=timezone.utc)
     delta = timedelta(hours=hours)
     rows = await pool.fetch(
-        """
-        SELECT pe.event_type, pe.zone, pe.terminal_id, t.terminal_name,
-               pe.event_time, pe.lat, pe.lon, pe.laden_flag, pe.cold_start
-        FROM port_events pe
-        LEFT JOIN terminals t USING (terminal_id)
-        WHERE pe.mmsi = $1
-          AND pe.event_time BETWEEN $2 AND $3
-        ORDER BY pe.event_time ASC
-        """,
+        select + " AND pe.event_time BETWEEN $2 AND $3 ORDER BY pe.event_time ASC",
         mmsi,
         center - delta,
         center + delta,

@@ -54,6 +54,9 @@ body[data-view="signals"] #view-signals { display: flex; flex-direction: column;
 
 #layout { display: flex; flex: 1; min-height: 0; width: 100%; }
 #map { flex: 1; height: 100%; background: #0d0f17; }
+/* Direction arrows along a vessel track (Leaflet divIcon — strip its default box). */
+.track-arrow { background: none; border: none; }
+.track-arrow svg { transform-origin: 50% 50%; display: block; }
 /* No CSS filters on tiles/markers — they force a full repaint every pan/zoom
    frame and made the map sluggish. Data pops via colour + size + tier stroke. */
 #events-panel {

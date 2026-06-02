@@ -1,10 +1,10 @@
 // Vessel markers: load, render, freshness fade, selection dimming.
 import { map, registerLayer } from './map.js';
 import {
-  FSRU_COLOR, CARRIER_COLOR, SOG_UNDERWAY_KN, bearingDeg,
+  FSRU_COLOR, CARRIER_COLOR, SOG_UNDERWAY_KN, bearingDeg, EVENT_COLORS,
   tierColor, tierRadius, freshnessOpacity, fmtAge, fmtTimeFull,
 } from './config.js';
-import { drawTrack, clearTrackAndEvents } from './track.js';
+import { drawTrack, clearTrackAndEvents, setEventMarkers } from './track.js';
 import { setStatus } from './hud.js';
 
 export const vesselLayer = L.layerGroup().addTo(map);
@@ -121,12 +121,39 @@ export async function selectVessel(mmsi, name) {
   setStatus(`Loading track for ${name} (${mmsi})…`);
   dimAllExcept(mmsi);
   clearTrackAndEvents();
-  const history = await fetch(`/api/vessel/${mmsi}/history`).then(r => r.json());
-  if (!history.length) { setStatus('No history found'); return; }
+  // Full available track + the vessel's whole event history (drawn along it).
+  const [history, events] = await Promise.all([
+    fetch(`/api/vessel/${mmsi}/history`).then(r => r.json()),
+    fetch(`/api/vessel/${mmsi}/events`).then(r => r.json()).catch(() => []),
+  ]);
+  if (!history.length) {
+    setStatus('No history found');
+    window.dispatchEvent(new CustomEvent('app:vessel-selected', { detail: { mmsi, name } }));
+    return;
+  }
   drawTrack(history);
+
+  // Port events along the track.
+  if (events && events.length) {
+    const layer = L.layerGroup();
+    events.forEach(e => {
+      if (e.lat == null || e.lon == null) return;
+      const color = EVENT_COLORS[e.event_type] || '#bdc3c7';
+      L.circleMarker([e.lat, e.lon], {
+        radius: 6, color: '#11111b', fillColor: color, fillOpacity: 0.95, weight: 1.5,
+        bubblingMouseEvents: false,
+      }).bindTooltip(
+        `<b>${e.event_type}</b><br>${e.terminal_name || ''} (${e.zone})<br>${fmtTimeFull(e.event_time)}`,
+        { sticky: true },
+      ).addTo(layer);
+    });
+    setEventMarkers(layer);
+  }
+
   map.fitBounds(L.latLngBounds(history.map(h => [h.lat, h.lon])).pad(0.2));
   document.getElementById('reset-btn').style.display = 'block';
-  setStatus(`${name} — last ${history.length} fixes`);
+  const ev = events && events.length ? ` · ${events.length} events` : '';
+  setStatus(`${name} — ${history.length} fixes${ev}`);
   // Let the shell surface which signals this vessel currently feeds.
   window.dispatchEvent(new CustomEvent('app:vessel-selected', { detail: { mmsi, name } }));
 }
