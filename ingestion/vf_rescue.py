@@ -20,9 +20,14 @@ What it does NOT do: track vessels mid-crossing (no event at risk), or rescue
 long-stale vessels (the event has already passed). Both are deliberately excluded
 by the near-terminal geometry and the staleness ceiling.
 
-VF credits are a finite, non-renewing reserve, so `vf_rescue_log` is both the
-audit trail and the restart-safe ledger: today's SUM(credits) gates the daily
-cap, a per-mmsi recency check is the cooldown. Expected spend is ~1-3 credits/day.
+VF credits are a finite reserve that *expires unused* on a fixed date, and every
+credit spent on a near-terminal silent vessel buys signal (a leg/visit endpoint
+we'd otherwise mis-time). So the policy is not to minimise spend but to deplete
+the reserve to ~zero right at expiry: spend slower and we forfeit credits, spend
+faster and we go dark for the final stretch. `DAILY_CREDIT_CAP` is set to that
+glide-path rate (reserve ÷ days-to-expiry). `vf_rescue_log` is both the audit
+trail and the restart-safe ledger: today's SUM(credits) gates the cap, a per-mmsi
+recency check is the cooldown.
 
 Run as a background task in ingestion/aisstream.py, or manually via
 `make vf-rescue` (`--dry-run` for a no-spend preview, `--mmsi N` for a one-off).
@@ -56,12 +61,16 @@ VF_STATUS_API_BASE = "https://api.vesselfinder.com/status"
 RATE_LIMIT_DELAY = 1.0  # seconds between VF requests (mirrors vesselfinder.py)
 
 # --- Budget (credits, not calls) ----------------------------------------------
-# Every rescue targets a coastal vessel ⇒ terrestrial ⇒ 1 credit. Expected spend
-# is ~1-3 credits/day, so this cap is a safety ceiling, not a target: it bounds a
-# pathological day (e.g. clearing a backlog) and the per-vessel cooldown does the
-# rest. Read from the vf_rescue_log ledger at the top of every run so a crash-loop
-# can't bypass it. 6000-credit reserve ÷ realistic spend ⇒ multi-year runway.
-DAILY_CREDIT_CAP = 20
+# Every rescue targets a coastal vessel ⇒ terrestrial ⇒ 1 credit. Credits expire
+# unused, so the cap is a *target* glide-path rate, not a safety ceiling: reserve
+# ÷ days-to-expiry, so the reserve depletes to ~zero right at expiry while the
+# scarce daily budget is spent best-first (CLASS_PRIORITY) on the highest-signal
+# rescues. As of 2026-06: ~4 930 credits ÷ ~365 days ⇒ ~13.5/day → 14. Revisit if
+# the balance or expiry (see vf_account_status) drifts materially from the glide
+# path — observed demand (~17/day) sits above this, so the cap binds and the
+# lowest-value class (export_arrival) is trimmed first to fit. Read from the
+# vf_rescue_log ledger at the top of every run so a crash-loop can't bypass it.
+DAILY_CREDIT_CAP = 14
 TER_COST = 1
 SAT_COST = 10  # defensive only — we never request satellite (sat=0); 1cr in practice
 # Best-estimate of the VF credit reserve when this worker started logging — used
