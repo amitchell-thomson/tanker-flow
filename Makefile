@@ -1,4 +1,4 @@
-.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events scoring signals vf-rescue vf-rescue-dry vf-status refresh-fleet
+.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events scoring signals vf-rescue vf-rescue-dry vf-status refresh-fleet backup
 
 up:
 	docker compose up -d
@@ -14,6 +14,12 @@ psql:
 
 logs:
 	docker compose logs -f timescaledb
+
+# Dump the DB (custom format) to a directory on a different disk than /srv/data,
+# keeping the newest 14. Run daily via cron for unattended protection. Restore:
+# pg_restore -U tanker_user -d tanker_flow --clean <dump>
+backup:
+	bash scripts/backup_db.sh
 
 reset:
 	@echo "WARNING: This will delete all data. Ctrl+C to cancel."
