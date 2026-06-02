@@ -182,6 +182,35 @@ def test_per_od_window_tightens_europe():
     assert legs_flat[0].status == "open_in_transit"
 
 
+def test_fallback_region_tightens_undeclared_open_leg():
+    # An undeclared open leg at 22 days: bare 30d window keeps it in transit, but
+    # with fallback_region='nweurope' it inherits the 18d window and (stale mid-ocean
+    # fix) censors — the same treatment a declared-nweurope leg gets. This is the
+    # consistency the signal layer relies on (it distances these as NW-Europe-bound).
+    events = [ev(22, "departed", NOW - timedelta(days=22), "usgulf", 1, laden=True)]
+    assert pair_legs(events, NOW)[0].status == "open_in_transit"
+    tightened = pair_legs(
+        events,
+        NOW,
+        last_fixes={22: (NOW - timedelta(days=12), 35.0, -40.0)},
+        fallback_region="nweurope",
+    )
+    assert tightened[0].status == "open_censored"
+
+
+def test_fallback_region_arrival_gap_for_undeclared_leg():
+    # Undeclared, past the inherited 18d window, last fix stale but inside the
+    # assumed (NW Europe) region ⇒ arrived-and-missed, not a phantom.
+    events = [ev(23, "departed", NOW - timedelta(days=22), "usgulf", 1, laden=True)]
+    legs = pair_legs(
+        events,
+        NOW,
+        last_fixes={23: (NOW - timedelta(days=10), ROTTERDAM[0], ROTTERDAM[1])},
+        fallback_region="nweurope",
+    )
+    assert legs[0].status == "open_arrival_gap"
+
+
 def test_per_od_window_in_transit_within_window():
     # 12 days to NW Europe (window 18d) ⇒ still in transit.
     events = [ev(21, "departed", NOW - timedelta(days=12), "usgulf", 1, laden=True)]

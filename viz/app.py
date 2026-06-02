@@ -24,14 +24,20 @@ from starlette.concurrency import run_in_threadpool
 from config import AIS_BOUNDING_BOXES, regime_of, settings
 from pipeline.legs import compute_legs
 from pipeline.signal import (
-    FALLBACK_DEST_ZONE,
-    IMPORT_ZONE_CENTROIDS_SQL,
     TERMINAL_METADATA_SQL,
+    ballast_dest_band,
+    ballast_to_us_legs,
     build_lane_filter,
+    discharging_eu_visits,
+    items_live_on,
     lane_legs,
-    leg_distance_nm,
-    legs_live_on,
+    leg_interval,
+    loading_us_visits,
+    transit_dest_band,
+    visit_interval,
+    visit_terminal_band,
 )
+from pipeline.visits import compute_visits
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -829,50 +835,54 @@ async def signals(
     return [dict(r) for r in rows]
 
 
-# ── Signal traceability: drill from a charted value down to the legs/events that
+# ── Signal traceability: drill from a charted value down to the legs/visits that
 #    produced it, reusing pipeline.signal's exact selection logic so the
 #    drill-down can never disagree with the chart. ──────────────────────────────
 
-# count signal_key -> (port_events.event_type, terminals.flow_direction)
-_COUNT_SIGNALS = {
-    "eu_arrivals": ("moored", "import"),
-    "us_loadings": ("departed", "export"),
-}
+# signal_key -> the leg/visit base it aggregates + how it bands.
+_LEG_SIGNALS = {"gas_in_transit_volume": "transit", "gas_ballast_to_us": "ballast"}
+_VISIT_SIGNALS = {"gas_discharging_eu": "discharging", "gas_loading_us": "loading"}
 
 
-async def _leg_context(pool: asyncpg.Pool):
-    """Shared setup for the leg-based signal endpoints: recompute the classified
-    legs + the lane filter + import-zone centroids + an mmsi→name map."""
+async def _signal_context(pool: asyncpg.Pool):
+    """Shared setup for the contributor/membership endpoints: recompute the
+    classified legs + visits + the lane filter + terminal and vessel name maps."""
     now = datetime.now(timezone.utc)
     legs = await compute_legs(pool, now)
+    visits = await compute_visits(pool, now)
     async with pool.acquire() as conn:
         term_rows = await conn.fetch(TERMINAL_METADATA_SQL)
-        cent_rows = await conn.fetch(IMPORT_ZONE_CENTROIDS_SQL)
         name_rows = await conn.fetch("SELECT mmsi, vessel_name FROM vessel_registry")
+        tname_rows = await conn.fetch("SELECT terminal_id, terminal_name FROM terminals")
     lane = build_lane_filter(term_rows)
-    centroids = {
-        r["zone"]: (r["lat"], r["lon"])
-        for r in cent_rows
-        if r["lat"] is not None and r["lon"] is not None
-    }
     names = {r["mmsi"]: r["vessel_name"] for r in name_rows}
-    return now, legs, lane, centroids, names
+    tnames = {r["terminal_id"]: r["terminal_name"] for r in tname_rows}
+    return now, legs, visits, lane, names, tnames
+
+
+@app.get("/api/terminals")
+async def terminals(pool: asyncpg.Pool = Depends(get_pool)):
+    """Lean terminal lookup (id → name/zone/flow) for resolving the per-terminal
+    stack bands in the signals dashboard."""
+    rows = await pool.fetch(
+        "SELECT terminal_id, terminal_name, zone, flow_direction, is_fsru "
+        "FROM terminals WHERE zone IS NOT NULL ORDER BY zone, terminal_name"
+    )
+    return [dict(r) for r in rows]
 
 
 @app.get("/api/signals/overview")
 async def signals_overview(pool: asyncpg.Pool = Depends(get_pool)):
     """Pipeline-health snapshot for the dashboard status strip: rebuild freshness,
-    panel span, legs in transit (open/closed), and the open-leg fallback-dest
-    share (the known soft spot in #1/#2)."""
-    now, legs, lane, centroids, _ = await _leg_context(pool)
-    base = lane_legs(legs, lane)
-    open_legs = [lg for lg in base if lg.status == "open_in_transit"]
-    fallback = sum(
-        1
-        for lg in open_legs
-        if leg_distance_nm(lg, centroids, fallback_zone=None) is None
-        and leg_distance_nm(lg, centroids) is not None
-    )
+    panel span, in-transit legs (open) + the undeclared-destination share (the
+    known soft spot in the at-sea signal), and how many vessels are in berth now."""
+    now, legs, visits, lane, _, _ = await _signal_context(pool)
+    transit = lane_legs(legs, lane)
+    open_legs = [lg for lg in transit if lg.status == "open_in_transit"]
+    unknown = sum(1 for lg in transit if transit_dest_band(lg, lane) == "unknown")
+    loading = loading_us_visits(visits)
+    discharging = discharging_eu_visits(visits)
+    in_berth = len(items_live_on(loading + discharging, now.date(), visit_interval))
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT max(computed_at) AS rebuilt, min(bucket_date) AS pstart, "
@@ -883,12 +893,40 @@ async def signals_overview(pool: asyncpg.Pool = Depends(get_pool)):
         "signals_rebuilt_at": row["rebuilt"],
         "panel_start": row["pstart"],
         "panel_end": row["pend"],
-        "legs_in_transit": len(base),
+        "legs_in_transit": len(transit),
         "open_legs": len(open_legs),
-        "closed_legs": len(base) - len(open_legs),
-        "fallback_dest": fallback,
+        "closed_legs": len(transit) - len(open_legs),
+        "unknown_dest": unknown,
+        "in_berth": in_berth,
         "regime_now": regime_of(now),
         "port_events_rebuilt_at": pe_rebuilt,
+    }
+
+
+def _leg_row(lg, names, ref_date) -> dict:
+    """A leg contributor, with endpoint coords for drawing it as an arc on the
+    map. Open legs have no observed arrival, so the dest point is unknown."""
+    dest_lat, dest_lon = (
+        (lg.arrived_lat, lg.arrived_lon) if lg.status == "closed" else (None, None)
+    )
+    return {
+        "mmsi": lg.mmsi,
+        "vessel_name": names.get(lg.mmsi),
+        "origin_zone": lg.origin_zone,
+        "dest_zone": lg.dest_zone or lg.dest_region or "unknown",
+        "status": lg.status,
+        "laden": lg.laden,
+        "departed_ts": lg.departed_ts,
+        "arrived_ts": lg.arrived_ts,
+        "departed_lat": lg.departed_lat,
+        "departed_lon": lg.departed_lon,
+        "dest_lat": dest_lat,
+        "dest_lon": dest_lon,
+        "dwt": lg.dwt,
+        "gas_capacity_m3": lg.gas_capacity_m3,
+        "dist_source": "observed" if lg.status == "closed" else "declared",
+        "age_days": (ref_date - lg.departed_ts.date()).days,
+        "regime": lg.regime,
     }
 
 
@@ -897,124 +935,94 @@ async def signals_contributors(
     signal_key: str,
     day: str | None = None,
     zone_scope: str | None = None,
+    regime: str | None = None,
     pool: asyncpg.Pool = Depends(get_pool),
 ):
-    """The legs/events behind a charted value. Time-series signals drill by `day`
-    (#4/#9 → `kind='events'`; #1/#2/#20 → `kind='legs'`); the O-D matrix (#5) is a
-    lane aggregate, so it drills by `zone_scope` (the clicked lane)."""
-    if signal_key in _COUNT_SIGNALS:
-        target = date.fromisoformat(day)
-        event_type, flow = _COUNT_SIGNALS[signal_key]
-        rows = await pool.fetch(
-            """
-            SELECT pe.mmsi, pe.event_type, pe.event_time, pe.zone, pe.terminal_id,
-                   t.terminal_name, pe.laden_flag, pe.lat, pe.lon, v.vessel_name
-            FROM port_events pe
-            LEFT JOIN terminals t USING (terminal_id)
-            LEFT JOIN vessel_registry v USING (mmsi)
-            WHERE pe.event_type = $1 AND t.flow_direction = $2
-              AND pe.laden_flag IS TRUE AND pe.event_time::date = $3
-            ORDER BY pe.event_time
-            """,
-            event_type,
-            flow,
-            target,
-        )
-        return {"kind": "events", "rows": [dict(r) for r in rows]}
+    """The legs/visits behind a charted value on `day`. The at-sea/ballast signals
+    (`kind='legs'`) drill by destination band; the berth signals (`kind='visits'`)
+    drill by terminal band. `zone_scope` (the clicked stack band) narrows the set
+    to exactly that band; `regime` ('bbox'|'mmsi_filter') narrows to the charted
+    regime when the dashboard is split (None/'all' ⇒ both), so the drawer always
+    reconciles with the segment that was clicked."""
+    now, legs, visits, lane, names, tnames = await _signal_context(pool)
+    ref_date = date.fromisoformat(day) if day else now.date()
+    rg = None if regime in (None, "all") else regime
 
-    now, legs, lane, centroids, names = await _leg_context(pool)
-    if signal_key == "od_flow_count":
-        # Lane aggregate: all closed laden export legs in the clicked lane.
-        sel = [
-            lg
-            for lg in legs
-            if lg.status == "closed"
-            and lg.laden is True
-            and lane.is_export(lg.origin_zone)
-            and (zone_scope is None or f"{lg.origin_zone}->{lg.dest_zone}" == zone_scope)
-        ]
-        ref_date = now.date()  # age measured to "now" for completed-flow legs
-    else:
-        ref_date = date.fromisoformat(day)
-        sel = legs_live_on(legs, ref_date, lane)
-        if signal_key == "mean_laden_voyage_age_h":
-            sel = [lg for lg in sel if lg.status == "open_in_transit"]
-
-    out = []
-    for lg in sel:
-        dist = leg_distance_nm(lg, centroids)
-        # Endpoint coords for drawing the leg as an arc on the map.
-        if lg.status == "closed":
-            dist_source = "observed"
-            dest_lat, dest_lon = lg.arrived_lat, lg.arrived_lon
-        elif lg.dest_region and centroids.get(lg.dest_region):
-            dist_source = "declared"
-            dest_lat, dest_lon = centroids[lg.dest_region]
-        else:
-            dist_source = "fallback"
-            c = centroids.get(FALLBACK_DEST_ZONE)
-            dest_lat, dest_lon = c if c else (None, None)
-        out.append(
-            {
-                "mmsi": lg.mmsi,
-                "vessel_name": names.get(lg.mmsi),
-                "origin_zone": lg.origin_zone,
-                "dest_zone": lg.dest_zone or lg.dest_region,
-                "status": lg.status,
-                "departed_ts": lg.departed_ts,
-                "arrived_ts": lg.arrived_ts,
-                "departed_lat": lg.departed_lat,
-                "departed_lon": lg.departed_lon,
-                "dest_lat": dest_lat,
-                "dest_lon": dest_lon,
-                "dwt": lg.dwt,
-                "gas_capacity_m3": lg.gas_capacity_m3,
-                "distance_nm": dist,
-                "dist_source": dist_source,
-                "age_days": (ref_date - lg.departed_ts.date()).days,
-                "regime": lg.regime,
-                "ton_miles_dwt": (lg.dwt * dist) if (lg.dwt and dist) else None,
-            }
+    if signal_key in _LEG_SIGNALS:
+        is_transit = _LEG_SIGNALS[signal_key] == "transit"
+        base = lane_legs(legs, lane) if is_transit else ballast_to_us_legs(legs, lane)
+        band_of = (
+            (lambda lg: transit_dest_band(lg, lane))
+            if is_transit
+            else (lambda lg: ballast_dest_band(lg, lane))
         )
-    return {"kind": "legs", "rows": out}
+        live = items_live_on(base, ref_date, leg_interval)
+        if rg is not None:
+            live = [lg for lg in live if lg.regime == rg]
+        if zone_scope is not None:
+            live = [lg for lg in live if band_of(lg) == zone_scope]
+        return {"kind": "legs", "rows": [_leg_row(lg, names, ref_date) for lg in live]}
+
+    if signal_key in _VISIT_SIGNALS:
+        base = (
+            discharging_eu_visits(visits)
+            if _VISIT_SIGNALS[signal_key] == "discharging"
+            else loading_us_visits(visits)
+        )
+        live = items_live_on(base, ref_date, visit_interval)
+        if rg is not None:
+            live = [v for v in live if v.regime == rg]
+        if zone_scope is not None:
+            live = [v for v in live if visit_terminal_band(v) == zone_scope]
+        rows = []
+        for v in live:
+            rows.append(
+                {
+                    "mmsi": v.mmsi,
+                    "vessel_name": names.get(v.mmsi),
+                    "terminal_id": v.terminal_id,
+                    "terminal_name": tnames.get(v.terminal_id),
+                    "zone": v.zone,
+                    "flow_direction": v.flow_direction,
+                    "moored_ts": v.moored_ts,
+                    "departed_ts": v.departed_ts,
+                    "in_berth": v.departed_ts is None,
+                    "gas_capacity_m3": v.gas_capacity_m3,
+                    "dwt": v.dwt,
+                    "regime": v.regime,
+                    "days_in_berth": (ref_date - v.moored_ts.date()).days,
+                }
+            )
+        return {"kind": "visits", "rows": rows}
+
+    return {"kind": "legs", "rows": []}
 
 
 @app.get("/api/vessel/{mmsi}/signals")
 async def vessel_signals(mmsi: int, pool: asyncpg.Pool = Depends(get_pool)):
     """Which signal_keys this vessel currently feeds — the map→signals
-    cross-highlight. Reuses the same leg/event membership the dashboard uses."""
-    now, legs, lane, _, _ = await _leg_context(pool)
+    cross-highlight. Reuses the same leg/visit membership the dashboard uses."""
+    now, legs, visits, lane, _, _ = await _signal_context(pool)
     today = now.date()
     feeds: list[str] = []
 
-    live = [lg for lg in legs_live_on(legs, today, lane) if lg.mmsi == mmsi]
-    if live:
-        feeds += ["laden_ton_miles_in_transit_dwt", "laden_ton_miles_in_transit_gas"]
-        if any(lg.status == "open_in_transit" for lg in live):
-            feeds.append("mean_laden_voyage_age_h")
+    if any(lg.mmsi == mmsi for lg in items_live_on(lane_legs(legs, lane), today, leg_interval)):
+        feeds.append("gas_in_transit_volume")
     if any(
-        lg.mmsi == mmsi and lg.status == "closed" and lg.laden is True
-        and lane.is_export(lg.origin_zone)
-        for lg in legs
+        lg.mmsi == mmsi
+        for lg in items_live_on(ballast_to_us_legs(legs, lane), today, leg_interval)
     ):
-        feeds.append("od_flow_count")
-
-    ev = await pool.fetch(
-        """
-        SELECT DISTINCT pe.event_type
-        FROM port_events pe JOIN terminals t USING (terminal_id)
-        WHERE pe.mmsi = $1 AND pe.laden_flag IS TRUE
-          AND pe.event_time > now() - INTERVAL '7 days'
-          AND ((pe.event_type = 'moored'   AND t.flow_direction = 'import')
-            OR (pe.event_type = 'departed' AND t.flow_direction = 'export'))
-        """,
-        mmsi,
-    )
-    types = {r["event_type"] for r in ev}
-    if "moored" in types:
-        feeds.append("eu_arrivals")
-    if "departed" in types:
-        feeds.append("us_loadings")
+        feeds.append("gas_ballast_to_us")
+    if any(
+        v.mmsi == mmsi
+        for v in items_live_on(discharging_eu_visits(visits), today, visit_interval)
+    ):
+        feeds.append("gas_discharging_eu")
+    if any(
+        v.mmsi == mmsi
+        for v in items_live_on(loading_us_visits(visits), today, visit_interval)
+    ):
+        feeds.append("gas_loading_us")
 
     seen: set[str] = set()
     ordered = [f for f in feeds if not (f in seen or seen.add(f))]

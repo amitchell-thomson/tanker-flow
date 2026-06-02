@@ -136,7 +136,7 @@ backstop), and every consequential design call and tradeoff. AI accelerated
 implementation, refactors, and data exploration under that direction.
 
 **How it's kept rigorous:**
-- **Design-doc-first** — [`CLAUDE.md`](CLAUDE.md) is the living architecture
+- **Design-doc-first** — `CLAUDE.md` is the living architecture
   spec the assistant (and any reader) works from.
 - **Audit-before-build** — [`docs/`](docs/) holds the data audits I run before
   committing to a change (e.g. root-causing every "vessel appeared in berth

@@ -135,6 +135,47 @@ avoid looking for fields where they don't live:
 > `open_in_transit` for the US→Europe lane; never sum `same_zone` or
 > `open_censored`.
 
+### 1·1 · Headline display (v2): gas-volume stacked stocks
+
+The dashboard headline was refactored (after an industry conversation) from
+ton-miles to **volume of gas (m³)**, the unit a desk actually reasons in. Every
+headline signal is a **daily stock reconstructed over a live interval and
+stacked into bands** (stacked-area charts). They live in `signal_daily` and are
+built by `pipeline/signal.py` from the leg foundation + a new port-visit
+foundation (`pipeline/visits.py`, `moored → departed` berth occupancy).
+
+| `signal_key` | Stock | Band (`zone_scope`) | Underlies |
+|---|---|---|---|
+| `gas_loading_us` | gas in US export berths now (vessel `gas_capacity_m3` while alongside) | terminal | S — supersedes the #9 loadings *flow* with a *stock* |
+| `gas_discharging_eu` | laden gas in EU import berths now | terminal | D — volume analog of #4 arrivals |
+| `gas_in_transit_volume` | laden gas at sea US→EU (closed `[departed,arrived)` + open to now) | destination zone, undeclared → `unknown` | S/A — the #1/#2 lane as *volume* + the #3/#5 destination split |
+| `gas_ballast_to_us` | empty carriers returning to reload, weighted by the capacity they'll carry | destination zone, undeclared → `unknown` | S (forward) — incoming US loading capacity ~1–2 wk out |
+
+Decisions baked in:
+
+- **Unit is `gas_capacity_m3`, no distance.** The ton-mile keys (#1/#2) and the
+  count/age/O-D keys (#4/#9/#20/#5) are no longer the headline display.
+- **Undeclared open legs are surfaced, not hidden.** ~90% of open legs never
+  broadcast a destination; in `gas_in_transit_volume` / `gas_ballast_to_us` they
+  occupy their own `unknown` band rather than being assumed NW-Europe. (The leg
+  classifier in `legs.py` still applies its NW-Europe fallback *window* for
+  phantom-censoring — that is decoupled from the display banding here.)
+- **Banding is direction-aware.** A declared destination is only trusted for the
+  band when it agrees with the leg's direction — a laden in-transit leg accepts
+  an *import*-zone destination, a ballast return an *export*-zone one. This
+  defends against the common case where a master sets the declared destination to
+  the *next load port* (a US terminal) while a laden voyage is still completing,
+  which would otherwise mis-band a Europe-bound cargo as `usgulf`. Mismatched
+  declarations fall to `unknown`.
+- **Berth visits are phantom-censored.** An open visit (a `moored` with no
+  observed `departed`) is capped at `OPEN_VISIT_CEILING_DAYS = 5` so a
+  missed-departure (AIS dropout while alongside) — the berth analog of the
+  open-leg phantom in §4 — can't pin a terminal's band forever.
+- **`gas_ballast_to_us` is approximate on destination.** Undeclared ballast
+  returns inherit the import-region voyage window in `legs.py` (not yet
+  direction-aware for US-bound legs); they're banded `unknown`. A US-side voyage
+  window is a follow-up.
+
 ---
 
 ## 2 · Export-side queue / throughput signals — US supply pace
@@ -198,13 +239,16 @@ spread-relevant — but it's also where the terrestrial-AIS constraint hurts mos
 > The pre-signal audit found 47 open laden-US legs with *zero* post-departure
 > fixes (oldest 42.9 d). These *phantoms* are indistinguishable from genuine
 > idleness and inflate #1, #17, #19 and #20 without bound. Two mitigations are
-> live: (a) `pipeline/legs.py` **censors** open legs older than 30 days
-> (`open_censored`), so they never enter the in-transit base; (b) `scoring.py`
-> **pins** any vessel with a recent open laden leg into a persistent subscription
-> slot (`priority_watchlist.is_pinned`) so the new scheme re-acquires it on the
-> European approach. The censor is a single global cap — the signal layer should
-> still apply a tighter per-O-D window (US→EU ~18 d) on top, and the pin only
-> helps the *new* regime, not the historical phantoms.
+> live: (a) `pipeline/legs.py` applies a **per-O-D voyage window** (US→EU ~18 d,
+> `OD_WINDOW_DAYS`) beyond which an open leg is reclassified by last-fix evidence,
+> with a 30-day global cap (`CENSOR_OPEN_DAYS`) only as the last resort when no
+> destination — declared *or* assumed — is available. A leg with no declared
+> destination inherits the same `FALLBACK_DEST_REGION` (NW Europe) the signal layer
+> uses to estimate its distance, so it can never be distanced as NW-Europe-bound
+> yet kept alive on the looser global cap; (b) `scoring.py` **pins** any vessel with
+> a recent open laden leg into a persistent subscription slot
+> (`priority_watchlist.is_pinned`) so the new scheme re-acquires it on the European
+> approach. The pin only helps the *new* regime, not the historical phantoms.
 
 ---
 

@@ -256,3 +256,11 @@ details.signal-why > summary:hover { color: var(--subtext1); }
 .tag.fallback { color: var(--peach); }
 .tag.open_in_transit { color: var(--accent); }
 .tag.closed { color: var(--green); }
+.tag.laden { color: var(--green); }
+.tag.ballast { color: var(--overlay0); }
+.tag.in-berth { color: var(--peach); }
+.contrib-recon {
+  font-family: var(--font-mono); font-size: 11px; color: var(--subtext0);
+  padding: 8px 18px; border-bottom: 1px solid var(--surface0); background: var(--mantle);
+}
+.contrib-recon b { color: var(--text); }

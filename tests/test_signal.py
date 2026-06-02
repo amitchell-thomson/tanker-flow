@@ -1,6 +1,6 @@
 """Unit tests for the signal aggregation layer (pipeline.signal).
 
-Pure-logic: synthetic Leg / EventCount objects, no DB. Mirrors tests/test_legs.py.
+Pure-logic: synthetic Leg / Visit objects, no DB. Mirrors tests/test_legs.py.
 """
 
 from __future__ import annotations
@@ -10,30 +10,34 @@ from datetime import timedelta
 from config import REGIME_CUTOVER
 from pipeline.legs import Leg
 from pipeline.signal import (
-    EventCount,
+    UNKNOWN_BAND,
     LaneFilter,
-    count_events_daily,
+    accumulate_daily,
+    ballast_dest_band,
+    ballast_to_us_legs,
     daily_buckets,
+    discharging_eu_visits,
+    items_live_on,
     lane_legs,
-    leg_distance_nm,
-    legs_live_on,
-    od_matrix,
-    reconstruct_ton_miles,
-    reconstruct_voyage_age,
+    leg_interval,
+    loading_us_visits,
+    transit_dest_band,
+    visit_interval,
+    visit_terminal_band,
 )
+from pipeline.visits import Visit
 
 
 # A reference "now" well after the regime cutover, matching test_legs.py.
 NOW = REGIME_CUTOVER + timedelta(days=40)
 
 SABINE = (29.74, -93.87)  # usgulf export
-ROTTERDAM = (52.00, 4.00)  # nweurope import centroid (test stand-in)
+ROTTERDAM = (52.00, 4.00)  # nweurope import
 
 LANE = LaneFilter(
     export_zones=frozenset({"usgulf", "usatlantic"}),
     import_zones=frozenset({"nweurope", "baltic", "iberian", "wmed", "emed"}),
 )
-CENTROIDS = {"nweurope": ROTTERDAM}
 
 
 def at(days: float):
@@ -48,8 +52,7 @@ def mk_leg(
     laden=True,
     regime="mmsi_filter",
     mmsi=1,
-    departed_lat=SABINE[0],
-    departed_lon=SABINE[1],
+    gas_capacity_m3=170_000,
     **kw,
 ) -> Leg:
     return Leg(
@@ -57,12 +60,38 @@ def mk_leg(
         origin_terminal_id=1,
         origin_zone=origin_zone,
         departed_ts=departed_ts,
-        departed_lat=departed_lat,
-        departed_lon=departed_lon,
+        departed_lat=SABINE[0],
+        departed_lon=SABINE[1],
         laden=laden,
         regime=regime,
         status=status,
+        gas_capacity_m3=gas_capacity_m3,
         **kw,
+    )
+
+
+def mk_visit(
+    *,
+    moored_ts=at(0),
+    departed_ts=None,
+    flow_direction="import",
+    zone="nweurope",
+    terminal_id=10,
+    laden=True,
+    regime="mmsi_filter",
+    mmsi=1,
+    gas_capacity_m3=170_000,
+) -> Visit:
+    return Visit(
+        mmsi=mmsi,
+        terminal_id=terminal_id,
+        zone=zone,
+        flow_direction=flow_direction,
+        moored_ts=moored_ts,
+        departed_ts=departed_ts,
+        laden=laden,
+        regime=regime,
+        gas_capacity_m3=gas_capacity_m3,
     )
 
 
@@ -72,252 +101,223 @@ def index(rows) -> dict:
     }
 
 
-# --- in-transit ton-miles stock (#1/#2) ---------------------------------------
+# --- item selection -----------------------------------------------------------
 
 
-def test_ton_miles_single_closed_leg():
-    # Closed leg: live on [departed, arrived), zero on/after the arrival day.
-    leg = mk_leg(
-        status="closed",
-        departed_ts=at(0),
-        arrived_ts=at(3),
-        dest_zone="nweurope",
-        dwt=90_000,
-        distance_nm=4000.0,
-    )
-    days = daily_buckets(at(0).date(), at(3).date())
-    rows = reconstruct_ton_miles(
-        [leg], days, weight_attr="dwt", signal_key="tm", import_centroids={}
-    )
-    by = index(rows)
-    dep, arr = at(0).date(), at(3).date()
-    assert by[("tm", dep, "usgulf->eu", "all")] == 90_000 * 4000.0
-    # 3 live days (dep, +1, +2) × 2 regimes (leg regime + 'all'); none on arrival day.
-    assert ("tm", arr, "usgulf->eu", "all") not in by
-    assert len(rows) == 6
-
-
-def test_open_in_transit_runs_to_as_of():
-    # Open leg has no observed arrival → distance estimated origin→dest centroid,
-    # and it contributes on every day through the panel end (as_of).
-    leg = mk_leg(
-        status="open_in_transit",
-        departed_ts=NOW - timedelta(days=10),
-        dest_region="nweurope",
-        dwt=80_000,
-    )
-    days = daily_buckets((NOW - timedelta(days=10)).date(), NOW.date())
-    rows = reconstruct_ton_miles(
-        [leg], days, weight_attr="dwt", signal_key="tm", import_centroids=CENTROIDS
-    )
-    by = index(rows)
-    assert ("tm", NOW.date(), "usgulf->eu", "all") in by
-    # Sabine → Rotterdam ~4500 nm × 80k dwt; sanity-bound and constant across days.
-    v = by[("tm", NOW.date(), "usgulf->eu", "all")]
-    assert 80_000 * 4000 < v < 80_000 * 5000
-    assert by[("tm", (NOW - timedelta(days=5)).date(), "usgulf->eu", "all")] == v
-
-
-def test_unknown_dest_open_leg_uses_fallback():
-    # No declared destination → falls back to FALLBACK_DEST_ZONE (nweurope) so the
-    # leg still contributes, at the same distance as if nweurope were declared.
-    leg = mk_leg(status="open_in_transit", dest_region=None)
-    declared = mk_leg(status="open_in_transit", dest_region="nweurope")
-    assert leg_distance_nm(leg, CENTROIDS) == leg_distance_nm(declared, CENTROIDS)
-    # Disabling the fallback drops the unknown-dest leg back to None.
-    assert leg_distance_nm(leg, CENTROIDS, fallback_zone=None) is None
-    # The declared leg is unaffected by the fallback toggle.
-    assert leg_distance_nm(declared, CENTROIDS, fallback_zone=None) is not None
-
-
-def test_fallback_skipped_without_departure_position():
-    # Even with the fallback, a leg with no departure position can't be estimated.
-    leg = mk_leg(
-        status="open_in_transit", dest_region=None, departed_lat=None, departed_lon=None
-    )
-    assert leg_distance_nm(leg, CENTROIDS) is None
-
-
-def test_null_distance_skipped():
-    leg = mk_leg(
-        status="closed",
-        departed_ts=at(0),
-        arrived_ts=at(3),
-        dest_zone="nweurope",
-        dwt=90_000,
-        distance_nm=None,
-    )
-    days = daily_buckets(at(0).date(), at(3).date())
-    rows = reconstruct_ton_miles(
-        [leg], days, weight_attr="dwt", signal_key="tm", import_centroids={}
-    )
-    assert rows == []
-
-
-def test_null_weight_skipped():
-    leg = mk_leg(
-        status="closed",
-        departed_ts=at(0),
-        arrived_ts=at(3),
-        dest_zone="nweurope",
-        dwt=90_000,
-        gas_capacity_m3=None,
-        distance_nm=4000.0,
-    )
-    days = daily_buckets(at(0).date(), at(3).date())
-    assert (
-        reconstruct_ton_miles(
-            [leg],
-            days,
-            weight_attr="gas_capacity_m3",
-            signal_key="tm_gas",
-            import_centroids={},
-        )
-        == []
-    )
-    assert reconstruct_ton_miles(
-        [leg], days, weight_attr="dwt", signal_key="tm_dwt", import_centroids={}
-    )
-
-
-def test_regime_split_at_seam():
-    # A bbox-departed leg still live AFTER the cutover stays attributed to 'bbox'
-    # on every day — segmentation is by the leg's regime, not the bucket date.
-    leg = mk_leg(
-        status="open_in_transit",
-        departed_ts=REGIME_CUTOVER - timedelta(days=2),
-        regime="bbox",
-        dest_region="nweurope",
-        dwt=70_000,
-    )
-    days = daily_buckets(
-        (REGIME_CUTOVER - timedelta(days=2)).date(),
-        (REGIME_CUTOVER + timedelta(days=3)).date(),
-    )
-    rows = reconstruct_ton_miles(
-        [leg], days, weight_attr="dwt", signal_key="tm", import_centroids=CENTROIDS
-    )
-    assert {r.regime for r in rows} == {"bbox", "all"}
-    by = index(rows)
-    post = (REGIME_CUTOVER + timedelta(days=3)).date()
-    assert (
-        by[("tm", post, "usgulf->eu", "bbox")] == by[("tm", post, "usgulf->eu", "all")]
-    )
-
-
-# --- lane filtering ------------------------------------------------------------
-
-
-def test_lane_legs_exclusions():
+def test_lane_legs_in_transit_base():
     legs = [
         mk_leg(status="same_zone", dest_zone="usgulf"),
         mk_leg(status="open_censored"),
         mk_leg(status="open_floating"),
-        mk_leg(status="open_arrival_gap"),
         mk_leg(status="closed", dest_zone="nweurope"),  # kept
         mk_leg(status="open_in_transit"),  # kept
         mk_leg(status="closed", dest_zone="nweurope", laden=False),  # ballast excluded
         mk_leg(status="closed", dest_zone="usatlantic"),  # export→export excluded
     ]
     base = lane_legs(legs, LANE)
+    assert {lg.status for lg in base} == {"closed", "open_in_transit"}
+    assert len(base) == 2
+
+
+def test_ballast_to_us_legs():
+    legs = [
+        # EU → US, empty, arrived: kept
+        mk_leg(status="closed", origin_zone="nweurope", dest_zone="usgulf", laden=False),
+        # EU departed, still at sea, empty: kept
+        mk_leg(status="open_in_transit", origin_zone="nweurope", laden=False),
+        # laden EU→US (would be odd) excluded — only ballast returns
+        mk_leg(status="closed", origin_zone="nweurope", dest_zone="usgulf", laden=True),
+        # US→EU laden (the in-transit base, not ballast) excluded
+        mk_leg(status="closed", origin_zone="usgulf", dest_zone="nweurope"),
+        # EU→EU empty hop excluded (dest not an export zone)
+        mk_leg(status="closed", origin_zone="nweurope", dest_zone="baltic", laden=False),
+    ]
+    base = ballast_to_us_legs(legs, LANE)
     assert len(base) == 2
     assert {lg.status for lg in base} == {"closed", "open_in_transit"}
 
 
-# --- mean laden-voyage age (#20) ----------------------------------------------
-
-
-def test_voyage_age_mean():
-    legs = [
-        mk_leg(status="open_in_transit", departed_ts=at(0), regime="bbox"),
-        mk_leg(status="open_in_transit", departed_ts=at(2), regime="bbox"),
+def test_discharging_and_loading_visit_selection():
+    visits = [
+        mk_visit(flow_direction="import", laden=True),  # discharging: kept
+        mk_visit(flow_direction="import", laden=False),  # ballast at import: dropped
+        mk_visit(flow_direction="export", laden=False, zone="usgulf", terminal_id=1),
+        mk_visit(flow_direction=None, terminal_id=99),  # no flow: dropped from both
     ]
-    days = daily_buckets(at(0).date(), at(5).date())
-    rows = reconstruct_voyage_age(legs, days)
-    by = index(rows)
-    d5 = at(5).date()
-    # ageA = 5d, ageB = 3d → mean = 4d = 96h.
-    assert by[("mean_laden_voyage_age_h", d5, "usgulf->eu", "all")] == 96.0
+    disch = discharging_eu_visits(visits)
+    assert len(disch) == 1 and disch[0].flow_direction == "import"
+    load = loading_us_visits(visits)
+    assert len(load) == 1 and load[0].flow_direction == "export"
 
 
-def test_legs_live_on():
+# --- band assignment ----------------------------------------------------------
+
+
+def test_transit_dest_band():
+    assert transit_dest_band(mk_leg(status="closed", dest_zone="wmed"), LANE) == "wmed"
+    assert (
+        transit_dest_band(mk_leg(status="open_in_transit", dest_region="baltic"), LANE)
+        == "baltic"
+    )
+    # Undeclared open leg → its own 'unknown' band (not folded into a fallback).
+    assert transit_dest_band(mk_leg(status="open_in_transit"), LANE) == UNKNOWN_BAND
+    # A laden in-transit leg whose declared dest is an EXPORT zone (the master
+    # already set the next load port) is NOT banded usgulf — it's 'unknown'.
+    assert (
+        transit_dest_band(mk_leg(status="open_in_transit", dest_region="usgulf"), LANE)
+        == UNKNOWN_BAND
+    )
+
+
+def test_ballast_dest_band():
+    # Ballast return: an export-zone declared dest is trusted; an import-zone one
+    # (stale) is not → 'unknown'.
+    assert (
+        ballast_dest_band(
+            mk_leg(status="open_in_transit", laden=False, dest_region="usgulf"), LANE
+        )
+        == "usgulf"
+    )
+    assert (
+        ballast_dest_band(
+            mk_leg(status="open_in_transit", laden=False, dest_region="nweurope"), LANE
+        )
+        == UNKNOWN_BAND
+    )
+    assert (
+        ballast_dest_band(
+            mk_leg(status="closed", laden=False, dest_zone="usgulf"), LANE
+        )
+        == "usgulf"
+    )
+
+
+def test_visit_terminal_band():
+    assert visit_terminal_band(mk_visit(terminal_id=10)) == "10"
+
+
+# --- live intervals -----------------------------------------------------------
+
+
+def test_leg_interval_half_open_on_arrival():
+    leg = mk_leg(status="closed", departed_ts=at(0), arrived_ts=at(3), dest_zone="nweurope")
+    start, end_excl = leg_interval(leg, at(10).date())
+    assert (start, end_excl) == (at(0).date(), at(3).date())  # not live on arrival day
+
+
+def test_leg_interval_open_runs_to_panel_end():
+    leg = mk_leg(status="open_in_transit", departed_ts=at(0))
+    _, end_excl = leg_interval(leg, at(5).date())
+    assert end_excl == at(5).date() + timedelta(days=1)
+
+
+def test_visit_interval_floors_to_mooring_day():
+    # Same-day load: mooring day still counts (floor of one day).
+    v = mk_visit(moored_ts=at(0), departed_ts=at(0) + timedelta(hours=6))
+    start, end_excl = visit_interval(v, at(10).date())
+    assert (start, end_excl) == (at(0).date(), at(0).date() + timedelta(days=1))
+
+
+def test_visit_interval_open_runs_to_panel_end():
+    # Open visit within the dwell ceiling runs through the panel end.
+    v = mk_visit(moored_ts=at(0), departed_ts=None)
+    _, end_excl = visit_interval(v, at(3).date())
+    assert end_excl == at(3).date() + timedelta(days=1)
+
+
+def test_visit_interval_open_capped_at_ceiling():
+    # A `moored` with no observed `departed`, panel ending far later: the visit is
+    # a missed-departure phantom and stops contributing after the dwell ceiling.
+    from pipeline.signal import OPEN_VISIT_CEILING_DAYS
+
+    v = mk_visit(moored_ts=at(0), departed_ts=None)
+    _, end_excl = visit_interval(v, at(40).date())
+    assert end_excl == at(0).date() + timedelta(days=OPEN_VISIT_CEILING_DAYS)
+
+
+def test_items_live_on():
     legs = [
         mk_leg(status="closed", departed_ts=at(0), arrived_ts=at(3), dest_zone="nweurope"),
         mk_leg(status="open_in_transit", departed_ts=at(1)),
-        mk_leg(status="same_zone", dest_zone="usgulf"),  # not in lane → excluded
     ]
-    # Mid-voyage day: both the closed (departed≤d<arrived) and open legs are live.
-    assert sorted(lg.status for lg in legs_live_on(legs, at(2).date(), LANE)) == [
-        "closed",
-        "open_in_transit",
-    ]
-    # Arrival day: the closed leg is no longer live (half-open); the open one is.
-    assert [lg.status for lg in legs_live_on(legs, at(3).date(), LANE)] == ["open_in_transit"]
-    # Before the open leg departed: only the closed leg is live.
-    assert [lg.status for lg in legs_live_on(legs, at(0).date(), LANE)] == ["closed"]
+    live = items_live_on(legs, at(2).date(), leg_interval)
+    assert sorted(lg.status for lg in live) == ["closed", "open_in_transit"]
+    # Arrival day: closed leg no longer live (half-open); open one still is.
+    live3 = items_live_on(legs, at(3).date(), leg_interval)
+    assert [lg.status for lg in live3] == ["open_in_transit"]
 
 
-def test_voyage_age_ignores_closed_legs():
-    legs = [mk_leg(status="closed", dest_zone="nweurope", arrived_ts=at(3))]
-    rows = reconstruct_voyage_age(legs, daily_buckets(at(0).date(), at(5).date()))
+# --- stacked daily reconstruction --------------------------------------------
+
+
+def test_accumulate_daily_stacks_by_band():
+    # Two open in-transit legs to different zones → two stacked bands.
+    legs = [
+        mk_leg(status="open_in_transit", departed_ts=at(0), dest_region="nweurope", gas_capacity_m3=170_000),
+        mk_leg(status="open_in_transit", departed_ts=at(0), dest_region="wmed", gas_capacity_m3=140_000, mmsi=2),
+    ]
+    days = daily_buckets(at(0).date(), at(2).date())
+    rows = accumulate_daily(
+        legs, days, signal_key="gas_in_transit_volume",
+        interval_of=leg_interval, band_of=lambda lg: transit_dest_band(lg, LANE),
+    )
+    by = index(rows)
+    d = at(2).date()
+    assert by[("gas_in_transit_volume", d, "nweurope", "all")] == 170_000
+    assert by[("gas_in_transit_volume", d, "wmed", "all")] == 140_000
+
+
+def test_accumulate_daily_closed_leg_stops_at_arrival():
+    leg = mk_leg(status="closed", departed_ts=at(0), arrived_ts=at(2), dest_zone="nweurope", gas_capacity_m3=170_000)
+    days = daily_buckets(at(0).date(), at(3).date())
+    rows = accumulate_daily(
+        [leg], days, signal_key="g", interval_of=leg_interval, band_of=lambda lg: transit_dest_band(lg, LANE),
+    )
+    by = index(rows)
+    assert by[("g", at(0).date(), "nweurope", "all")] == 170_000
+    assert by[("g", at(1).date(), "nweurope", "all")] == 170_000
+    assert ("g", at(2).date(), "nweurope", "all") not in by  # arrival day excluded
+
+
+def test_accumulate_daily_visit_in_berth_stock():
+    # An open visit (in berth) contributes its gas to its terminal band every day.
+    v = mk_visit(moored_ts=at(0), departed_ts=None, terminal_id=10, gas_capacity_m3=160_000)
+    days = daily_buckets(at(0).date(), at(2).date())
+    rows = accumulate_daily(
+        [v], days, signal_key="gas_discharging_eu",
+        interval_of=visit_interval, band_of=visit_terminal_band,
+    )
+    by = index(rows)
+    for d in days:
+        assert by[("gas_discharging_eu", d, "10", "all")] == 160_000
+
+
+def test_accumulate_daily_null_gas_skipped():
+    leg = mk_leg(status="open_in_transit", departed_ts=at(0), gas_capacity_m3=None)
+    rows = accumulate_daily(
+        [leg], daily_buckets(at(0).date(), at(2).date()),
+        signal_key="g", interval_of=leg_interval, band_of=lambda lg: transit_dest_band(lg, LANE),
+    )
     assert rows == []
 
 
-# --- O-D matrix (#5) -----------------------------------------------------------
-
-
-def test_od_matrix_counts():
-    legs = [
-        mk_leg(status="closed", origin_zone="usgulf", dest_zone="nweurope"),
-        mk_leg(status="closed", origin_zone="usgulf", dest_zone="nweurope"),
-        mk_leg(status="closed", origin_zone="usgulf", dest_zone="wmed"),
-        mk_leg(status="same_zone", origin_zone="nweurope", dest_zone="nweurope"),
-        mk_leg(
-            status="closed", origin_zone="usgulf", dest_zone="nweurope", laden=False
-        ),
-    ]
-    rows = od_matrix(legs)
+def test_accumulate_daily_regime_split_at_seam():
+    # A bbox-departed leg still live AFTER the cutover stays 'bbox' on every day.
+    leg = mk_leg(
+        status="open_in_transit",
+        departed_ts=REGIME_CUTOVER - timedelta(days=2),
+        regime="bbox",
+        dest_region="nweurope",
+        gas_capacity_m3=170_000,
+    )
+    days = daily_buckets(
+        (REGIME_CUTOVER - timedelta(days=2)).date(),
+        (REGIME_CUTOVER + timedelta(days=3)).date(),
+    )
+    rows = accumulate_daily(
+        [leg], days, signal_key="g", interval_of=leg_interval, band_of=lambda lg: transit_dest_band(lg, LANE),
+    )
+    assert {r.regime for r in rows} == {"bbox", "all"}
     by = index(rows)
-    d = at(0).date()
-    assert by[("od_flow_count", d, "usgulf->nweurope", "all")] == 2
-    assert by[("od_flow_count", d, "usgulf->wmed", "all")] == 1
-    assert "nweurope->nweurope" not in {r.zone_scope for r in rows}
-
-
-# --- event-count flows (#4/#9) -------------------------------------------------
-
-
-def test_event_count_daily():
-    events = [
-        EventCount(1, "moored", at(0), "nweurope", 10, True, "import", "bbox"),
-        EventCount(2, "moored", at(0), "nweurope", 10, True, "import", "bbox"),
-        EventCount(
-            3, "moored", at(0), "usgulf", 1, True, "export", "bbox"
-        ),  # wrong flow
-        EventCount(
-            4, "moored", at(0), "nweurope", 10, False, "import", "bbox"
-        ),  # ballast
-        EventCount(
-            5, "departed", at(0), "usgulf", 1, True, "export", "bbox"
-        ),  # loading
-    ]
-    arrivals = index(
-        count_events_daily(
-            events,
-            signal_key="eu_arrivals",
-            event_type="moored",
-            flow_direction="import",
-            zone_scope="eu",
-        )
-    )
-    assert arrivals[("eu_arrivals", at(0).date(), "eu", "all")] == 2
-    loadings = index(
-        count_events_daily(
-            events,
-            signal_key="us_loadings",
-            event_type="departed",
-            flow_direction="export",
-            zone_scope="us",
-        )
-    )
-    assert loadings[("us_loadings", at(0).date(), "us", "all")] == 1
+    post = (REGIME_CUTOVER + timedelta(days=3)).date()
+    assert by[("g", post, "nweurope", "bbox")] == by[("g", post, "nweurope", "all")]

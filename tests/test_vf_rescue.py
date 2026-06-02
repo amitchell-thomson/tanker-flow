@@ -267,8 +267,36 @@ def test_classify_import_arrival():
     assert c is not None and c.rescue_class == "import_arrival"
 
 
-def test_classify_export_arrival():
-    c = _classify(near_flow="export", near_km=20.0)
+def test_classify_export_arrival_loiter_band_skipped():
+    # Burn control: export_arrival in the NEAR_KM..FINAL_APPROACH_KM band (20 km,
+    # not closing) is the low-value loiter case and is no longer rescued, even at
+    # a healthy 8h silence — only final-approach/closing ballast arrivals qualify.
+    assert _classify(near_flow="export", near_km=20.0, last_fix_ts=ago(8)) is None
+
+
+def test_classify_export_arrival_final_approach():
+    # <=FINAL_APPROACH_KM and silent past the export-arrival floor (8h) ⇒ rescued.
+    c = _classify(near_flow="export", near_km=10.0, last_fix_ts=ago(8))
+    assert c is not None and c.rescue_class == "export_arrival"
+
+
+def test_classify_export_arrival_short_gap_skipped():
+    # In final approach but silent only 5h (< EXPORT_ARRIVAL_MIN_SILENCE_HOURS):
+    # give AIS longer to self-heal for this low-value class than the 2h that an
+    # import (laden) final-approach arrival would trigger on.
+    assert _classify(near_flow="export", near_km=10.0, last_fix_ts=ago(5)) is None
+
+
+def test_classify_export_arrival_closing_qualifies():
+    # Closing from beyond NEAR_KM (40 km, heading at terminal) counts as final
+    # approach, so a ballast vessel genuinely bearing down still gets rescued.
+    c = _classify(
+        near_flow="export",
+        near_km=40.0,
+        last_cog=90.0,
+        bearing_deg=90.0,
+        last_fix_ts=ago(8),
+    )
     assert c is not None and c.rescue_class == "export_arrival"
 
 

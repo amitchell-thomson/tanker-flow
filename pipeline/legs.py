@@ -48,16 +48,16 @@ from config import ZONES, regime_of
 from .geo import haversine_nm
 
 
-# Default / unknown-destination open-leg window. Set beyond the longest plausible
-# laden voyage (US Gulf -> Asia ~32d) so we never censor a genuine long haul we
-# can't attribute.
+# Last-resort open-leg window, used only when a leg has neither a declared
+# destination nor a `fallback_region` to assume one. Set beyond the longest
+# plausible laden voyage (US Gulf -> Asia ~32d) so a bare/unenriched call never
+# censors a genuine long haul it can't attribute.
 CENSOR_OPEN_DAYS = 30
 
 # Per-destination-region expected laden-voyage windows (days). Beyond this, an
 # open leg to that region is no longer "in transit" and gets reclassified by
 # last-fix evidence. Only import regions appear — a laden leg's destination is
-# always an import terminal; an unknown/US destination falls back to
-# CENSOR_OPEN_DAYS. (SIGNALS.md §4: "tighter per-O-D window, US->EU ~18 d".)
+# always an import terminal. (SIGNALS.md §4: "tighter per-O-D window, US->EU ~18 d".)
 OD_WINDOW_DAYS: dict[str, int] = {
     "nweurope": 18,
     "baltic": 20,
@@ -65,6 +65,16 @@ OD_WINDOW_DAYS: dict[str, int] = {
     "wmed": 20,
     "emed": 24,
 }
+
+# When an open leg never broadcast a destination (~90% of them under terrestrial
+# AIS), the signal layer *assumes* the dominant US-LNG lane destination to estimate
+# its distance (signal.FALLBACK_DEST_ZONE). Classification must use the SAME
+# assumption, so such a leg inherits that region's voyage window above and stops
+# counting as "in transit" once it is older than that voyage would take — rather
+# than the looser global censor, which kept a likely-already-arrived phantom alive
+# ~12 extra days and inflated the in-transit ton-mile base. Passed by compute_legs
+# only when enrich=True; keep this in lockstep with signal.FALLBACK_DEST_ZONE.
+FALLBACK_DEST_REGION = "nweurope"
 
 # A fix newer than this, inside coastal AIS range, means we can still *see* the
 # vessel — so a past-window open leg is on-water floating storage, not a phantom.
@@ -160,6 +170,7 @@ def pair_legs(
     last_fixes: dict[int, tuple[datetime | None, float | None, float | None]]
     | None = None,
     od_windows: dict[str, int] | None = None,
+    fallback_region: str | None = None,
 ) -> list[Leg]:
     """Pair each `departed` with its vessel's next `zone_entry` into a Leg.
 
@@ -169,6 +180,9 @@ def pair_legs(
                         and the arrival-gap test),
       - `last_fixes`    mmsi -> (fix_ts, lat, lon) of the vessel's latest fix,
       - `od_windows`    region -> expected-voyage days (defaults to OD_WINDOW_DAYS).
+      - `fallback_region`  region whose window + arrival-gap test a *declaration-less*
+                        open leg inherits (mirrors signal.FALLBACK_DEST_ZONE). When
+                        None, an undeclared open leg falls back to `censor_days`.
     Omit them and behaviour collapses to the original `open_in_transit |
     open_censored` split at `censor_days`. See the module docstring.
     """
@@ -207,16 +221,17 @@ def pair_legs(
                 dest_region=dest_region,
             )
             if arrival is None:
-                window_days = (
-                    od_windows.get(dest_region, censor_days)
-                    if dest_region is not None
-                    else censor_days
-                )
+                # An undeclared leg inherits `fallback_region`'s window + arrival-gap
+                # test, so it's governed by the SAME destination the signal layer
+                # assumes for its distance. `.get(None, ...)` yields censor_days when
+                # neither a declared nor a fallback region is available.
+                region = dest_region if dest_region is not None else fallback_region
+                window_days = od_windows.get(region, censor_days)
                 lf = last_fixes.get(mmsi)
                 if d.event_time > now - timedelta(days=window_days):
                     status: LegStatus = "open_in_transit"
                 else:
-                    status = _classify_overdue(lf, dest_region, now)
+                    status = _classify_overdue(lf, region, now)
                 legs.append(
                     Leg(
                         status=status,
@@ -334,4 +349,5 @@ async def compute_legs(
         weights=weights,
         dest_regions=dest_regions,
         last_fixes=last_fixes,
+        fallback_region=FALLBACK_DEST_REGION if enrich else None,
     )

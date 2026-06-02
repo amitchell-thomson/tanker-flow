@@ -100,6 +100,17 @@ STALE_CEILING_HOURS = 48
 # general band — we can't afford to wait the full MIN_SILENCE for these.
 FINAL_APPROACH_KM = 15.0
 FINAL_APPROACH_SILENCE_HOURS = 2
+# Burn control — export_arrival is the lowest-value rescue class: it only times
+# the ballast-leg *close* (a ballast carrier reaching a US export terminal to
+# reload), which feeds the secondary gas_ballast_to_us stock, never a headline
+# laden signal. So it pays a credit only when arrival is genuinely imminent
+# (final-approach geometry: <=FINAL_APPROACH_KM or actively closing) AND the gap
+# is long enough that AIS won't self-heal — twice the general MIN_SILENCE, since
+# an 8h-late capture still lands inside the ~day-long loading visit. The
+# loitering / short-gap tail in the NEAR_KM..FINAL_APPROACH_KM band is dropped;
+# the next live fix reacquires the vessel and the leg still closes, only with
+# coarser endpoint timing.
+EXPORT_ARRIVAL_MIN_SILENCE_HOURS = 8
 
 # --- Sanity gates on the returned position ------------------------------------
 VF_INTERVAL_MINUTES = 60  # server-side max age of returned positions
@@ -487,6 +498,18 @@ def classify_candidate(
     elif near_flow == "export":
         cls = "export_arrival"  # ballast approaching an export terminal to load
     else:
+        return None
+
+    # export_arrival is the lowest-value class — it only times the ballast-leg
+    # close (gas_ballast_to_us), never a headline laden signal. Hold it to a
+    # stricter bar than the laden classes: spend only when arrival is imminent
+    # (final approach or actively closing) AND the gap is long enough that AIS
+    # won't self-resume. Loitering / short-gap ballast vessels in the
+    # NEAR_KM..FINAL_APPROACH_KM band are skipped; reacquisition still closes
+    # the leg from the next live fix.
+    if cls == "export_arrival" and not (
+        in_final_approach and silent_h >= EXPORT_ARRIVAL_MIN_SILENCE_HOURS
+    ):
         return None
     return Candidate(
         mmsi=mmsi,
