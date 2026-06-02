@@ -23,7 +23,7 @@ from rich.logging import RichHandler
 from config import settings
 
 from .geo import haversine_nm
-from .laden import Side, build_draught_lookup, infer_laden
+from .laden import Side, build_draught_lookup, infer_laden, sanitize_design_draughts
 from .state_machine import (
     Event,
     Fix,
@@ -164,7 +164,11 @@ async def run(pool: asyncpg.Pool, now: datetime | None = None) -> None:
 
     fsru_mmsis = {r["mmsi"] for r in in_scope if r["is_fsru"]}
     walker_mmsis = [r["mmsi"] for r in in_scope if not r["is_fsru"]]
-    design_draught = {r["mmsi"]: r["design_draught"] for r in in_scope}
+    # Substitute implausible design draughts (bad masterdata) with the fleet
+    # median before laden inference, so one outlier value can't drop a laden cargo.
+    design_draught = sanitize_design_draughts(
+        {r["mmsi"]: r["design_draught"] for r in in_scope}
+    )
 
     centroids: dict[int, list[tuple[float, float]]] = defaultdict(list)
     for r in berths:

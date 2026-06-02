@@ -6,7 +6,11 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from pipeline.laden import build_draught_lookup, infer_laden
+from pipeline.laden import (
+    build_draught_lookup,
+    infer_laden,
+    sanitize_design_draughts,
+)
 from pipeline.port_events import _classify_envelope_sides
 from pipeline.state_machine import Event
 
@@ -238,3 +242,44 @@ def test_classify_open_visit_no_zone_exit():
     ]
     sides = _classify_envelope_sides(events)
     assert sides == ["pre", "moored"]
+
+
+# ----------------------------------------------------------------------
+# Design-draught sanitization: a single implausible masterdata value must
+# not push a laden cargo below the 0.85×design threshold (the Krk/TESSALA bug).
+# ----------------------------------------------------------------------
+
+
+def test_sanitize_replaces_implausible_with_fleet_median():
+    raw = {1: 12.0, 2: 12.5, 3: 13.0, 4: 15.0, 5: None, 6: 0.0}
+    out = sanitize_design_draughts(raw)
+    # plausible sorted = [12.0, 12.5, 13.0] → median = 12.5
+    assert out[1] == 12.0 and out[2] == 12.5 and out[3] == 13.0
+    assert out[4] == 12.5   # 15 m is out-of-band → fleet median
+    assert out[5] is None   # unenriched left as-is (→ flow_direction fallback)
+    assert out[6] == 0.0     # unenriched left as-is
+
+
+def test_sanitize_no_plausible_values_passes_through():
+    raw = {1: None, 2: 0.0, 3: 15.0}
+    assert sanitize_design_draughts(raw) == raw   # nothing to median over
+
+
+def test_sanitize_does_not_mutate_input():
+    raw = {1: 12.0, 2: 15.0}
+    _ = sanitize_design_draughts(raw)
+    assert raw == {1: 12.0, 2: 15.0}
+
+
+def test_sanitize_fixes_laden_misclassification():
+    # TESSALA at Krk: design 15 m (bad), draught 11.2 m, moored at an import berth.
+    lookup = build_draught_lookup([(MMSI, at(0), 11.2)])
+    raw = {MMSI: 15.0, 901: 12.0, 902: 12.5, 903: 13.0}
+    fixed = sanitize_design_draughts(raw)
+
+    # Before: 11.2 < 0.85*15 = 12.75 → misread as ballast.
+    bad, _ = infer_laden(MMSI, at(10), "moored", "import", raw[MMSI], lookup)
+    assert bad is False
+    # After: design → fleet median 12.5, 11.2 >= 0.85*12.5 = 10.625 → laden.
+    ok, src = infer_laden(MMSI, at(10), "moored", "import", fixed[MMSI], lookup)
+    assert ok is True and src == "draught"

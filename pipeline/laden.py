@@ -41,6 +41,14 @@ LADEN_THRESHOLD = 0.85
 # between physical undocking and the master rebroadcasting the new draught.
 LOOKAHEAD_FORWARD = timedelta(hours=6)
 
+# Physically-plausible LNG-carrier design (scantling) draught band, in metres.
+# Real values across the fleet span ~7–13.7 m; a value outside this band is a bad
+# masterdata datum (e.g. a generic 15 m on a 171,800 m³ carrier whose true design
+# is ~12 m). Left unchecked it inflates the laden threshold (0.85 × design) and
+# silently misreads a laden cargo as ballast — see sanitize_design_draughts.
+LNG_DESIGN_DRAUGHT_MIN = 6.0
+LNG_DESIGN_DRAUGHT_MAX = 14.0
+
 # Where the event sits within its envelope relative to the (single) moored
 # event in that envelope.
 #   'pre'        — inbound: zone_entry/anchorage_entry/anchored/anchorage_exit
@@ -61,6 +69,35 @@ def build_draught_lookup(
         if draught is None or draught <= 0:
             continue
         out.setdefault(mmsi, []).append((ts, float(draught)))
+    return out
+
+
+def _is_plausible_design(d: float | None) -> bool:
+    return d is not None and LNG_DESIGN_DRAUGHT_MIN <= d <= LNG_DESIGN_DRAUGHT_MAX
+
+
+def sanitize_design_draughts(
+    design_draught: dict[int, float | None],
+) -> dict[int, float | None]:
+    """Replace physically-implausible LNG design draughts with the fleet median of
+    the plausible ones, so a single bad masterdata value (e.g. a generic 15 m)
+    can't push the laden threshold (0.85 × design) above a genuinely-laden cargo's
+    draught and silently misclassify it as ballast.
+
+    Only *out-of-band positive* values are substituted. None / ≤0 (unenriched)
+    are left as-is — for those, draught inference returns None and laden falls
+    back to the terminal's flow_direction (see `infer_laden`), which is the
+    existing, intended behaviour. Returns a new dict; the input is not mutated."""
+    plausible = sorted(d for d in design_draught.values() if _is_plausible_design(d))
+    if not plausible:
+        return dict(design_draught)
+    median = plausible[len(plausible) // 2]
+    out: dict[int, float | None] = {}
+    for mmsi, d in design_draught.items():
+        if d is None or d <= 0 or _is_plausible_design(d):
+            out[mmsi] = d
+        else:
+            out[mmsi] = median
     return out
 
 
