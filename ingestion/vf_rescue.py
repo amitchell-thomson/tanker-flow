@@ -24,10 +24,13 @@ VF credits are a finite reserve that *expires unused* on a fixed date, and every
 credit spent on a near-terminal silent vessel buys signal (a leg/visit endpoint
 we'd otherwise mis-time). So the policy is not to minimise spend but to deplete
 the reserve to ~zero right at expiry: spend slower and we forfeit credits, spend
-faster and we go dark for the final stretch. `DAILY_CREDIT_CAP` is set to that
-glide-path rate (reserve ÷ days-to-expiry). `vf_rescue_log` is both the audit
-trail and the restart-safe ledger: today's SUM(credits) gates the cap, a per-mmsi
-recency check is the cooldown.
+faster and we go dark for the final stretch. The daily cap is derived each run
+from the latest vf_account_status balance snapshot (glide_cap: reserve ÷
+days-to-expiry; DAILY_CREDIT_CAP is the no-snapshot fallback). `vf_rescue_log`
+is both the audit trail and the restart-safe ledger: today's SUM(credits) gates
+the cap, a per-mmsi recency check is the cooldown, and candidates the budget
+can't serve are recorded as result='skipped_budget' (once per vessel per day)
+so unmet demand stays measurable.
 
 Run as a background task in ingestion/aisstream.py, or manually via
 `make vf-rescue` (`--dry-run` for a no-spend preview, `--mmsi N` for a one-off).
@@ -39,6 +42,7 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -65,12 +69,19 @@ RATE_LIMIT_DELAY = 1.0  # seconds between VF requests (mirrors vesselfinder.py)
 # unused, so the cap is a *target* glide-path rate, not a safety ceiling: reserve
 # ÷ days-to-expiry, so the reserve depletes to ~zero right at expiry while the
 # scarce daily budget is spent best-first (CLASS_PRIORITY) on the highest-signal
-# rescues. As of 2026-06: ~4 930 credits ÷ ~365 days ⇒ ~13.5/day → 14. Revisit if
-# the balance or expiry (see vf_account_status) drifts materially from the glide
-# path — observed demand (~17/day) sits above this, so the cap binds and the
-# lowest-value class (export_arrival) is trimmed first to fit. Read from the
-# vf_rescue_log ledger at the top of every run so a crash-loop can't bypass it.
+# rescues. The effective cap is derived each run from the latest vf_account_status
+# snapshot (glide_cap: ceil(credits / days-to-expiry), so the last fractional
+# credit is spent rather than forfeited); DAILY_CREDIT_CAP is the fallback when
+# no snapshot exists yet. As of 2026-06: ~4 900 credits ÷ ~363 days ⇒ ~13.5 → 14.
+# Observed demand (~17+/day) sits above this, so the cap binds and the
+# lowest-value class (export_arrival) is trimmed first to fit; candidates the
+# budget can't serve are audited as result='skipped_budget' (once per vessel per
+# day) so unmet demand is measurable. Spend is read from the vf_rescue_log
+# ledger at the top of every run so a crash-loop can't bypass it.
 DAILY_CREDIT_CAP = 14
+# Hard ceiling on the derived cap: a topped-up or corrupt balance row must not
+# trigger a silent spending spree — that drift deserves a human decision.
+GLIDE_CAP_CEILING = 40
 TER_COST = 1
 SAT_COST = 10  # defensive only — we never request satellite (sat=0); 1cr in practice
 # Best-estimate of the VF credit reserve when this worker started logging — used
@@ -357,6 +368,25 @@ FROM vf_rescue_log
 WHERE requested_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
 """
 
+# Latest account-balance snapshot (written by update_account_status each live
+# run) — drives the glide-path cap. One cycle of lag is fine: the glide moves
+# by ~0.01 credits/day.
+ACCOUNT_SNAPSHOT_SQL = """
+SELECT credits, expiration_date
+FROM vf_account_status
+ORDER BY checked_at DESC
+LIMIT 1
+"""
+
+# Vessels already audited as budget-skipped today (dedup: one row per vessel
+# per UTC day).
+SKIPPED_TODAY_SQL = """
+SELECT DISTINCT mmsi
+FROM vf_rescue_log
+WHERE result = 'skipped_budget'
+  AND requested_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+"""
+
 
 # --------------------------------------------------------------------------- #
 # Pure helpers (no I/O — unit-tested in tests/test_vf_rescue.py)
@@ -538,6 +568,29 @@ def terrestrial_budget(spent: int, cap: int, n_candidates: int) -> int:
     return max(0, min(n_candidates, cap - spent))
 
 
+def glide_cap(
+    credits: int | None,
+    expires: datetime | None,
+    now: datetime,
+    *,
+    fallback: int = DAILY_CREDIT_CAP,
+) -> int:
+    """Daily credit cap from the glide path: deplete the reserve to ~zero exactly
+    at expiry (slower forfeits credits, faster goes dark for the final stretch).
+    ceil so the last fractional credit/day is spent rather than forfeited.
+    Falls back to `fallback` when no balance snapshot exists; clamped to
+    GLIDE_CAP_CEILING (see constant)."""
+    if credits is None or expires is None:
+        return fallback
+    if credits <= 0:
+        return 0
+    days_left = (expires - now).total_seconds() / 86400.0
+    if days_left <= 1.0:
+        # Final day (or already expired): whatever is left is now-or-never.
+        return min(credits, GLIDE_CAP_CEILING)
+    return min(math.ceil(credits / days_left), GLIDE_CAP_CEILING)
+
+
 def is_settled(navstat: int | None, speed: float | None) -> bool:
     """A vessel is 'settled' (moored/at anchor/stopped) — its next signal event
     isn't imminent, so it gets the normal cooldown. A vessel still *moving*
@@ -618,6 +671,21 @@ async def fetch_live_batch(
 async def load_budget_today(conn: asyncpg.Connection) -> int:
     row = await conn.fetchrow(BUDGET_SQL)
     return int(row["spent"])
+
+
+async def load_glide_cap(conn: asyncpg.Connection, now: datetime) -> int:
+    """Effective daily cap from the latest vf_account_status snapshot (fallback:
+    DAILY_CREDIT_CAP until the first snapshot lands)."""
+    row = await conn.fetchrow(ACCOUNT_SNAPSHOT_SQL)
+    if row is None:
+        return DAILY_CREDIT_CAP
+    cap = glide_cap(row["credits"], row["expiration_date"], now)
+    if cap != DAILY_CREDIT_CAP:
+        logger.info(
+            f"vf_rescue: glide cap {cap}cr/day "
+            f"(balance {row['credits']}, static fallback {DAILY_CREDIT_CAP})"
+        )
+    return cap
 
 
 async def fetch_account_status(
@@ -722,6 +790,33 @@ async def log_rescue(
         detail,
         recheck_at,
     )
+
+
+async def log_skipped_budget(
+    pool: asyncpg.Pool, skipped: list[Candidate], *, spent: int, cap: int
+) -> None:
+    """Audit candidates today's budget couldn't serve: result='skipped_budget',
+    0 credits, recheck_at NULL (no cooldown — the vessel stays eligible for later
+    cycles / tomorrow's budget). One row per vessel per UTC day. This makes unmet
+    demand measurable: a vessel with a skipped_budget row and no later billed row
+    the same day went truly unserved (see park-checkup #6)."""
+    async with pool.acquire() as conn:
+        already = {r["mmsi"] for r in await conn.fetch(SKIPPED_TODAY_SQL)}
+        for c in skipped:
+            if c.mmsi in already:
+                continue
+            await log_rescue(
+                conn,
+                c,
+                src=None,
+                result="skipped_budget",
+                credits=0,
+                requested_imos=0,
+                returned_rows=0,
+                fix_ts=None,
+                recheck_at=None,
+                detail=f"budget {spent}/{cap}",
+            )
 
 
 async def _load_candidates(conn: asyncpg.Connection, now: datetime) -> list[Candidate]:
@@ -974,6 +1069,7 @@ async def run_rescue(
     now = datetime.now(timezone.utc)
     async with pool.acquire() as conn:
         spent = await load_budget_today(conn)
+        cap = await load_glide_cap(conn, now)
         if only_mmsi is not None:
             manual = await _load_manual_candidate(conn, only_mmsi, now)
             candidates = [manual] if manual else []
@@ -993,13 +1089,17 @@ async def run_rescue(
         candidates.sort(key=lambda c: (CLASS_PRIORITY[c.rescue_class], -c.silent_h))
         candidates = candidates[:MAX_CANDIDATES_PER_RUN]
 
-    remaining = DAILY_CREDIT_CAP - spent
-    n = terrestrial_budget(spent, DAILY_CREDIT_CAP, len(candidates))
+    remaining = cap - spent
+    n = terrestrial_budget(spent, cap, len(candidates))
     chosen = candidates[:n]
+    # Sorted best-first, so the tail is exactly what today's budget can't serve.
+    skipped = candidates[n:]
     summary = {
         "selected": len(candidates),
         "planned": n,
         "budget_remaining": remaining,
+        "cap": cap,
+        "skipped_budget": len(skipped),
         "rescued": 0,
         "credits_spent": 0,
     }
@@ -1011,9 +1111,12 @@ async def run_rescue(
         logger.info(
             f"vf_rescue DRY-RUN: {len(candidates)} candidates {by_class} · "
             f"plan {n} · est ≤{min(n * TER_COST, remaining)}cr · "
-            f"budget {spent}/{DAILY_CREDIT_CAP} today"
+            f"budget {spent}/{cap} today"
         )
         return summary
+
+    if skipped:
+        await log_skipped_budget(pool, skipped, spent=spent, cap=cap)
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         # Refresh the account balance every live run (free /status call) so the
@@ -1021,9 +1124,7 @@ async def run_rescue(
         await update_account_status(pool, client)
 
         if remaining <= 0:
-            logger.info(
-                f"vf_rescue: daily cap reached ({spent}/{DAILY_CREDIT_CAP}cr) — skip"
-            )
+            logger.info(f"vf_rescue: daily cap reached ({spent}/{cap}cr) — skip")
             return summary
         if not chosen:
             logger.info("vf_rescue: no coastal silent candidates")
@@ -1035,7 +1136,7 @@ async def run_rescue(
 
     logger.info(
         f"vf_rescue: selected={summary['selected']} rescued={summary['rescued']} "
-        f"spent={credits_spent}cr (today {spent + credits_spent}/{DAILY_CREDIT_CAP})"
+        f"spent={credits_spent}cr (today {spent + credits_spent}/{cap})"
     )
     return summary
 

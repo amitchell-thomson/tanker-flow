@@ -242,7 +242,7 @@ CREATE TABLE vf_rescue_log (
     src            TEXT,                    -- TER|SAT|NULL (no position returned)
     result         TEXT        NOT NULL CHECK (result IN (
                        'rescued','no_position','rejected_stale',
-                       'rejected_teleport','error','dry_run')),
+                       'rejected_teleport','error','dry_run','skipped_budget')),
     credits        SMALLINT    NOT NULL DEFAULT 0,
     requested_imos SMALLINT,
     returned_rows  SMALLINT,

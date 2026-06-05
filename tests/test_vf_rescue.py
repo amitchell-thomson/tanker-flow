@@ -440,3 +440,39 @@ def test_terrestrial_budget_trims_to_remaining():
     assert vr.terrestrial_budget(spent=18, cap=20, n_candidates=10) == 2
     assert vr.terrestrial_budget(spent=20, cap=20, n_candidates=10) == 0
     assert vr.terrestrial_budget(spent=0, cap=20, n_candidates=5) == 5
+
+
+# --- glide-path cap -------------------------------------------------------------
+def test_glide_cap_matches_current_glide():
+    # 4898 credits, ~363 days to expiry → ceil(13.49) = 14 (the hand-set cap).
+    expires = NOW + timedelta(days=363)
+    assert vr.glide_cap(4898, expires, NOW) == 14
+
+
+def test_glide_cap_ceils_so_last_fraction_is_spent():
+    # 10 credits over 4 days = 2.5/day → 3 (spending slower forfeits credits).
+    assert vr.glide_cap(10, NOW + timedelta(days=4), NOW) == 3
+
+
+def test_glide_cap_no_snapshot_falls_back():
+    assert vr.glide_cap(None, None, NOW) == vr.DAILY_CREDIT_CAP
+    assert vr.glide_cap(4898, None, NOW) == vr.DAILY_CREDIT_CAP
+    assert vr.glide_cap(None, NOW + timedelta(days=100), NOW) == vr.DAILY_CREDIT_CAP
+
+
+def test_glide_cap_exhausted_reserve_is_zero():
+    assert vr.glide_cap(0, NOW + timedelta(days=100), NOW) == 0
+    assert vr.glide_cap(-3, NOW + timedelta(days=100), NOW) == 0
+
+
+def test_glide_cap_final_day_spends_whats_left():
+    # Under a day to expiry: now-or-never, but still ceiling-clamped.
+    assert vr.glide_cap(7, NOW + timedelta(hours=12), NOW) == 7
+    assert vr.glide_cap(500, NOW + timedelta(hours=12), NOW) == vr.GLIDE_CAP_CEILING
+    # Already expired (stale snapshot edge): same path.
+    assert vr.glide_cap(7, NOW - timedelta(days=1), NOW) == 7
+
+
+def test_glide_cap_clamped_against_balance_drift():
+    # A topped-up/corrupt balance must not trigger a spending spree.
+    assert vr.glide_cap(100_000, NOW + timedelta(days=30), NOW) == vr.GLIDE_CAP_CEILING
