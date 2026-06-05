@@ -825,7 +825,9 @@ async def signals(
         where.append(f"sd.regime = ${len(args)}")
     if since_days is not None:
         args.append(since_days)
-        where.append(f"sd.bucket_date >= now()::date - (${len(args)} * INTERVAL '1 day')")
+        where.append(
+            f"sd.bucket_date >= now()::date - (${len(args)} * INTERVAL '1 day')"
+        )
 
     sql = f"""
         SELECT sd.signal_key, sd.bucket_date, sd.zone_scope, sd.regime,
@@ -856,7 +858,9 @@ async def _signal_context(pool: asyncpg.Pool):
     async with pool.acquire() as conn:
         term_rows = await conn.fetch(TERMINAL_METADATA_SQL)
         name_rows = await conn.fetch("SELECT mmsi, vessel_name FROM vessel_registry")
-        tname_rows = await conn.fetch("SELECT terminal_id, terminal_name FROM terminals")
+        tname_rows = await conn.fetch(
+            "SELECT terminal_id, terminal_name FROM terminals"
+        )
     lane = build_lane_filter(term_rows)
     names = {r["mmsi"]: r["vessel_name"] for r in name_rows}
     tnames = {r["terminal_id"]: r["terminal_name"] for r in tname_rows}
@@ -883,6 +887,35 @@ async def signals_overview(pool: asyncpg.Pool = Depends(get_pool)):
     transit = lane_legs(legs, lane)
     open_legs = [lg for lg in transit if lg.status == "open_in_transit"]
     unknown = sum(1 for lg in transit if transit_dest_band(lg, lane) == "unknown")
+
+    # Arrival-capture health for the two at-sea signals. `lane_legs` /
+    # `ballast_to_us_legs` keep only closed + open_in_transit, so the overdue-dark
+    # statuses they drop have to be counted on the *same* origin/cargo gate.
+    # `open_arrival_gap` reached the destination region then went dark;
+    # `open_censored` is a phantom (no coastal evidence). Both are excluded from
+    # the stock, but a rising count is the leading indicator that the stock is
+    # inflating — an un-closed leg rides the full voyage window as open_in_transit
+    # instead of closing at its true ~16.5d arrival. `open_floating` is genuine
+    # on-water storage (real inventory), so it is reported apart from the gap.
+    def _dark(laden_flag: bool, origin_is_export: bool) -> dict[str, int]:
+        out = {"open_arrival_gap": 0, "open_censored": 0, "open_floating": 0}
+        for lg in legs:
+            if lg.laden is not laden_flag:
+                continue
+            origin_ok = (
+                lane.is_export(lg.origin_zone)
+                if origin_is_export
+                else lane.is_import(lg.origin_zone)
+            )
+            if origin_ok and lg.status in out:
+                out[lg.status] += 1
+        return out
+
+    dark = _dark(True, True)  # laden US→EU
+    bdark = _dark(False, False)  # ballast EU→US
+    arrival_gap = dark["open_arrival_gap"] + bdark["open_arrival_gap"]
+    censored = dark["open_censored"] + bdark["open_censored"]
+    floating = dark["open_floating"] + bdark["open_floating"]
     loading = loading_us_visits(visits)
     discharging = discharging_eu_visits(visits)
     in_berth = len(items_live_on(loading + discharging, now.date(), visit_interval))
@@ -899,6 +932,9 @@ async def signals_overview(pool: asyncpg.Pool = Depends(get_pool)):
         "legs_in_transit": len(transit),
         "open_legs": len(open_legs),
         "closed_legs": len(transit) - len(open_legs),
+        "arrival_gap_legs": arrival_gap,
+        "censored_legs": censored,
+        "floating_legs": floating,
         "unknown_dest": unknown,
         "in_berth": in_berth,
         "regime_now": regime_of(now),
@@ -1025,7 +1061,10 @@ async def vessel_signals(mmsi: int, pool: asyncpg.Pool = Depends(get_pool)):
     today = now.date()
     feeds: list[str] = []
 
-    if any(lg.mmsi == mmsi for lg in items_live_on(lane_legs(legs, lane), today, leg_interval)):
+    if any(
+        lg.mmsi == mmsi
+        for lg in items_live_on(lane_legs(legs, lane), today, leg_interval)
+    ):
         feeds.append("gas_in_transit_volume")
     if any(
         lg.mmsi == mmsi

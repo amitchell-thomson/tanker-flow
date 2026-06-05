@@ -301,6 +301,13 @@ function renderOverview(o) {
   set('st-rebuilt', ago(o.signals_rebuilt_at));
   set('st-panel', `${o.panel_start} → ${o.panel_end}`);
   set('st-transit', `${o.legs_in_transit} (${o.open_legs} open / ${o.closed_legs} closed)`);
+  // Arrival-capture watch metric: departures past their voyage window with no
+  // observed arrival. Excluded from the stock, but a rising count is the leading
+  // sign the stock is inflating (un-closed legs ride the full window as open).
+  // Warn once the dark count rivals the legs we did see arrive.
+  const overdue = (o.arrival_gap_legs || 0) + (o.censored_legs || 0);
+  set('st-overdue', `${overdue} (${o.arrival_gap_legs || 0} gap / ${o.censored_legs || 0} phantom)`,
+      overdue >= o.closed_legs ? 'warn' : '');
   const share = o.legs_in_transit ? Math.round((o.unknown_dest / o.legs_in_transit) * 100) : 0;
   set('st-fallback', `${o.unknown_dest}/${o.legs_in_transit} (${share}%)`, share >= 60 ? 'warn' : '');
   set('st-berth', String(o.in_berth));
