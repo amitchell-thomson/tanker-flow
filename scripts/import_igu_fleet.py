@@ -24,7 +24,6 @@ Usage:
 import argparse
 import asyncio
 import csv
-import json
 import logging
 import sys
 from datetime import datetime, timezone
@@ -37,6 +36,7 @@ import httpx
 from rich.logging import RichHandler
 
 from config import settings  # noqa: E402
+from ingestion.vf_rescue import vf_eta_to_ais_dict  # noqa: E402
 
 VF_VESSELS_URL = "https://api.vesselfinder.com/vessels"
 RATE_LIMIT_DELAY = 1.0
@@ -218,8 +218,13 @@ async def insert_vessel_state(
         VALUES (now(), $1, $2, $3, $4, $5, 'vesselfinder')
         ON CONFLICT DO NOTHING
         """,
+        # ETA must be the AIS `{"Month","Day","Hour","Minute"}` shape that
+        # scoring._parse_eta consumes — NOT a `{"raw": ...}` wrapper, which
+        # silently fails to parse and kills tier-2 imminent-ETA promotion.
+        # Reuse vf_rescue's converter so the two VF→vessel_state writers can't
+        # drift apart again.
         ts, ais["MMSI"], draught, dest,
-        json.dumps({"raw": eta}) if eta else None,
+        vf_eta_to_ais_dict(eta),
     )
     return True
 
