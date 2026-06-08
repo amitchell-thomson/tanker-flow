@@ -74,6 +74,19 @@ def test_eta_outside_rescue_window():
     assert vr.eta_within_rescue_window(None, NOW) is False
 
 
+def test_eta_silence_band_is_well_formed_and_above_voyage_window():
+    # The candidate SQL filters on [MIN, MAX] silence. The MAX ceiling drops
+    # weeks-stale re-inferred ETAs; it must sit above the longest US->EU voyage
+    # window (a vessel silent <= one voyage could still be genuinely en route),
+    # else the gate would discard real in-progress approaches.
+    from pipeline.scoring import EXPECTED_VOYAGE_DAYS
+
+    assert vr.ETA_RESCUE_MIN_SILENCE_HOURS < vr.ETA_RESCUE_MAX_SILENCE_HOURS
+    assert vr.ETA_RESCUE_MAX_SILENCE_HOURS >= max(EXPECTED_VOYAGE_DAYS.values()) * 24
+    # The SQL must actually bind the ceiling as the second parameter.
+    assert "$2" in vr.ETA_CANDIDATE_SQL
+
+
 def test_eta_arrival_is_lowest_laden_priority_surplus_only():
     # eta_arrival is P≥1 (speculative) — it must NOT be exempt from the glide cap
     # the way the P0 leg-defenders are; it spends only the surplus.

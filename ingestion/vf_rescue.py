@@ -211,6 +211,19 @@ OUTAGE_MAX_VESSELS = 5  # cap polls per suspected-outage sweep
 ETA_RESCUE_HORIZON_HOURS = 24  # poll when the declared ETA is within this
 ETA_RESCUE_PAST_GRACE_HOURS = 12  # ...or just passed (vessel likely just arrived)
 ETA_RESCUE_MIN_SILENCE_HOURS = MIN_SILENCE_HOURS  # only if AIS won't self-heal
+# Declaration-freshness ceiling: the AIS ETA dict carries no year, so a stale
+# declaration ("ETA June 9") re-inferred by scoring._parse_eta keeps re-qualifying
+# as "imminent" forever (the {"raw"} IGU-import fix on 2026-06-08 populated
+# parsed_eta for ~500 fleet vessels, surfacing a backlog of weeks-stale ETAs as
+# false candidates). A US->EU laden voyage is <=17d (EXPECTED_VOYAGE_DAYS), so a
+# vessel silent longer than a full voyage cannot still be *en route* to that
+# imminent ETA — it has either already arrived (a past event, not a discovery) or
+# the declaration is stale. Above this ceiling the poll is near-certainly
+# no_position anyway (terrestrially invisible that long). Trade-off: this trims
+# the motivating CLEAN VITALITY-class case once it ages past 18d dark, but a
+# terrestrial poll at that silence is near-hopeless and that pattern's real fix
+# (ETA-format + scan rotation) already shipped. Tunable.
+ETA_RESCUE_MAX_SILENCE_HOURS = 18 * 24  # 18d — just past the longest voyage window
 ETA_RESCUE_MAX_VESSELS = 8  # bound speculative spend per run
 
 # Rescue classes, by the event at risk. import_arrival / export_departure protect
@@ -447,6 +460,7 @@ JOIN fleet f USING (mmsi)
 JOIN last_pos lp USING (mmsi)
 WHERE f.mmsi NOT IN (SELECT mmsi FROM recent_cooldown)
   AND lp.last_fix_ts < now() - make_interval(hours => $1)
+  AND lp.last_fix_ts > now() - make_interval(hours => $2)
 """
 
 LOG_SQL = """
@@ -1097,8 +1111,12 @@ async def _load_eta_candidates(
 ) -> list[Candidate]:
     """#7 — silent LNG carriers whose latest declared ETA is imminent (the
     missed-arrival pattern: imminent ETA + unresolvable dest ⇒ no tier-2 slot ⇒
-    dark in tier 5). Most imminent first, capped at ETA_RESCUE_MAX_VESSELS."""
-    rows = await conn.fetch(ETA_CANDIDATE_SQL, ETA_RESCUE_MIN_SILENCE_HOURS)
+    dark in tier 5). Silence band [MIN, MAX]: the MAX ceiling drops weeks-stale
+    re-inferred ETAs (see ETA_RESCUE_MAX_SILENCE_HOURS). Most imminent first,
+    capped at ETA_RESCUE_MAX_VESSELS."""
+    rows = await conn.fetch(
+        ETA_CANDIDATE_SQL, ETA_RESCUE_MIN_SILENCE_HOURS, ETA_RESCUE_MAX_SILENCE_HOURS
+    )
     scored: list[tuple[float, Candidate]] = []
     for r in rows:
         eta = _parse_eta(r["eta"], now)
