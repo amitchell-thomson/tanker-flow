@@ -181,6 +181,22 @@ CREATE INDEX ix_signal_daily_key_date ON signal_daily (signal_key, bucket_date);
 CREATE INDEX ix_signal_daily_date     ON signal_daily (bucket_date);
 
 
+-- EIA ground-truth + fundamentals (data/eia.py). Exogenous reference data — NOT
+-- derived from our pipeline, so it lives in its own table and is upserted, never
+-- rebuilt by `make signals`. Tidy/long (one row per series_id+period) so new
+-- series cost zero schema change. EIA revises recent periods, so the loader
+-- upserts ON CONFLICT (series_id, period) and `fetched_at` records the last pull.
+CREATE TABLE eia_series (
+    series_id   TEXT             NOT NULL,  -- canonical EIA route+facet id we fetched
+    period      DATE             NOT NULL,  -- EIA 'period' (week-ending / month / day)
+    value       DOUBLE PRECISION,           -- NULL allowed: EIA publishes gaps
+    unit        TEXT             NOT NULL,  -- 'MMcf' | 'Bcf' | '$/MMBtu' ...
+    frequency   TEXT             NOT NULL,  -- 'monthly' | 'weekly' | 'daily'
+    fetched_at  TIMESTAMPTZ      NOT NULL DEFAULT now(),
+    PRIMARY KEY (series_id, period)
+);
+
+
 -- Priority watchlist: derived nightly+hourly by pipeline/scoring.py. One row per
 -- LNG/FSRU vessel in vessel_registry. The ingester reads top-N from this table
 -- to pick the 150 MMSIs to subscribe to (100 persistent + 50 scan rotation).

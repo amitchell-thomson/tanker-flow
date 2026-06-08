@@ -1,4 +1,4 @@
-.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events scoring signals vf-rescue vf-rescue-dry vf-status refresh-fleet backup
+.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events scoring signals vf-rescue vf-rescue-dry vf-status refresh-fleet backup eia eia-full
 
 up:
 	docker compose up -d
@@ -72,6 +72,16 @@ vf-rescue-dry:
 # Fetch + store the VF account balance (free /status call).
 vf-status:
 	uv run python -m ingestion.vf_rescue --status
+
+# EIA ground-truth + fundamentals loader (data/eia.py). Idempotent upsert into
+# eia_series. `eia` is the incremental refresh of the active series set (monthly
+# US LNG exports — the capture-rate ground truth); `eia-full` backfills history
+# on a fresh DB. Verify v2 routes first with `python -m data.eia --probe lng_exports`.
+eia:
+	uv run python -m data.eia
+
+eia-full:
+	uv run python -m data.eia --full
 
 # Periodic refresh of the global LNG/FSRU fleet from the IGU report.
 # Step 1 (manual): download the latest "IGU World LNG Report" PDF from

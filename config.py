@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     aisstream_api_key: str
     aisstream_api_key_alt: str
     vf_api_key: str = ""
+    eia_api_key: str = ""  # free key from https://www.eia.gov/opendata/
 
     @property
     def database_url(self) -> str:
