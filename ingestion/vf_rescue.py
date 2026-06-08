@@ -18,7 +18,14 @@ No special-casing anywhere else.
 
 What it does NOT do: track vessels mid-crossing (no event at risk), or rescue
 long-stale vessels (the event has already passed). Both are deliberately excluded
-by the near-terminal geometry and the staleness ceiling.
+by the near-terminal geometry and the staleness ceiling — with two carve-outs:
+(1) a vessel in an *open visit* (moored/anchored, no `departed` observed) keeps a
+much higher ceiling, because its pending event still fires off a late fix, while
+abandoning it loses the cargo's leg entirely; (2) a silent carrier with an
+*imminent declared ETA* (`eta_arrival`) gets one speculative discovery poll even
+with no near-terminal fix — the missed-arrival case where a FOR-ORDERS vessel
+never earned a subscription slot and went dark in tier 5. Vessels that repeatedly
+return no_position back off exponentially (terrestrially invisible stays so).
 
 VF credits are a finite reserve that *expires unused* on a fixed date, and every
 credit spent on a near-terminal silent vessel buys signal (a leg/visit endpoint
@@ -53,6 +60,7 @@ from rich.logging import RichHandler
 from config import settings
 from pipeline import legs as legs_module
 from pipeline.geo import haversine_nm
+from pipeline.scoring import _parse_eta
 
 from .models import VesselFinderAIS, VesselFinderLiveResponse
 
@@ -73,25 +81,46 @@ RATE_LIMIT_DELAY = 1.0  # seconds between VF requests (mirrors vesselfinder.py)
 # snapshot (glide_cap: ceil(credits / days-to-expiry), so the last fractional
 # credit is spent rather than forfeited); DAILY_CREDIT_CAP is the fallback when
 # no snapshot exists yet. As of 2026-06: ~4 900 credits ÷ ~363 days ⇒ ~13.5 → 14.
-# Observed demand (~17+/day) sits above this, so the cap binds and the
-# lowest-value class (export_arrival) is trimmed first to fit; candidates the
-# budget can't serve are audited as result='skipped_budget' (once per vessel per
-# day) so unmet demand is measurable. Spend is read from the vf_rescue_log
-# ledger at the top of every run so a crash-loop can't bypass it.
+#
+# Priority-0 demand alone (~20-26 vessels/day over 06-04→07) exceeds that rate,
+# so the budget is split (split_budget): P0 classes — the leg-defining events —
+# are exempt from the daily glide cap, while priority-≥1 classes spend only the
+# *surplus* vs the glide line (glide_surplus: live balance minus the straight
+# line from the anchor snapshot to zero-at-expiry). P0 overspend pushes the
+# surplus negative, which starves P≥1 until the line recovers — the leaky-bucket
+# payback (park-checkups 2026-06-04/07), with no bucket state to persist.
+# Candidates the budget can't serve are audited as result='skipped_budget'
+# (once per vessel per day) so unmet demand stays measurable. Spend is read
+# from the vf_rescue_log ledger at the top of every run so a crash-loop can't
+# bypass it.
 DAILY_CREDIT_CAP = 14
-# Hard ceiling on the derived cap: a topped-up or corrupt balance row must not
-# trigger a silent spending spree — that drift deserves a human decision.
+# Hard ceiling on *total* daily spend, P0 included: a topped-up/corrupt balance
+# row or a runaway classifier must not trigger a silent spending spree — that
+# drift deserves a human decision.
 GLIDE_CAP_CEILING = 40
+# Surplus this far below the line (in days of glide-rate spend) means P0 demand
+# alone is structurally above the glide rate — P≥1 starvation can no longer pay
+# it back. Log loudly; the decision (top up credits vs tighten P0 gates) is
+# human (park-checkup #6 watches for it).
+SURPLUS_ALARM_DAYS = 7
 TER_COST = 1
 SAT_COST = 10  # defensive only — we never request satellite (sat=0); 1cr in practice
 # Best-estimate of the VF credit reserve when this worker started logging — used
 # only for the TUI "remaining" runway readout (= reserve − SUM(credits) logged).
 CREDIT_RESERVE_ESTIMATE = 6000
-# Cooldown after a poll. The default (settled / no_position / rejected) is long;
-# a vessel caught still *moving* in its approach is re-polled much sooner so we
-# capture the actual entry/moored event rather than waiting a full cycle (#2).
+# Cooldown after a poll. The default (settled / rejected) is long; a vessel
+# caught still *moving* in its approach is re-polled much sooner so we capture
+# the actual entry/moored event rather than waiting a full cycle (#2).
 PER_VESSEL_COOLDOWN_HOURS = 12
 RECHECK_MOVING_HOURS = 2
+# A `no_position` means the vessel is terrestrially invisible right now —
+# repeat misses are strong evidence it will stay that way (06-04→07: 14 of 17
+# outage_check vessels re-polled on the flat 12h cooldown returned nothing,
+# 31 wasted plan slots that crowded priority-1 candidates out of each run).
+# So the no_position cooldown doubles per consecutive miss
+# (12h → 24h → 48h → 96h → ceiling); any returned position — rescued or
+# rejected — proves visibility and resets the streak.
+NO_POSITION_BACKOFF_CEILING_HOURS = 168.0  # 7d
 MAX_CANDIDATES_PER_RUN = 30  # bounds worst-case spend/run; budget trims further
 IMO_BATCH_SIZE = 20  # IMOs per GET (batching supported)
 
@@ -115,6 +144,14 @@ CLOSING_ANGLE_DEG = 60.0
 # unbounded "longest-silent-first" design.
 MIN_SILENCE_HOURS = 4
 STALE_CEILING_HOURS = 48
+# ...except for an open visit (moored/anchored, no `departed` observed): that
+# event *can't* have passed irretrievably — any late fix still closes the visit
+# and opens the leg, whereas abandoning the vessel loses the cargo from
+# gas_in_transit entirely (LNG JUNO, 06-04: dark 60h alongside, aged out at
+# 48h, synthetic stale-close with no `departed` ⇒ no leg). Open-visit
+# candidates therefore stay eligible up to a week; the no_position backoff
+# keeps the repeat-poll cost bounded.
+OPEN_VISIT_STALE_CEILING_HOURS = 168.0  # 7d
 # #3 — a vessel already in/at the approach envelope (or clearly closing) is one
 # fix from a signal event, so trigger it on a much shorter silence than the
 # general band — we can't afford to wait the full MIN_SILENCE for these.
@@ -159,11 +196,29 @@ OUTAGE_VESSEL_MIN_SILENT_HOURS = 36  # only poll vessels actually gone quiet
 OUTAGE_VESSEL_MAX_SILENT_DAYS = 21  # ...but not hopelessly stale
 OUTAGE_MAX_VESSELS = 5  # cap polls per suspected-outage sweep
 
+# --- Trigger #7: imminent-ETA arrival discovery -------------------------------
+# A vessel like CLEAN VITALITY (2026-06-08) declares an imminent ETA but, with a
+# FOR-ORDERS / unresolvable destination, never earns a tier-2 subscription slot,
+# so it sits dark in tier 5 and we miss the arrival entirely. The ETA itself is
+# the actionable signal: an LNG carrier with an imminent parsed ETA that has gone
+# AIS-silent gets one cheap coastal poll. If the returned position is at one of
+# our terminals the injected fix re-tiers it to 1/2 and the live pipeline takes
+# over; if it is bound elsewhere we spent one credit to learn that. This is
+# speculative (most imminent-ETA dark carriers head for non-Atlantic terminals),
+# so it is held to the lowest laden priority — surplus-only via split_budget —
+# and capped per run. Imminence is decided in Python (the AIS ETA dict carries
+# no year, so SQL can't compare it; scoring._parse_eta re-infers it).
+ETA_RESCUE_HORIZON_HOURS = 24  # poll when the declared ETA is within this
+ETA_RESCUE_PAST_GRACE_HOURS = 12  # ...or just passed (vessel likely just arrived)
+ETA_RESCUE_MIN_SILENCE_HOURS = MIN_SILENCE_HOURS  # only if AIS won't self-heal
+ETA_RESCUE_MAX_VESSELS = 8  # bound speculative spend per run
+
 # Rescue classes, by the event at risk. import_arrival / export_departure protect
 # the leg-defining events (prevent in-transit over/under-count); outage_check
 # guards the high-leverage outage signals — all rank highest. dest_capture and
 # import_berth (moored / queue timing) are next; export_arrival (ballast
-# approaching to load) is lowest. 'manual' (operator override) jumps the queue.
+# approaching to load) and eta_arrival (speculative imminent-ETA discovery) are
+# lowest. 'manual' (operator override) jumps the queue.
 CLASS_PRIORITY = {
     "manual": -1,
     "import_arrival": 0,
@@ -173,6 +228,7 @@ CLASS_PRIORITY = {
     "import_berth": 1,
     "floating_check": 1,
     "export_arrival": 2,
+    "eta_arrival": 2,
 }
 
 
@@ -354,6 +410,45 @@ ORDER BY vi.visit_ts DESC
 LIMIT $5
 """
 
+# #7 — LNG carriers with a parseable ETA in their latest vessel_state, gone
+# AIS-silent past the floor, not in cooldown. Imminence is filtered in Python
+# (_parse_eta) since the AIS ETA dict has no year. last_pos is required so we
+# have a from-position for the teleport sanity gate.
+ETA_CANDIDATE_SQL = """
+WITH fleet AS (
+    SELECT mmsi, imo, vessel_name FROM vessel_registry
+    WHERE is_lng_carrier AND NOT is_fsru AND NOT excluded
+      AND imo IS NOT NULL AND imo <> 0
+),
+latest_state AS (
+    SELECT DISTINCT ON (vs.mmsi) vs.mmsi, vs.eta
+    FROM vessel_state vs
+    WHERE EXISTS (SELECT 1 FROM fleet f WHERE f.mmsi = vs.mmsi)
+      AND vs.eta IS NOT NULL AND vs.eta ? 'Month'
+    ORDER BY vs.mmsi, vs.state_ts DESC
+),
+last_pos AS (
+    SELECT DISTINCT ON (a.mmsi) a.mmsi, a.fix_ts AS last_fix_ts,
+           a.lat AS last_lat, a.lon AS last_lon
+    FROM ais_fixes a
+    WHERE EXISTS (SELECT 1 FROM fleet f WHERE f.mmsi = a.mmsi)
+    ORDER BY a.mmsi, a.fix_ts DESC
+),
+recent_cooldown AS (
+    SELECT mmsi FROM (
+        SELECT DISTINCT ON (mmsi) mmsi, recheck_at
+        FROM vf_rescue_log ORDER BY mmsi, requested_at DESC
+    ) latest WHERE recheck_at IS NOT NULL AND recheck_at > now()
+)
+SELECT f.mmsi, f.imo, f.vessel_name, ls.eta,
+       lp.last_fix_ts, lp.last_lat, lp.last_lon
+FROM latest_state ls
+JOIN fleet f USING (mmsi)
+JOIN last_pos lp USING (mmsi)
+WHERE f.mmsi NOT IN (SELECT mmsi FROM recent_cooldown)
+  AND lp.last_fix_ts < now() - make_interval(hours => $1)
+"""
+
 LOG_SQL = """
 INSERT INTO vf_rescue_log (
     mmsi, imo, vessel_name, rescue_class, sat, src, result,
@@ -372,9 +467,26 @@ WHERE requested_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE '
 # run) — drives the glide-path cap. One cycle of lag is fine: the glide moves
 # by ~0.01 credits/day.
 ACCOUNT_SNAPSHOT_SQL = """
-SELECT credits, expiration_date
+SELECT credits, checked_at, expiration_date
 FROM vf_account_status
 ORDER BY checked_at DESC
+LIMIT 1
+"""
+
+# Glide anchor: the FIRST snapshot carrying the current expiration_date. The
+# line from (anchor_ts, anchor_credits) down to zero-at-expiry is the spend
+# target; the gap between the live balance and that line is the surplus the
+# priority-≥1 classes may spend (see glide_surplus / split_budget). Keying the
+# anchor on expiration_date makes a top-up that extends expiry re-anchor
+# automatically; a same-expiry top-up just lifts the surplus (spendable,
+# bounded by the GLIDE_CAP_CEILING brake).
+GLIDE_ANCHOR_SQL = """
+SELECT credits, checked_at, expiration_date
+FROM vf_account_status
+WHERE expiration_date IS NOT DISTINCT FROM (
+    SELECT expiration_date FROM vf_account_status ORDER BY checked_at DESC LIMIT 1
+)
+ORDER BY checked_at ASC
 LIMIT 1
 """
 
@@ -385,6 +497,23 @@ SELECT DISTINCT mmsi
 FROM vf_rescue_log
 WHERE result = 'skipped_budget'
   AND requested_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+"""
+
+# Consecutive trailing no_position count per vessel — drives the escalating
+# no_position cooldown. The streak is broken only by a row where VF actually
+# returned a position (rescued or sanity-rejected); error / skipped_budget /
+# dry_run rows are neutral: they neither count nor reset.
+NO_POSITION_STREAK_SQL = """
+SELECT l.mmsi, count(*) AS streak
+FROM vf_rescue_log l
+WHERE l.mmsi = ANY($1::bigint[])
+  AND l.result = 'no_position'
+  AND l.requested_at > COALESCE(
+      (SELECT max(l2.requested_at) FROM vf_rescue_log l2
+       WHERE l2.mmsi = l.mmsi
+         AND l2.result IN ('rescued', 'rejected_stale', 'rejected_teleport')),
+      '-infinity'::timestamptz)
+GROUP BY l.mmsi
 """
 
 
@@ -504,13 +633,16 @@ def classify_candidate(
     if last_fix_ts is None:
         return None
     silent_h = (now - last_fix_ts).total_seconds() / 3600.0
-    if silent_h > STALE_CEILING_HOURS:
-        return None  # event has passed; a late poll can't recover its timing
 
     open_visit = last_event_type is not None and last_event_type not in (
         "departed",
         "zone_exit",
     )
+    # Open visits keep their value long past the general ceiling: the pending
+    # `departed`/`moored` still fires off a late fix (see constant).
+    ceiling = OPEN_VISIT_STALE_CEILING_HOURS if open_visit else STALE_CEILING_HOURS
+    if silent_h > ceiling:
+        return None  # event has passed; a late poll can't recover its timing
     near = near_km is not None and near_km <= NEAR_KM
     closing = is_closing(last_cog, bearing_deg, near_km)
 
@@ -562,10 +694,15 @@ def classify_candidate(
     )
 
 
-def terrestrial_budget(spent: int, cap: int, n_candidates: int) -> int:
-    """How many candidates we can afford this run (1 credit each, worst case all
-    return a position)."""
-    return max(0, min(n_candidates, cap - spent))
+def no_position_backoff_hours(streak: int) -> float:
+    """Cooldown after a no_position result, doubling per consecutive prior miss
+    (streak 0 = first miss → the normal 12h; 1 → 24h; 2 → 48h; 3 → 96h; then
+    clamped to NO_POSITION_BACKOFF_CEILING_HOURS). Any returned position —
+    rescued or sanity-rejected — resets the streak (see streak SQL)."""
+    return min(
+        PER_VESSEL_COOLDOWN_HOURS * float(2**streak),
+        NO_POSITION_BACKOFF_CEILING_HOURS,
+    )
 
 
 def glide_cap(
@@ -589,6 +726,65 @@ def glide_cap(
         # Final day (or already expired): whatever is left is now-or-never.
         return min(credits, GLIDE_CAP_CEILING)
     return min(math.ceil(credits / days_left), GLIDE_CAP_CEILING)
+
+
+def glide_surplus(
+    *,
+    anchor_credits: int,
+    anchor_ts: datetime,
+    expires: datetime,
+    balance: int,
+    now: datetime,
+) -> float:
+    """Credits ahead (+) / behind (−) of the glide line — the straight line from
+    the anchor snapshot down to zero-at-expiry. This is the leaky bucket in
+    integrated form: priority-0 spend that pushes the balance below the line
+    drives the surplus negative, which starves priority-≥1 spending until the
+    line is recovered — automatic payback with no bucket state to persist."""
+    total = (expires - anchor_ts).total_seconds()
+    if total <= 0:
+        # Expired (or degenerate anchor): no line left to track; whatever
+        # remains is now-or-never, so it is all surplus.
+        return float(balance)
+    frac_left = max(0.0, (expires - now).total_seconds() / total)
+    return balance - anchor_credits * frac_left
+
+
+def split_budget(
+    candidates: list[Candidate],
+    *,
+    spent: int,
+    cap: int,
+    surplus: float,
+    brake: int = GLIDE_CAP_CEILING,
+) -> tuple[list[Candidate], list[Candidate]]:
+    """Partition best-first-sorted candidates into (chosen, skipped).
+
+    Priority-0 classes (CLASS_PRIORITY <= 0: leg-defining events + manual) are
+    exempt from the daily glide cap — their unmet demand was 13-17 vessels/day
+    over 06-05→07 with the single-pool budget — and bounded only by the `brake`
+    (GLIDE_CAP_CEILING) so a runaway classifier still can't drain the reserve.
+    Priority-≥1 classes spend only when the balance is ahead of the glide line:
+    min(glide-cap headroom, floor(surplus)). Every chosen candidate reserves one
+    worst-case credit against the brake (1 credit each, as if all return a
+    position; no_position bills nothing, so later runs get the slack back)."""
+    brake_left = max(0, brake - spent)
+    p1_left = max(0, min(cap - spent, math.floor(surplus)))
+    chosen: list[Candidate] = []
+    skipped: list[Candidate] = []
+    for c in candidates:
+        if brake_left <= 0:
+            skipped.append(c)
+        elif CLASS_PRIORITY[c.rescue_class] <= 0:
+            chosen.append(c)
+            brake_left -= 1
+        elif p1_left > 0:
+            chosen.append(c)
+            p1_left -= 1
+            brake_left -= 1
+        else:
+            skipped.append(c)
+    return chosen, skipped
 
 
 def is_settled(navstat: int | None, speed: float | None) -> bool:
@@ -686,6 +882,23 @@ async def load_glide_cap(conn: asyncpg.Connection, now: datetime) -> int:
             f"(balance {row['credits']}, static fallback {DAILY_CREDIT_CAP})"
         )
     return cap
+
+
+async def load_glide_surplus(conn: asyncpg.Connection, now: datetime) -> float:
+    """Surplus vs the glide line from the anchor snapshot (see GLIDE_ANCHOR_SQL).
+    Returns 0.0 until snapshots exist — priority-≥1 classes then spend nothing,
+    which lasts at most one cycle (update_account_status runs every live pass)."""
+    latest = await conn.fetchrow(ACCOUNT_SNAPSHOT_SQL)
+    anchor = await conn.fetchrow(GLIDE_ANCHOR_SQL)
+    if latest is None or anchor is None or anchor["expiration_date"] is None:
+        return 0.0
+    return glide_surplus(
+        anchor_credits=anchor["credits"],
+        anchor_ts=anchor["checked_at"],
+        expires=anchor["expiration_date"],
+        balance=latest["credits"],
+        now=now,
+    )
 
 
 async def fetch_account_status(
@@ -866,6 +1079,38 @@ async def _load_dest_candidates(
     return [_row_to_candidate(r, "dest_capture", now) for r in rows]
 
 
+def eta_within_rescue_window(eta: datetime | None, now: datetime) -> bool:
+    """True if a parsed ETA falls in the discovery window: from
+    ETA_RESCUE_PAST_GRACE_HOURS ago (just arrived) to ETA_RESCUE_HORIZON_HOURS
+    ahead (about to arrive)."""
+    if eta is None:
+        return False
+    return (
+        now - timedelta(hours=ETA_RESCUE_PAST_GRACE_HOURS)
+        <= eta
+        <= now + timedelta(hours=ETA_RESCUE_HORIZON_HOURS)
+    )
+
+
+async def _load_eta_candidates(
+    conn: asyncpg.Connection, now: datetime
+) -> list[Candidate]:
+    """#7 — silent LNG carriers whose latest declared ETA is imminent (the
+    missed-arrival pattern: imminent ETA + unresolvable dest ⇒ no tier-2 slot ⇒
+    dark in tier 5). Most imminent first, capped at ETA_RESCUE_MAX_VESSELS."""
+    rows = await conn.fetch(ETA_CANDIDATE_SQL, ETA_RESCUE_MIN_SILENCE_HOURS)
+    scored: list[tuple[float, Candidate]] = []
+    for r in rows:
+        eta = _parse_eta(r["eta"], now)
+        if not eta_within_rescue_window(eta, now):
+            continue
+        scored.append(
+            (abs((eta - now).total_seconds()), _row_to_candidate(r, "eta_arrival", now))
+        )
+    scored.sort(key=lambda t: t[0])
+    return [c for _, c in scored[:ETA_RESCUE_MAX_VESSELS]]
+
+
 async def _load_outage_candidates(
     conn: asyncpg.Connection, now: datetime
 ) -> list[Candidate]:
@@ -953,6 +1198,12 @@ async def _run_pass(
     spent = 0
     normal_recheck = now + timedelta(hours=PER_VESSEL_COOLDOWN_HOURS)
     moving_recheck = now + timedelta(hours=RECHECK_MOVING_HOURS)
+    # Prior consecutive no_position misses per vessel (escalating cooldown).
+    async with pool.acquire() as conn:
+        streak_rows = await conn.fetch(
+            NO_POSITION_STREAK_SQL, [c.mmsi for c in candidates]
+        )
+    streaks = {r["mmsi"]: r["streak"] for r in streak_rows}
     for batch in _chunks(candidates, IMO_BATCH_SIZE):
         try:
             ais_rows = await fetch_live_batch(client, [c.imo for c in batch])
@@ -1000,6 +1251,7 @@ async def _run_pass(
             for c in batch:
                 a = by_imo.get(c.imo) or by_mmsi.get(c.mmsi)
                 if a is None:
+                    backoff_h = no_position_backoff_hours(streaks.get(c.mmsi, 0))
                     await log_rescue(
                         conn,
                         c,
@@ -1009,7 +1261,7 @@ async def _run_pass(
                         requested_imos=len(batch),
                         returned_rows=len(ais_rows),
                         fix_ts=None,
-                        recheck_at=normal_recheck,
+                        recheck_at=now + timedelta(hours=backoff_h),
                     )
                     continue
                 returned.add(c.mmsi)
@@ -1070,6 +1322,7 @@ async def run_rescue(
     async with pool.acquire() as conn:
         spent = await load_budget_today(conn)
         cap = await load_glide_cap(conn, now)
+        surplus = await load_glide_surplus(conn, now)
         if only_mmsi is not None:
             manual = await _load_manual_candidate(conn, only_mmsi, now)
             candidates = [manual] if manual else []
@@ -1079,6 +1332,7 @@ async def run_rescue(
                 await _load_candidates(conn, now),  # #1-#3 event capture
                 await _load_dest_candidates(conn, now),  # #4 destination capture
                 await _load_outage_candidates(conn, now),  # #5 outage confirmation
+                await _load_eta_candidates(conn, now),  # #7 imminent-ETA discovery
             ]
     if only_mmsi is None:
         # #6 floating-vs-phantom uses pipeline.legs (manages its own pool conns),
@@ -1089,16 +1343,21 @@ async def run_rescue(
         candidates.sort(key=lambda c: (CLASS_PRIORITY[c.rescue_class], -c.silent_h))
         candidates = candidates[:MAX_CANDIDATES_PER_RUN]
 
-    remaining = cap - spent
-    n = terrestrial_budget(spent, cap, len(candidates))
-    chosen = candidates[:n]
-    # Sorted best-first, so the tail is exactly what today's budget can't serve.
-    skipped = candidates[n:]
+    # P0 exempt from the glide cap (brake-bounded); P≥1 spends only the surplus.
+    chosen, skipped = split_budget(candidates, spent=spent, cap=cap, surplus=surplus)
+    if surplus < -SURPLUS_ALARM_DAYS * cap:
+        logger.warning(
+            f"vf_rescue: balance {abs(surplus):.0f}cr BEHIND the glide line "
+            f"(> {SURPLUS_ALARM_DAYS}d of glide rate) — priority-0 demand is "
+            f"structurally above the glide rate; top up credits or tighten P0 "
+            f"gates (see park-checkup #6)"
+        )
     summary = {
         "selected": len(candidates),
-        "planned": n,
-        "budget_remaining": remaining,
+        "planned": len(chosen),
+        "budget_remaining": max(0, cap - spent),
         "cap": cap,
+        "surplus": round(surplus, 1),
         "skipped_budget": len(skipped),
         "rescued": 0,
         "credits_spent": 0,
@@ -1110,8 +1369,9 @@ async def run_rescue(
             by_class[c.rescue_class] = by_class.get(c.rescue_class, 0) + 1
         logger.info(
             f"vf_rescue DRY-RUN: {len(candidates)} candidates {by_class} · "
-            f"plan {n} · est ≤{min(n * TER_COST, remaining)}cr · "
-            f"budget {spent}/{cap} today"
+            f"plan {len(chosen)} (skip {len(skipped)}) · "
+            f"est ≤{len(chosen) * TER_COST}cr · "
+            f"budget {spent}/{cap} today · surplus {surplus:+.1f}cr"
         )
         return summary
 
@@ -1123,11 +1383,12 @@ async def run_rescue(
         # TUI stays current even on runs that rescue nothing.
         await update_account_status(pool, client)
 
-        if remaining <= 0:
-            logger.info(f"vf_rescue: daily cap reached ({spent}/{cap}cr) — skip")
-            return summary
         if not chosen:
-            logger.info("vf_rescue: no coastal silent candidates")
+            logger.info(
+                f"vf_rescue: nothing affordable to poll "
+                f"({len(candidates)} candidates, budget {spent}/{cap}cr, "
+                f"surplus {surplus:+.1f}cr)"
+            )
             return summary
 
         returned, credits_spent = await _run_pass(pool, client, chosen, now=now)
@@ -1136,7 +1397,8 @@ async def run_rescue(
 
     logger.info(
         f"vf_rescue: selected={summary['selected']} rescued={summary['rescued']} "
-        f"spent={credits_spent}cr (today {spent + credits_spent}/{cap})"
+        f"spent={credits_spent}cr (today {spent + credits_spent}/{cap}, "
+        f"surplus {surplus:+.1f}cr)"
     )
     return summary
 

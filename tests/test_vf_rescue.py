@@ -59,6 +59,42 @@ def test_vf_eta_roundtrips_through_parse_eta():
     assert parsed == datetime(2026, 6, 3, 14, 30, tzinfo=timezone.utc)
 
 
+# --- #7 imminent-ETA rescue window --------------------------------------------
+def test_eta_within_rescue_window():
+    # Imminent (within the forward horizon) and just-arrived (within past grace).
+    assert vr.eta_within_rescue_window(NOW + timedelta(hours=6), NOW) is True
+    assert vr.eta_within_rescue_window(NOW - timedelta(hours=6), NOW) is True
+    assert vr.eta_within_rescue_window(NOW, NOW) is True
+
+
+def test_eta_outside_rescue_window():
+    # Too far ahead (beyond ETA_RESCUE_HORIZON_HOURS) and long past (beyond grace).
+    assert vr.eta_within_rescue_window(NOW + timedelta(hours=48), NOW) is False
+    assert vr.eta_within_rescue_window(NOW - timedelta(hours=48), NOW) is False
+    assert vr.eta_within_rescue_window(None, NOW) is False
+
+
+def test_eta_arrival_is_lowest_laden_priority_surplus_only():
+    # eta_arrival is P≥1 (speculative) — it must NOT be exempt from the glide cap
+    # the way the P0 leg-defenders are; it spends only the surplus.
+    assert vr.CLASS_PRIORITY["eta_arrival"] >= 1
+    cands = _sorted_cands("import_arrival", "eta_arrival")
+    # Behind the line ⇒ only the P0 import_arrival is polled, eta_arrival skipped.
+    chosen, skipped = vr.split_budget(cands, spent=0, cap=14, surplus=-1.0)
+    assert [c.rescue_class for c in chosen] == ["import_arrival"]
+    assert [c.rescue_class for c in skipped] == ["eta_arrival"]
+
+
+def test_igu_fleet_import_uses_canonical_eta_converter():
+    """Both VF→vessel_state writers must emit the AIS-shaped ETA scoring can
+    parse. The fleet import once wrote `{"raw": ...}` directly, which silently
+    killed tier-2 imminent-ETA promotion. Pin the reuse so it can't regress to
+    a private copy: the script must reference the same converter object."""
+    from scripts import import_igu_fleet
+
+    assert import_igu_fleet.vf_eta_to_ais_dict is vr.vf_eta_to_ais_dict
+
+
 # --- VesselFinderAIS model sentinels ------------------------------------------
 def _ais(**overrides):
     base = {
@@ -322,6 +358,46 @@ def test_classify_export_departure_open_visit():
     assert c is not None and c.rescue_class == "export_departure"
 
 
+def test_classify_open_visit_survives_general_ceiling():
+    # LNG JUNO shape (06-04): moored at an export terminal, dark 60h
+    # (> STALE_CEILING_HOURS). The pending `departed` still fires off a late
+    # fix, so the open visit keeps the vessel eligible.
+    c = _classify(
+        near_flow="export",
+        near_km=0.0,
+        last_event_type="moored",
+        last_event_flow="export",
+        last_fix_ts=ago(60),
+    )
+    assert c is not None and c.rescue_class == "export_departure"
+
+
+def test_classify_open_visit_import_survives_general_ceiling():
+    # Same carve-out on the import side: anchored in queue, dark 3 days.
+    c = _classify(
+        near_flow="import",
+        near_km=0.0,
+        last_event_type="anchored",
+        last_event_flow="import",
+        last_fix_ts=ago(72),
+    )
+    assert c is not None and c.rescue_class == "import_berth"
+
+
+def test_classify_open_visit_has_its_own_ceiling():
+    # Past OPEN_VISIT_STALE_CEILING_HOURS (7d) even an open visit is abandoned.
+    assert (
+        _classify(
+            near_flow="export",
+            near_km=0.0,
+            last_event_type="moored",
+            last_event_flow="export",
+            last_fix_ts=ago(200),
+        )
+        is None
+    )
+
+
 # --- #3: fast final-approach trigger ------------------------------------------
 def test_classify_fast_trigger_in_approach():
     # In the approach envelope (<15 km): a 2.5h silence already qualifies...
@@ -435,11 +511,110 @@ def test_rescue_result_event_class_rejected():
     )
 
 
-# --- terrestrial budget -------------------------------------------------------
-def test_terrestrial_budget_trims_to_remaining():
-    assert vr.terrestrial_budget(spent=18, cap=20, n_candidates=10) == 2
-    assert vr.terrestrial_budget(spent=20, cap=20, n_candidates=10) == 0
-    assert vr.terrestrial_budget(spent=0, cap=20, n_candidates=5) == 5
+# --- glide surplus (leaky bucket, integrated form) ------------------------------
+def test_glide_surplus_on_the_line_is_zero():
+    # Halfway to expiry having spent exactly half the anchor reserve.
+    anchor_ts = NOW - timedelta(days=100)
+    expires = NOW + timedelta(days=100)
+    s = vr.glide_surplus(
+        anchor_credits=1000, anchor_ts=anchor_ts, expires=expires, balance=500, now=NOW
+    )
+    assert s == pytest.approx(0.0)
+
+
+def test_glide_surplus_signs():
+    anchor_ts = NOW - timedelta(days=100)
+    expires = NOW + timedelta(days=100)
+    kw = dict(anchor_credits=1000, anchor_ts=anchor_ts, expires=expires, now=NOW)
+    # Underspent (balance above the line) ⇒ positive surplus for P≥1.
+    assert vr.glide_surplus(balance=600, **kw) == pytest.approx(100.0)
+    # Overspent (P0 burst pushed below the line) ⇒ negative: P≥1 starves.
+    assert vr.glide_surplus(balance=450, **kw) == pytest.approx(-50.0)
+
+
+def test_glide_surplus_current_numbers():
+    # Live shape at implementation time (06-07): anchored ~4898cr with ~363d
+    # left, balance 4856 three days later ⇒ essentially on the line.
+    anchor_ts = NOW - timedelta(days=3)
+    expires = NOW + timedelta(days=360)
+    s = vr.glide_surplus(
+        anchor_credits=4898, anchor_ts=anchor_ts, expires=expires, balance=4856, now=NOW
+    )
+    assert -5.0 < s < 5.0
+
+
+def test_glide_surplus_expired_anchor_is_all_spendable():
+    s = vr.glide_surplus(
+        anchor_credits=100,
+        anchor_ts=NOW - timedelta(days=10),
+        expires=NOW - timedelta(days=1),
+        balance=37,
+        now=NOW,
+    )
+    assert s == 37.0
+
+
+# --- split budget (P0 exempt, P≥1 spends the surplus) ----------------------------
+def _sorted_cands(*classes):
+    cands = [_cand(i, cls) for i, cls in enumerate(classes)]
+    cands.sort(key=lambda c: (vr.CLASS_PRIORITY[c.rescue_class], -c.silent_h))
+    return cands
+
+
+def test_split_budget_p0_exempt_from_cap():
+    # Cap exhausted (spent == cap): P0 still chosen, P≥1 skipped even with surplus.
+    cands = _sorted_cands("import_arrival", "export_departure", "import_berth")
+    chosen, skipped = vr.split_budget(cands, spent=14, cap=14, surplus=100.0)
+    assert [c.rescue_class for c in chosen] == ["import_arrival", "export_departure"]
+    assert [c.rescue_class for c in skipped] == ["import_berth"]
+
+
+def test_split_budget_p1_spends_surplus_within_cap():
+    cands = _sorted_cands("import_arrival", "import_berth", "dest_capture")
+    chosen, skipped = vr.split_budget(cands, spent=0, cap=14, surplus=100.0)
+    assert len(chosen) == 3 and not skipped
+
+
+def test_split_budget_negative_surplus_starves_p1():
+    # Behind the glide line: only the P0 candidate is polled.
+    cands = _sorted_cands("import_arrival", "import_berth", "export_arrival")
+    chosen, skipped = vr.split_budget(cands, spent=0, cap=14, surplus=-3.0)
+    assert [c.rescue_class for c in chosen] == ["import_arrival"]
+    assert len(skipped) == 2
+
+
+def test_split_budget_p1_limited_by_fractional_surplus():
+    # surplus 1.7 ⇒ floor ⇒ exactly one P≥1 slot.
+    cands = _sorted_cands("import_berth", "import_berth", "import_berth")
+    chosen, skipped = vr.split_budget(cands, spent=0, cap=14, surplus=1.7)
+    assert len(chosen) == 1 and len(skipped) == 2
+
+
+def test_split_budget_brake_bounds_everything():
+    # The disaster brake stops even P0 — a runaway classifier can't drain the
+    # reserve.
+    cands = _sorted_cands("import_arrival", "export_departure", "outage_check")
+    chosen, skipped = vr.split_budget(cands, spent=39, cap=14, surplus=100.0, brake=40)
+    assert len(chosen) == 1 and len(skipped) == 2
+
+
+def test_split_budget_manual_is_exempt():
+    chosen, skipped = vr.split_budget(
+        [_cand(1, "manual")], spent=14, cap=14, surplus=-10.0
+    )
+    assert len(chosen) == 1 and not skipped
+
+
+# --- no_position backoff --------------------------------------------------------
+def test_no_position_backoff_escalates_and_caps():
+    # First miss keeps the normal cooldown, then doubles per consecutive miss.
+    assert vr.no_position_backoff_hours(0) == vr.PER_VESSEL_COOLDOWN_HOURS  # 12h
+    assert vr.no_position_backoff_hours(1) == 24.0
+    assert vr.no_position_backoff_hours(2) == 48.0
+    assert vr.no_position_backoff_hours(3) == 96.0
+    assert vr.no_position_backoff_hours(4) == vr.NO_POSITION_BACKOFF_CEILING_HOURS
+    # Deep streaks stay clamped (no overflow into absurd cooldowns).
+    assert vr.no_position_backoff_hours(20) == vr.NO_POSITION_BACKOFF_CEILING_HOURS
 
 
 # --- glide-path cap -------------------------------------------------------------
