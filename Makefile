@@ -1,4 +1,4 @@
-.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events scoring signals vf-rescue vf-rescue-dry vf-status refresh-fleet backup eia eia-full
+.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events scoring signals vf-rescue vf-rescue-dry vf-status refresh-fleet backup eia eia-full capture-rate
 
 up:
 	docker compose up -d
@@ -82,6 +82,12 @@ eia:
 
 eia-full:
 	uv run python -m data.eia --full
+
+# Read-only capture-rate report: captured US LNG-export departures vs the
+# EIA-implied cargo count per month (needs `make eia` first). Lands dark until
+# the first wholly-post-cutover month (June 2026) is published + revised.
+capture-rate:
+	uv run python -m data.capture_rate
 
 # Periodic refresh of the global LNG/FSRU fleet from the IGU report.
 # Step 1 (manual): download the latest "IGU World LNG Report" PDF from
