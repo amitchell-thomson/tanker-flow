@@ -1,4 +1,4 @@
-.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events scoring signals vf-rescue vf-rescue-dry vf-status refresh-fleet backup eia eia-full capture-rate
+.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events scoring signals vf-rescue vf-rescue-dry vf-status refresh-fleet discover discover-dry backup eia eia-full capture-rate
 
 up:
 	docker compose up -d
@@ -100,3 +100,12 @@ refresh-fleet:
 	  --pdf db/seed/igu-world-lng-report-latest.pdf \
 	  --out db/seed/lng_fleet_igu_2025.csv
 	uv run python scripts/import_igu_fleet.py
+
+# Budgeted daily newbuild discovery: resolve orderbook hulls that have since been
+# delivered (IMO->MMSI via VF) into vessel_registry. Misses are free; catches
+# spend only glide-surplus credits, subordinate to vf-rescue (see the script).
+discover:
+	uv run python scripts/discover_newbuilds.py
+
+discover-dry:
+	uv run python scripts/discover_newbuilds.py --dry-run

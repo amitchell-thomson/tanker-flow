@@ -62,7 +62,7 @@ def _bbox_predicate(lat_col: str = "lat", lon_col: str = "lon") -> str:
 # limiting `candidate_fixes` to LNG vessels in the last 14d keeps it bounded.
 SCORING_SQL = f"""
 WITH lng_fleet AS (
-    SELECT mmsi
+    SELECT mmsi, is_fsru
     FROM vessel_registry
     WHERE (is_lng_carrier OR is_fsru) AND NOT excluded
 ),
@@ -150,6 +150,7 @@ nearest_zone AS (
 )
 SELECT
     f.mmsi,
+    f.is_fsru,
     lfg.last_fix_ts,
     fs.last_berth_fix_ts,
     fs.last_anchorage_fix_ts,
@@ -306,8 +307,21 @@ def _tier1_score(
     return max(candidates, key=lambda c: c[0])
 
 
+# FSRUs are floating *terminals*: once deployed they sit moored at their host
+# berth for months, and an FSRU's own AIS fixes never drive the signal anyway —
+# pipeline.port_events short-circuits an FSRU to one synthetic `moored` at its
+# declared host terminal. A persistent (continuous-polling) subscription on a
+# stationary FSRU is therefore a wasted slot; all we need is an occasional check
+# that it hasn't relocated. So an FSRU is force-assigned tier FSRU_TIER — out of
+# the persistent band (tiers 1-3) — and served by a dedicated low-frequency scan
+# quota (see ingestion.aisstream SCAN_FSRU_SLOTS). It is also excluded from
+# inline in-zone promotion and the in-port pin so nothing bounces it back up.
+FSRU_TIER = 5
+
+
 def assign_tier(
     *,
+    is_fsru: bool,
     last_berth_fix_ts: datetime | None,
     last_anchorage_fix_ts: datetime | None,
     last_approach_fix_ts: datetime | None,
@@ -329,6 +343,17 @@ def assign_tier(
     the caller uses ASC ordering on `last_scan_window_at` for rotation
     instead, so the score there is just the epoch timestamp.
     """
+    # FSRUs are pinned terminals, not tracked carriers — force them to the
+    # low-frequency band regardless of position (see FSRU_TIER above). Score is
+    # the last-fix epoch purely for a stable ordering; the dedicated FSRU scan
+    # pool rotates by last_scan_window_at, not score.
+    if is_fsru:
+        return (
+            FSRU_TIER,
+            "fsru:host-watch",
+            last_fix_ts.timestamp() if last_fix_ts else 0.0,
+        )
+
     three_days = now - timedelta(days=3)
     fourteen_days = now - timedelta(days=14)
     seven_days = now - timedelta(days=7)
@@ -493,6 +518,11 @@ WITH last_event AS (
 )
 SELECT mmsi FROM last_event
 WHERE event_type NOT IN ('departed', 'zone_exit')
+  -- FSRUs always sit "open" in a visit (one synthetic `moored`, never a
+  -- `departed`), so the in-port pin would hold one in a persistent slot forever.
+  -- They're deliberately demoted to the low-frequency FSRU scan band (FSRU_TIER)
+  -- instead, so exclude them here.
+  AND mmsi NOT IN (SELECT mmsi FROM vessel_registry WHERE is_fsru)
 ORDER BY event_time DESC
 LIMIT $2
 """
@@ -589,6 +619,7 @@ async def compute_and_upsert(pool: asyncpg.Pool) -> dict[int, int]:
                 parsed_eta = _parse_eta(r["eta"], now)
 
                 tier, reason, score = assign_tier(
+                    is_fsru=r["is_fsru"],
                     last_berth_fix_ts=r["last_berth_fix_ts"],
                     last_anchorage_fix_ts=r["last_anchorage_fix_ts"],
                     last_approach_fix_ts=r["last_approach_fix_ts"],

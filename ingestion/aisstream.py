@@ -68,9 +68,18 @@ SCAN_SLOTS = MMSI_CAP_PER_CONNECTION  # 50
 #   tier5 — stale / never-seen discovery. A reserved quota stops tier 4 (~400
 #       candidates) from consuming every slot and starving tier-5 vessels,
 #       which could then never accrue a fix to be promoted out.
+#   fsru — deployed floating terminals (scoring.FSRU_TIER). They sit moored for
+#       months and their own fixes never drive the signal, so they don't earn a
+#       persistent slot — but we still want an occasional confirmation they
+#       haven't relocated. A small dedicated quota gives ~46 FSRUs a low-
+#       frequency rotation without diluting the tier-4/5 discovery pools, which
+#       explicitly exclude FSRUs.
 SCAN_OVERFLOW_SLOTS = 15
 SCAN_TIER5_SLOTS = 10
-SCAN_TIER4_SLOTS = SCAN_SLOTS - SCAN_OVERFLOW_SLOTS - SCAN_TIER5_SLOTS  # 25
+SCAN_FSRU_SLOTS = 3
+SCAN_TIER4_SLOTS = (
+    SCAN_SLOTS - SCAN_OVERFLOW_SLOTS - SCAN_TIER5_SLOTS - SCAN_FSRU_SLOTS
+)  # 22
 
 # Reconnect every hour. Each reconnect:
 #   1. Triggers a fresh scoring run (see scoring_loop) just beforehand
@@ -211,35 +220,54 @@ async def load_scan_mmsis(pool: asyncpg.Pool) -> list[int]:
     """
     async with pool.acquire() as conn:
         async with conn.transaction():
+            # FSRUs get a dedicated low-frequency quota and are excluded from
+            # every other pool (incl. the rollover) so a deployed terminal can't
+            # consume a discovery slot. Loaded once per call.
+            fsru_mmsis = [
+                r["mmsi"]
+                for r in await conn.fetch(
+                    "SELECT mmsi FROM vessel_registry WHERE is_fsru"
+                )
+            ]
             picked: list[int] = []
 
-            async def pick(where: str, quota: int) -> None:
+            async def pick(where: str, quota: int, *, only_fsru: bool = False) -> None:
                 if quota <= 0:
                     return
+                fsru_clause = (
+                    "AND mmsi = ANY($3::BIGINT[])"
+                    if only_fsru
+                    else "AND mmsi <> ALL($3::BIGINT[])"
+                )
                 rows = await conn.fetch(
                     f"""
                     SELECT mmsi FROM priority_watchlist
                     WHERE {where} AND NOT is_pinned
                       AND mmsi <> ALL($1::BIGINT[])
+                      {fsru_clause}
                     ORDER BY tier ASC, last_scan_window_at ASC NULLS FIRST
                     LIMIT $2
                     FOR UPDATE
                     """,
                     picked,
                     quota,
+                    fsru_mmsis,
                 )
                 picked.extend(r["mmsi"] for r in rows)
 
             # Persistent-band overflow first (highest-value unsubscribed
-            # vessels), then the tier-4/5 rotation quotas.
+            # vessels), then the tier-4/5 rotation quotas, then the FSRU
+            # host-watch quota (lowest priority — relocation confirmation only).
             await pick(
                 "tier <= 3 AND (slot_kind IS NULL OR slot_kind = 'scan')",
                 SCAN_OVERFLOW_SLOTS,
             )
             await pick("tier = 4", SCAN_TIER4_SLOTS)
             await pick("tier = 5", SCAN_TIER5_SLOTS)
+            await pick("TRUE", SCAN_FSRU_SLOTS, only_fsru=True)
             # Roll over any shortfall onto whatever is scannable, tier-first so
-            # leftover overflow is preferred over tier-4 over tier-5.
+            # leftover overflow is preferred over tier-4 over tier-5. FSRUs stay
+            # excluded — their reserved quota is the only path to a scan slot.
             await pick(_SCANNABLE, SCAN_SLOTS - len(picked))
 
             if picked:
@@ -391,6 +419,12 @@ promoted AS (
         computed_at     = now()
     FROM inz
     WHERE pw.mmsi = inz.mmsi AND pw.tier > $3
+      -- FSRUs are deliberately held in the low-frequency band; an in-zone fix
+      -- (they're always in zone) must not promote them into a persistent slot.
+      AND NOT EXISTS (
+          SELECT 1 FROM vessel_registry vr
+          WHERE vr.mmsi = pw.mmsi AND vr.is_fsru
+      )
     RETURNING pw.mmsi, pw.tier AS new_tier, inz.zone
 )
 INSERT INTO tier_promotions (mmsi, vessel_name, old_tier, new_tier, via, reason, zone)

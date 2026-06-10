@@ -12,13 +12,58 @@ from datetime import datetime, timedelta, timezone
 
 from pipeline.scoring import (
     DEFAULT_VOYAGE_DAYS,
+    FSRU_TIER,
     PIN_MAX,
     PIN_POST_WINDOW_DAYS,
     PIN_PRE_WINDOW_DAYS,
     _select_open_leg_pins,
+    assign_tier,
 )
 
 NOW = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+
+
+def _assign(is_fsru: bool, **overrides):
+    """assign_tier with neutral defaults; override only what a case exercises."""
+    kwargs = dict(
+        is_fsru=is_fsru,
+        last_berth_fix_ts=None,
+        last_anchorage_fix_ts=None,
+        last_approach_fix_ts=None,
+        last_polygon_fix_ts=None,
+        last_bbox_fix_ts=None,
+        last_fix_ts=None,
+        dest_terminal_id=None,
+        state_ts=None,
+        parsed_eta=None,
+        dist_km=None,
+        bearing_deg=None,
+        last_cog=None,
+        now=NOW,
+    )
+    kwargs.update(overrides)
+    return assign_tier(**kwargs)
+
+
+def test_fsru_at_berth_is_forced_to_low_freq_band():
+    # An FSRU sitting in a berth would normally score tier 1; it must instead be
+    # demoted out of the persistent band to the dedicated FSRU scan band.
+    berth_fix = NOW - timedelta(hours=1)
+    tier, reason, _score = _assign(
+        True, last_berth_fix_ts=berth_fix, last_polygon_fix_ts=berth_fix
+    )
+    assert tier == FSRU_TIER
+    assert tier > 3  # never holds a persistent slot
+    assert "fsru" in reason
+
+
+def test_non_fsru_at_berth_still_scores_tier_1():
+    # Same inputs, not an FSRU — the regular tier-1 path is untouched.
+    berth_fix = NOW - timedelta(hours=1)
+    tier, _reason, _score = _assign(
+        False, last_berth_fix_ts=berth_fix, last_polygon_fix_ts=berth_fix
+    )
+    assert tier == 1
 
 
 def _leg(

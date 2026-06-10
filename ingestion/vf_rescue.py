@@ -801,6 +801,42 @@ def split_budget(
     return chosen, skipped
 
 
+def discovery_credit_budget(
+    *,
+    surplus: float,
+    glide_cap_value: int,
+    spent_today: int,
+    floor: int,
+    ceiling: int,
+    brake: int = GLIDE_CAP_CEILING,
+) -> int:
+    """Credits the newbuild-discovery worker may spend this run (pure helper).
+
+    Discovery shares the rescue reserve and stays subordinate to it, but it can't
+    be *starved*: rescue tends to spend the whole glide allowance, so a pure
+    surplus gate would hover at zero and never catch a delivered hull. So the
+    budget is the better of two slices, kept rare by `ceiling` and bounded by the
+    shared disaster `brake` (total daily spend, rescue + discovery, can't exceed
+    it):
+
+      • surplus slice — credits the reserve is *ahead* of its glide line
+        (floor(surplus)) within the day's remaining glide-cap headroom; lets
+        discovery move faster on genuinely slack days.
+      • floor slice — a small guaranteed `floor` so one delivered hull is still
+        caught when rescue has eaten the whole glide (surplus ≈ 0). Its real cost
+        is trivial and self-limiting — the candidate pool drains as hulls are
+        caught and an unresolved hull returns a *free* miss — and the daily
+        glide-cap recompute pays the sliver back out of rescue's next-day cap.
+
+    `spent_today` sums ALL vf_rescue_log credits today (incl. prior discovery), so
+    the brake and glide-cap headroom reconcile both workers. Floored at zero once
+    the brake is exhausted."""
+    brake_headroom = max(0, brake - spent_today)
+    surplus_slice = max(0, min(int(math.floor(surplus)), glide_cap_value - spent_today))
+    floor_slice = min(floor, brake_headroom)
+    return min(ceiling, brake_headroom, max(floor_slice, surplus_slice))
+
+
 def is_settled(navstat: int | None, speed: float | None) -> bool:
     """A vessel is 'settled' (moored/at anchor/stopped) — its next signal event
     isn't imminent, so it gets the normal cooldown. A vessel still *moving*

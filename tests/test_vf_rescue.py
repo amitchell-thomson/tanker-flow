@@ -618,6 +618,42 @@ def test_split_budget_manual_is_exempt():
     assert len(chosen) == 1 and not skipped
 
 
+# --- discovery credit budget (floor + surplus, brake-bounded) -------------------
+_DISC = dict(glide_cap_value=14, floor=3, ceiling=12, brake=40)
+
+
+def test_discovery_budget_floor_guarantees_a_catch_behind_the_line():
+    # Rescue ate the whole glide (surplus ≈ 0 / negative): the floor still lets
+    # one delivered hull be caught — discovery is subordinate, not starved.
+    assert vr.discovery_credit_budget(surplus=-1.0, spent_today=0, **_DISC) == 3
+
+
+def test_discovery_budget_surplus_beats_floor_on_slack_days():
+    # Genuine surplus ⇒ discovery may go faster than the floor (floor(8.9) = 8).
+    assert vr.discovery_credit_budget(surplus=8.9, spent_today=0, **_DISC) == 8
+
+
+def test_discovery_budget_capped_by_ceiling():
+    # Huge surplus, but the rareness ceiling bounds the run.
+    assert vr.discovery_credit_budget(surplus=100.0, spent_today=0, **_DISC) == 12
+
+
+def test_discovery_budget_bounded_by_remaining_glide_cap():
+    # Rescue spent most of the glide cap ⇒ the surplus slice shrinks to 14−10 = 4
+    # (still above the floor, so 4 wins).
+    assert vr.discovery_credit_budget(surplus=100.0, spent_today=10, **_DISC) == 4
+
+
+def test_discovery_budget_floor_bounded_by_brake():
+    # Near the disaster brake, even the floor is trimmed to what's left (40−39).
+    assert vr.discovery_credit_budget(surplus=-5.0, spent_today=39, **_DISC) == 1
+
+
+def test_discovery_budget_brake_exhausted_blocks_everything():
+    # Total daily spend hit the brake ⇒ no discovery spend, floor included.
+    assert vr.discovery_credit_budget(surplus=100.0, spent_today=40, **_DISC) == 0
+
+
 # --- no_position backoff --------------------------------------------------------
 def test_no_position_backoff_escalates_and_caps():
     # First miss keeps the normal cooldown, then doubles per consecutive miss.
