@@ -19,25 +19,29 @@ def test_partition_is_noop_when_unscaled():
 
 
 def test_partition_clause_scaled():
-    assert a._worker_partition_sql(0, 2) == "(mmsi % 2 = 0)"
-    assert a._worker_partition_sql(1, 2) == "(mmsi % 2 = 1)"
-    assert a._worker_partition_sql(2, 3, "v.mmsi") == "(v.mmsi % 3 = 2)"
+    # Hash-based (not raw `mmsi % n`): LNG MMSIs are ~81% even, so a raw modulo
+    # imbalances ~4:1. hashtext decorrelates the digit skew.
+    assert a._worker_partition_sql(0, 2) == "(((hashtext(mmsi::text) % 2) + 2) % 2 = 0)"
+    assert a._worker_partition_sql(1, 2) == "(((hashtext(mmsi::text) % 2) + 2) % 2 = 1)"
+    assert (
+        a._worker_partition_sql(2, 3, "v.mmsi")
+        == "(((hashtext(v.mmsi::text) % 3) + 3) % 3 = 2)"
+    )
 
 
-def test_partition_is_disjoint_and_complete():
-    # The mmsi-modulo the SQL applies must assign every vessel to exactly one
-    # worker (no overlap, no gaps) — mirror the `mmsi % wc == wid` rule the
-    # generated clause encodes.
+def test_partition_formula_is_disjoint_and_complete():
+    # The clause buckets each vessel with ((hashtext % n) + n) % n, which must
+    # land every vessel in exactly one of [0, n) regardless of the hash's sign.
+    # The hash itself is Postgres's job; verify the bucketing arithmetic over
+    # arbitrary (including negative) hash values.
     wc = 3
-    mmsis = list(range(200_000_000, 200_000_200))
-    buckets = [
-        {m for m in mmsis if m % wc == wid} for wid in range(wc)
-    ]
-    union = set().union(*buckets)
-    assert union == set(mmsis)  # complete
-    for i in range(wc):  # disjoint
-        for j in range(i + 1, wc):
-            assert not (buckets[i] & buckets[j])
+    counts = {0: 0, 1: 0, 2: 0}
+    for h in range(-100, 100):
+        b = ((h % wc) + wc) % wc
+        assert 0 <= b < wc  # always a valid worker id
+        counts[b] += 1
+    assert all(v > 0 for v in counts.values())  # complete: every worker gets some
+    assert sum(counts.values()) == 200  # each assigned exactly once
 
 
 # --- _source_label ------------------------------------------------------------

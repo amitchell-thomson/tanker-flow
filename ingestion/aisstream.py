@@ -96,12 +96,21 @@ WORKER_COUNT = settings.worker_count
 def _worker_partition_sql(
     worker_id: int, worker_count: int, mmsi_col: str = "mmsi"
 ) -> str:
-    """SQL predicate selecting only this worker's mmsi-modulo share of vessels.
-    Returns 'TRUE' (which the planner folds away) when unscaled, so single-worker
-    SQL is unchanged."""
+    """SQL predicate selecting only this worker's share of vessels, by a stable
+    HASH of the MMSI. Returns 'TRUE' (which the planner folds away) when unscaled,
+    so single-worker SQL is unchanged.
+
+    Why hash rather than `mmsi % WORKER_COUNT`: LNG-carrier MMSIs are heavily
+    even-skewed (~81% even in the live fleet), so a raw modulo on the value hands
+    one worker ~4x the other's load. hashtext() decorrelates the digit skew for a
+    ~50/50 split (measured 384/397). It is deterministic and computed server-side,
+    so both workers bucket each vessel identically — disjoint, stable, no
+    coordination. The ((h % n) + n) % n form is non-negative regardless of
+    hashtext's signed result."""
     if worker_count <= 1:
         return "TRUE"
-    return f"({mmsi_col} % {worker_count} = {worker_id})"
+    h = f"hashtext({mmsi_col}::text)"
+    return f"((({h} % {worker_count}) + {worker_count}) % {worker_count} = {worker_id})"
 
 
 def _source_label(worker_id: int, worker_count: int, chunk_index: int) -> str:
