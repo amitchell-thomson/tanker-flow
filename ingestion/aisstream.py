@@ -81,6 +81,38 @@ SCAN_TIER4_SLOTS = (
     SCAN_SLOTS - SCAN_OVERFLOW_SLOTS - SCAN_TIER5_SLOTS - SCAN_FSRU_SLOTS
 )  # 22
 
+# --- Multi-worker sharding (Stage 3) ------------------------------------------
+# Read once at import. WORKER_COUNT=1 (default) ⇒ every helper below is a no-op
+# and the SQL + source labels are byte-identical to the single-worker ingester.
+# A second egress IP (Oracle VM + Tailscale — see the runbook) runs WORKER_COUNT=2
+# with WORKER_ID=1 to hold the disjoint odd-MMSI half of the fleet. The partition
+# key is a stable mmsi-modulo applied to ALL pools (persistent + scan + the
+# slot-clear), so each vessel is owned end-to-end by exactly one worker — no
+# cross-pool fall-through, no runtime coordination between workers.
+WORKER_ID = settings.worker_id
+WORKER_COUNT = settings.worker_count
+
+
+def _worker_partition_sql(
+    worker_id: int, worker_count: int, mmsi_col: str = "mmsi"
+) -> str:
+    """SQL predicate selecting only this worker's mmsi-modulo share of vessels.
+    Returns 'TRUE' (which the planner folds away) when unscaled, so single-worker
+    SQL is unchanged."""
+    if worker_count <= 1:
+        return "TRUE"
+    return f"({mmsi_col} % {worker_count} = {worker_id})"
+
+
+def _source_label(worker_id: int, worker_count: int, chunk_index: int) -> str:
+    """Per-connection source label. A single worker keeps the historical
+    'aisstream-mmsi-{1,2,3}' (so ais_fixes.source + the TUI are unchanged);
+    multi-worker uses 'aisstream-w{id}-{n}' so the two workers' per-source stats
+    never collide."""
+    if worker_count <= 1:
+        return f"aisstream-mmsi-{chunk_index + 1}"
+    return f"aisstream-w{worker_id}-{chunk_index + 1}"
+
 # Reconnect every hour. Each reconnect:
 #   1. Triggers a fresh scoring run (see scoring_loop) just beforehand
 #   2. Re-queries priority_watchlist for the current top-150
@@ -150,11 +182,15 @@ async def load_persistent_mmsis(pool: asyncpg.Pool) -> list[int]:
     PERSISTENT_SLOTS; pins are bounded to PIN_MAX << PERSISTENT_SLOTS in
     scoring, so the tier block is never fully crowded out. Falls back to the
     cold-start query if priority_watchlist is empty (first boot)."""
+    # This worker's mmsi-modulo share only ('TRUE' = all, when unscaled). Each
+    # worker independently takes the top PERSISTENT_SLOTS of its own partition,
+    # so the union covers ~PERSISTENT_SLOTS×WORKER_COUNT vessels with no overlap.
+    part = _worker_partition_sql(WORKER_ID, WORKER_COUNT)
     async with pool.acquire() as conn:
         pinned = await conn.fetch(
-            """
+            f"""
             SELECT mmsi FROM priority_watchlist
-            WHERE is_pinned
+            WHERE is_pinned AND {part}
             ORDER BY tier ASC, score DESC
             LIMIT $1
             """,
@@ -162,9 +198,9 @@ async def load_persistent_mmsis(pool: asyncpg.Pool) -> list[int]:
         )
         pinned_mmsis = [r["mmsi"] for r in pinned]
         fill = await conn.fetch(
-            """
+            f"""
             SELECT mmsi FROM priority_watchlist
-            WHERE tier <= 3 AND NOT is_pinned
+            WHERE tier <= 3 AND NOT is_pinned AND {part}
             ORDER BY tier ASC, score DESC
             LIMIT $1
             """,
@@ -178,7 +214,7 @@ async def load_persistent_mmsis(pool: asyncpg.Pool) -> list[int]:
         # still has something useful to subscribe to.
         logger.warning("priority_watchlist empty — using cold-start fallback")
         rows = await conn.fetch(
-            """
+            f"""
             SELECT v.mmsi
             FROM vessel_registry v
             LEFT JOIN LATERAL (
@@ -187,6 +223,7 @@ async def load_persistent_mmsis(pool: asyncpg.Pool) -> list[int]:
                 WHERE a.mmsi = v.mmsi AND a.fix_ts > now() - INTERVAL '90 days'
             ) f ON TRUE
             WHERE (v.is_lng_carrier OR v.is_fsru) AND NOT v.excluded
+              AND {_worker_partition_sql(WORKER_ID, WORKER_COUNT, "v.mmsi")}
             ORDER BY f.last_fix DESC NULLS LAST, v.mmsi
             LIMIT $1
             """,
@@ -207,9 +244,12 @@ async def load_scan_mmsis(pool: asyncpg.Pool) -> list[int]:
     """Next SCAN_SLOTS vessels for the scan-rotation connection, drawn from
     three priority-ordered pools (overflow → tier-4 → tier-5; see the
     SCAN_*_SLOTS constants) with roll-over so the slots are always filled when
-    candidates exist. Each pool takes the least-recently-scanned vessels
-    (`last_scan_window_at ASC NULLS FIRST`); a final write-back stamps the
-    picked batch with now() so it isn't re-picked on the next reconnect.
+    candidates exist. The tier-4/5 pools take the least-recently-scanned vessels
+    (`last_scan_window_at ASC NULLS FIRST`); the persistent-band overflow pool is
+    instead ordered by score DESC so the closest/most-closing crowded-out
+    approachers are swept first (DATA_QUALITY §3 — see the overflow pick below). A
+    final write-back stamps the picked batch with now() so it isn't re-picked on
+    the next reconnect.
 
     The write-back is what makes rotation actually rotate: without it, watchdog
     reconnects (~every 5 min when scan vessels are silent) would re-select the
@@ -231,7 +271,22 @@ async def load_scan_mmsis(pool: asyncpg.Pool) -> list[int]:
             ]
             picked: list[int] = []
 
-            async def pick(where: str, quota: int, *, only_fsru: bool = False) -> None:
+            # This worker's mmsi-modulo share only ('TRUE' when unscaled), so the
+            # scan rotation of two workers covers disjoint vessels.
+            part = _worker_partition_sql(WORKER_ID, WORKER_COUNT)
+
+            # Default ordering is pure least-recently-scanned rotation, which
+            # sweeps a whole pool fairly. The overflow pool overrides it with a
+            # closing-aware order (see the overflow pick below).
+            rotation_order = "tier ASC, last_scan_window_at ASC NULLS FIRST"
+
+            async def pick(
+                where: str,
+                quota: int,
+                *,
+                only_fsru: bool = False,
+                order_by: str = rotation_order,
+            ) -> None:
                 if quota <= 0:
                     return
                 fsru_clause = (
@@ -242,10 +297,10 @@ async def load_scan_mmsis(pool: asyncpg.Pool) -> list[int]:
                 rows = await conn.fetch(
                     f"""
                     SELECT mmsi FROM priority_watchlist
-                    WHERE {where} AND NOT is_pinned
+                    WHERE {where} AND NOT is_pinned AND {part}
                       AND mmsi <> ALL($1::BIGINT[])
                       {fsru_clause}
-                    ORDER BY tier ASC, last_scan_window_at ASC NULLS FIRST
+                    ORDER BY {order_by}
                     LIMIT $2
                     FOR UPDATE
                     """,
@@ -258,9 +313,21 @@ async def load_scan_mmsis(pool: asyncpg.Pool) -> list[int]:
             # Persistent-band overflow first (highest-value unsubscribed
             # vessels), then the tier-4/5 rotation quotas, then the FSRU
             # host-watch quota (lowest priority — relocation confirmation only).
+            #
+            # The overflow pool is ordered by score DESC (within tier), not pure
+            # rotation: these tier<=3 vessels carry a real recent position, so
+            # their score already encodes closing-ness (proximity + heading, via
+            # scoring._closing_bonus). Scanning the closest/most-closing of the
+            # crowded-out approachers first — rather than by luck of last-scan —
+            # is the cheap fix for Class-B arrivals (DATA_QUALITY §3). It is a
+            # deliberate bias: a far/stale overflow vessel waits longer here, but
+            # it can still surface via the rollover pick below. tier-4/5 stay on
+            # rotation — a dark tier-5 vessel has no recent fix, so its closing-ness
+            # is unknowable and there is nothing to rank it by.
             await pick(
                 "tier <= 3 AND (slot_kind IS NULL OR slot_kind = 'scan')",
                 SCAN_OVERFLOW_SLOTS,
+                order_by="tier ASC, score DESC, last_scan_window_at ASC NULLS FIRST",
             )
             await pick("tier = 4", SCAN_TIER4_SLOTS)
             await pick("tier = 5", SCAN_TIER5_SLOTS)
@@ -282,18 +349,29 @@ async def load_scan_mmsis(pool: asyncpg.Pool) -> list[int]:
 async def mark_slot_assignments(
     pool: asyncpg.Pool, persistent: list[int], scan: list[int]
 ) -> None:
-    """Write back which MMSIs won slots this cycle. Pure observability — the
-    TUI reads in_slot/slot_kind to render the tier breakdown panel."""
+    """Write back which MMSIs won slots this cycle (in_slot/slot_kind/slot_worker
+    — the TUI reads these for the tier breakdown panel).
+
+    Each worker clears + sets ONLY its own mmsi-modulo partition, never a global
+    clear: with two workers both writing priority_watchlist a global
+    `SET in_slot = FALSE` would clobber the other worker's just-set slots. The
+    partition is disjoint by construction, so the two clears never collide. At
+    WORKER_COUNT=1 the clause is 'TRUE' → a full clear, exactly as before."""
+    part = _worker_partition_sql(WORKER_ID, WORKER_COUNT)
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(
-                "UPDATE priority_watchlist SET in_slot = FALSE, slot_kind = NULL"
+                f"UPDATE priority_watchlist "
+                f"SET in_slot = FALSE, slot_kind = NULL, slot_worker = NULL "
+                f"WHERE {part}"
             )
             if persistent:
                 await conn.execute(
-                    "UPDATE priority_watchlist SET in_slot = TRUE, slot_kind = 'persistent' "
+                    "UPDATE priority_watchlist "
+                    "SET in_slot = TRUE, slot_kind = 'persistent', slot_worker = $2 "
                     "WHERE mmsi = ANY($1::BIGINT[])",
                     persistent,
+                    WORKER_ID,
                 )
                 # Relabel the pinned subset (they live in the persistent block)
                 # so the TUI can distinguish forced open-leg pins from tier slots.
@@ -304,9 +382,11 @@ async def mark_slot_assignments(
                 )
             if scan:
                 await conn.execute(
-                    "UPDATE priority_watchlist SET in_slot = TRUE, slot_kind = 'scan' "
+                    "UPDATE priority_watchlist "
+                    "SET in_slot = TRUE, slot_kind = 'scan', slot_worker = $2 "
                     "WHERE mmsi = ANY($1::BIGINT[])",
                     scan,
+                    WORKER_ID,
                 )
 
 
@@ -669,21 +749,34 @@ async def ingest():
 
     url = "wss://stream.aisstream.io/v0/stream"
 
-    # enrichment_worker drains the queue feeding VesselFinder lookups. Under
-    # MMSI-only mode no new MMSIs get queued, but keeping the worker running
-    # lets the existing batch path (`make enrich`) still feed it indirectly.
-    enrichment_task = asyncio.create_task(enrichment_worker(pool, enrich_state))
+    # Singleton background tasks must run on exactly ONE worker — they recompute
+    # shared state (scoring / port_events) or spend the shared VF credit budget
+    # (rescue + masterdata enrichment). The Settings validator defaults each flag
+    # to "primary only" (worker 0); this guard refuses an explicit misconfig that
+    # would double-spend VF credits from a non-primary worker.
+    if settings.worker_id != 0 and settings.run_vf_rescue:
+        raise SystemExit(
+            f"worker {settings.worker_id}: RUN_VF_RESCUE must be false on a "
+            "non-primary worker (VF rescue + enrichment share a finite credit "
+            "budget and must run on worker 0 only)."
+        )
+    logger.info(
+        "worker %d/%d · run_scoring=%s run_port_events=%s run_vf_rescue=%s",
+        settings.worker_id,
+        settings.worker_count,
+        settings.run_scoring,
+        settings.run_port_events,
+        settings.run_vf_rescue,
+    )
 
-    # Run scoring once before opening any sockets so the first reconnect has
-    # a fresh priority_watchlist. Then re-run on the same 1h cadence as the
-    # planned reconnects so that promoted vessels get persistent slots on the
-    # very next cycle. If the first run fails (e.g. priority_watchlist not yet
-    # migrated), log + continue — load_persistent_mmsis has a cold-start
-    # fallback that keeps the ingester useful.
-    try:
-        await scoring.compute_and_upsert(pool)
-    except Exception as e:
-        logger.warning(f"Initial scoring run failed: {e}")
+    bg_tasks: list[asyncio.Task] = []
+
+    # enrichment_worker drains the VesselFinder masterdata queue (VF-credit cost),
+    # so it is grouped with the VF singletons (worker 0 only). Under MMSI-only mode
+    # no new MMSIs get queued, but keeping it running lets the batch path
+    # (`make enrich`) still feed it indirectly.
+    if settings.run_vf_rescue:
+        bg_tasks.append(asyncio.create_task(enrichment_worker(pool, enrich_state)))
 
     async def scoring_loop():
         while True:
@@ -693,7 +786,17 @@ async def ingest():
             except Exception as e:
                 logger.warning(f"Scoring run failed: {e}")
 
-    scoring_task = asyncio.create_task(scoring_loop())
+    if settings.run_scoring:
+        # Run scoring once before opening any sockets so the first reconnect has a
+        # fresh priority_watchlist, then re-run on the scoring cadence so promoted
+        # vessels get persistent slots on the next cycle. If the first run fails
+        # (e.g. priority_watchlist not yet migrated), log + continue —
+        # load_persistent_mmsis has a cold-start fallback that keeps us useful.
+        try:
+            await scoring.compute_and_upsert(pool)
+        except Exception as e:
+            logger.warning(f"Initial scoring run failed: {e}")
+        bg_tasks.append(asyncio.create_task(scoring_loop()))
 
     async def port_events_loop():
         # Periodic full rebuild so derived port_events/legs stay near-live rather
@@ -709,7 +812,8 @@ async def ingest():
             except Exception as e:
                 logger.warning(f"port_events rebuild failed: {e}")
 
-    port_events_task = asyncio.create_task(port_events_loop())
+    if settings.run_port_events:
+        bg_tasks.append(asyncio.create_task(port_events_loop()))
 
     async def vf_rescue_loop():
         # Backstop for AIS gaps: periodically fetch live positions from
@@ -724,7 +828,8 @@ async def ingest():
             except Exception as e:
                 logger.warning(f"vf_rescue run failed: {e}")
 
-    vf_rescue_task = asyncio.create_task(vf_rescue_loop())
+    if settings.run_vf_rescue:
+        bg_tasks.append(asyncio.create_task(vf_rescue_loop()))
 
     async def connection_loop(source_name: str, chunk_index: int):
         """Reconnect loop owning one MMSI-filtered subscription. On each
@@ -787,20 +892,14 @@ async def ingest():
     try:
         await asyncio.gather(
             *[
-                connection_loop(f"aisstream-mmsi-{i + 1}", i)
+                connection_loop(_source_label(WORKER_ID, WORKER_COUNT, i), i)
                 for i in range(NUM_CONNECTIONS)
             ]
         )
     finally:
-        for t in (enrichment_task, scoring_task, port_events_task, vf_rescue_task):
+        for t in bg_tasks:
             t.cancel()
-        await asyncio.gather(
-            enrichment_task,
-            scoring_task,
-            port_events_task,
-            vf_rescue_task,
-            return_exceptions=True,
-        )
+        await asyncio.gather(*bg_tasks, return_exceptions=True)
         await pool.close()
 
 

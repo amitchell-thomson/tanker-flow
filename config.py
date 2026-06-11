@@ -1,6 +1,7 @@
 # config.py
 from datetime import datetime, timezone
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -14,6 +15,33 @@ class Settings(BaseSettings):
     aisstream_api_key_alt: str
     vf_api_key: str = ""
     eia_api_key: str = ""  # free key from https://www.eia.gov/opendata/
+
+    # --- Multi-worker sharding (Stage 3) -------------------------------------
+    # The single-worker default (WORKER_COUNT=1) makes every modulo/partition in
+    # ingestion.aisstream a no-op, so behaviour is byte-identical to pre-sharding.
+    # A second egress (Oracle VM + Tailscale, see the runbook) runs WORKER_COUNT=2
+    # with WORKER_ID=1, holding the disjoint odd-MMSI half of the fleet.
+    worker_id: int = 0
+    worker_count: int = 1
+    # Singleton background tasks — the scoring / port_events rebuilds and the
+    # VF-credit-spending loops (rescue + enrichment) recompute shared state or
+    # spend a shared budget, so they must run on EXACTLY ONE worker. Default None
+    # ⇒ "primary only" (worker 0), resolved below; set explicitly via env to
+    # override. A non-primary worker that leaves these unset runs pure ingestion.
+    run_scoring: bool | None = None
+    run_port_events: bool | None = None
+    run_vf_rescue: bool | None = None
+
+    @model_validator(mode="after")
+    def _default_singletons_to_primary(self) -> "Settings":
+        primary = self.worker_id == 0
+        if self.run_scoring is None:
+            self.run_scoring = primary
+        if self.run_port_events is None:
+            self.run_port_events = primary
+        if self.run_vf_rescue is None:
+            self.run_vf_rescue = primary
+        return self
 
     @property
     def database_url(self) -> str:

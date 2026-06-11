@@ -211,6 +211,7 @@ CREATE TABLE priority_watchlist (
     parsed_eta              TIMESTAMPTZ,
     in_slot                 BOOLEAN      NOT NULL DEFAULT FALSE,  -- set TRUE by aisstream.py after picking the 150
     slot_kind               TEXT,                                 -- 'persistent' | 'scan' | 'pinned' | NULL
+    slot_worker             SMALLINT,                             -- which ingester worker (WORKER_ID) holds this slot; NULL = unslotted. Each worker only clears/sets its own mmsi-modulo partition (Stage-3 sharding clobber fix)
     is_pinned               BOOLEAN      NOT NULL DEFAULT FALSE,  -- recent open laden leg (set by scoring.py); forced into a persistent slot so we re-acquire the vessel on its European approach (M1)
     last_scan_window_at     TIMESTAMPTZ,                          -- bumped each time a vessel is picked for a scan window; used to rotate the scan queue
     computed_at             TIMESTAMPTZ  NOT NULL DEFAULT now()
