@@ -60,7 +60,7 @@ from rich.logging import RichHandler
 from config import settings
 from pipeline import legs as legs_module
 from pipeline.geo import haversine_nm
-from pipeline.scoring import _parse_eta
+from pipeline.scoring import _bbox_predicate, _parse_eta
 
 from .models import VesselFinderAIS, VesselFinderLiveResponse
 
@@ -98,6 +98,15 @@ DAILY_CREDIT_CAP = 14
 # row or a runaway classifier must not trigger a silent spending spree — that
 # drift deserves a human decision.
 GLIDE_CAP_CEILING = 40
+# Spend-faster knob (owner directive 2026-06-11: deplete the reserve while
+# coverage gaps exist rather than forfeit credits at expiry). The glide aims to
+# hit zero this many days *before* the real expiry — a coverage-buying buffer.
+# Effect: the straight anchor→zero line is steeper, which (a) raises the derived
+# daily cap (reserve ÷ fewer days) and (b) lowers the surplus line so the balance
+# is more often "ahead", un-starving the priority-≥1 capture classes that the
+# flat-to-expiry glide chronically starved. Tunable: larger ⇒ faster/earlier
+# depletion. At ~4 900 cr and ~360 d to expiry, 60 d ⇒ ~16 cr/day (vs ~14 flat).
+GLIDE_HEADROOM_DAYS = 60
 # Surplus this far below the line (in days of glide-rate spend) means P0 demand
 # alone is structurally above the glide rate — P≥1 starvation can no longer pay
 # it back. Log loudly; the decision (top up credits vs tighten P0 gates) is
@@ -226,20 +235,42 @@ ETA_RESCUE_MIN_SILENCE_HOURS = MIN_SILENCE_HOURS  # only if AIS won't self-heal
 ETA_RESCUE_MAX_SILENCE_HOURS = 18 * 24  # 18d — just past the longest voyage window
 ETA_RESCUE_MAX_VESSELS = 8  # bound speculative spend per run
 
+# --- Trigger #8: wide-basin approach sweep ------------------------------------
+# Class B (DATA_QUALITY §3): a carrier that entered one of our zone bboxes
+# heading for a terminal, then went AIS-dark *before* reaching the NEAR_KM
+# proximity band the #1-#3 classes watch — so it crosses the basin unsubscribed
+# and arrives unseen (K. Mugungwha, Maran Gas Vergina, Orion Hugo). Its last fix
+# is in the broad approach waters (a config.ZONES rectangle) and pointed at the
+# nearest terminal, so one cheap coastal poll may re-acquire it before it berths.
+# This is the *outer* band beyond CLOSING_INCLUDE_KM (the #1-#3 classes own the
+# near band); it is the lowest-priority class (surplus-only via split_budget) and
+# hard-capped per run — a wide, speculative net where a VF miss is free. Sorted
+# closest-first so the scarce slots favour the vessels most likely to be coastal
+# (terrestrially visible) right now; far-offshore ones return free no_positions
+# and back off. Silence band is the general [MIN_SILENCE, STALE_CEILING].
+APPROACH_SWEEP_MIN_KM = CLOSING_INCLUDE_KM  # outer edge of the #1-#3 band (50 km)
+APPROACH_SWEEP_ANGLE_DEG = CLOSING_ANGLE_DEG  # same heading-toward gate as is_closing
+APPROACH_SWEEP_MAX_VESSELS = 8  # bound the speculative spend per run
+
 # Rescue classes, by the event at risk. import_arrival / export_departure protect
-# the leg-defining events (prevent in-transit over/under-count); outage_check
-# guards the high-leverage outage signals — all rank highest. dest_capture and
-# import_berth (moored / queue timing) are next; export_arrival (ballast
-# approaching to load) and eta_arrival (speculative imminent-ETA discovery) are
-# lowest. 'manual' (operator override) jumps the queue.
+# the leg-defining events (prevent in-transit over/under-count); import_berth
+# protects the discharge `moored` (the gas_discharging_eu visit start); outage_check
+# guards the high-leverage outage signals — all rank P0 (budget-exempt, brake-bounded).
+# import_berth was promoted from P1 to P0 (2026-06-11): a vessel that dropped AIS in
+# the import zone awaiting `moored` was being starved whenever P0 export demand ate
+# the glide cap (Class D, e.g. Vladimir Rusanov), silently under-counting discharges.
+# dest_capture / floating_check are next; approach_sweep (wide-basin re-acquisition),
+# export_arrival (ballast approaching to load) and eta_arrival (speculative
+# imminent-ETA discovery) are lowest. 'manual' (operator override) jumps the queue.
 CLASS_PRIORITY = {
     "manual": -1,
     "import_arrival": 0,
     "export_departure": 0,
+    "import_berth": 0,
     "outage_check": 0,
     "dest_capture": 1,
-    "import_berth": 1,
     "floating_check": 1,
+    "approach_sweep": 2,
     "export_arrival": 2,
     "eta_arrival": 2,
 }
@@ -463,6 +494,59 @@ WHERE f.mmsi NOT IN (SELECT mmsi FROM recent_cooldown)
   AND lp.last_fix_ts > now() - make_interval(hours => $2)
 """
 
+# #8 — carriers whose last fix is in our broad approach waters (a config.ZONES
+# rectangle) but OUTSIDE the #1-#3 near band ($1 km), silent in the general band
+# [$2, $3] hours, not in cooldown. The heading-toward gate is applied in Python
+# (heading_toward) so the cog-null case is handled uniformly with is_closing.
+APPROACH_CANDIDATE_SQL = f"""
+WITH fleet AS (
+    SELECT mmsi, imo, vessel_name FROM vessel_registry
+    WHERE is_lng_carrier AND NOT is_fsru AND NOT excluded
+      AND imo IS NOT NULL AND imo <> 0
+),
+last_pos AS (
+    SELECT DISTINCT ON (a.mmsi)
+        a.mmsi, a.fix_ts AS last_fix_ts, a.lat AS last_lat, a.lon AS last_lon, a.cog
+    FROM ais_fixes a
+    WHERE EXISTS (SELECT 1 FROM fleet f WHERE f.mmsi = a.mmsi)
+    ORDER BY a.mmsi, a.fix_ts DESC
+),
+nearest AS (
+    SELECT lp.mmsi, lp.last_fix_ts, lp.last_lat, lp.last_lon, lp.cog AS last_cog,
+           n.dist_km AS near_km,
+           degrees(ST_Azimuth(
+               ST_SetSRID(ST_Point(lp.last_lon, lp.last_lat), 4326)::geography,
+               n.centroid::geography
+           )) AS bearing_deg
+    FROM last_pos lp
+    CROSS JOIN LATERAL (
+        SELECT ST_Centroid(tz.geom) AS centroid,
+               ST_Distance(
+                   ST_SetSRID(ST_Point(lp.last_lon, lp.last_lat), 4326)::geography,
+                   tz.geom::geography
+               ) / 1000.0 AS dist_km
+        FROM terminal_zones tz
+        ORDER BY ST_SetSRID(ST_Point(lp.last_lon, lp.last_lat), 4326) <-> tz.geom
+        LIMIT 1
+    ) n
+),
+recent_cooldown AS (
+    SELECT mmsi FROM (
+        SELECT DISTINCT ON (mmsi) mmsi, recheck_at
+        FROM vf_rescue_log ORDER BY mmsi, requested_at DESC
+    ) latest WHERE recheck_at IS NOT NULL AND recheck_at > now()
+)
+SELECT f.mmsi, f.imo, f.vessel_name,
+       n.last_fix_ts, n.last_lat, n.last_lon, n.near_km, n.last_cog, n.bearing_deg
+FROM nearest n
+JOIN fleet f USING (mmsi)
+WHERE n.mmsi NOT IN (SELECT mmsi FROM recent_cooldown)
+  AND n.near_km > $1
+  AND n.last_fix_ts < now() - make_interval(hours => $2)
+  AND n.last_fix_ts > now() - make_interval(hours => $3)
+  AND {_bbox_predicate("n.last_lat", "n.last_lon")}
+"""
+
 LOG_SQL = """
 INSERT INTO vf_rescue_log (
     mmsi, imo, vessel_name, rescue_class, sat, src, result,
@@ -609,6 +693,19 @@ def position_sanity(
     return "ok"
 
 
+def heading_toward(
+    last_cog: float | None, bearing_deg: float | None, max_angle_deg: float
+) -> bool:
+    """True if cog points within max_angle_deg of the bearing to the nearest
+    terminal. Range-agnostic — is_closing adds the distance gate on top, and the
+    wide-basin approach sweep (#8) reuses it without one. Needs cog, which is
+    sparse on older fixes, so a missing cog reads as 'not heading toward'."""
+    if last_cog is None or bearing_deg is None:
+        return False
+    diff = abs((last_cog - bearing_deg + 180.0) % 360.0 - 180.0)
+    return diff <= max_angle_deg
+
+
 def is_closing(
     last_cog: float | None, bearing_deg: float | None, near_km: float | None
 ) -> bool:
@@ -616,12 +713,9 @@ def is_closing(
     terminal (cog within CLOSING_ANGLE_DEG of the bearing to it). Needs cog —
     which is sparse on older fixes, so this only *adds* candidates, never removes
     them (the NEAR_KM proximity gate stands on its own)."""
-    if last_cog is None or bearing_deg is None or near_km is None:
+    if near_km is None or near_km > CLOSING_INCLUDE_KM:
         return False
-    if near_km > CLOSING_INCLUDE_KM:
-        return False
-    diff = abs((last_cog - bearing_deg + 180.0) % 360.0 - 180.0)
-    return diff <= CLOSING_ANGLE_DEG
+    return heading_toward(last_cog, bearing_deg, CLOSING_ANGLE_DEG)
 
 
 def classify_candidate(
@@ -919,13 +1013,23 @@ async def load_budget_today(conn: asyncpg.Connection) -> int:
     return int(row["spent"])
 
 
+def _glide_target_date(expires: datetime | None) -> datetime | None:
+    """Effective glide target = real expiry minus GLIDE_HEADROOM_DAYS (the
+    spend-faster buffer). Passed to glide_cap / glide_surplus in place of the raw
+    expiry so both the cap and the surplus line are computed against the earlier
+    target. None passes through unchanged (glide_cap then uses its fallback)."""
+    if expires is None:
+        return None
+    return expires - timedelta(days=GLIDE_HEADROOM_DAYS)
+
+
 async def load_glide_cap(conn: asyncpg.Connection, now: datetime) -> int:
     """Effective daily cap from the latest vf_account_status snapshot (fallback:
     DAILY_CREDIT_CAP until the first snapshot lands)."""
     row = await conn.fetchrow(ACCOUNT_SNAPSHOT_SQL)
     if row is None:
         return DAILY_CREDIT_CAP
-    cap = glide_cap(row["credits"], row["expiration_date"], now)
+    cap = glide_cap(row["credits"], _glide_target_date(row["expiration_date"]), now)
     if cap != DAILY_CREDIT_CAP:
         logger.info(
             f"vf_rescue: glide cap {cap}cr/day "
@@ -945,7 +1049,7 @@ async def load_glide_surplus(conn: asyncpg.Connection, now: datetime) -> float:
     return glide_surplus(
         anchor_credits=anchor["credits"],
         anchor_ts=anchor["checked_at"],
-        expires=anchor["expiration_date"],
+        expires=_glide_target_date(anchor["expiration_date"]),
         balance=latest["credits"],
         now=now,
     )
@@ -1163,6 +1267,31 @@ async def _load_eta_candidates(
         )
     scored.sort(key=lambda t: t[0])
     return [c for _, c in scored[:ETA_RESCUE_MAX_VESSELS]]
+
+
+async def _load_approach_candidates(
+    conn: asyncpg.Connection, now: datetime
+) -> list[Candidate]:
+    """#8 — wide-basin approach sweep (Class B). Carriers last seen inside a zone
+    bbox, beyond the #1-#3 near band, heading at the nearest terminal and gone
+    AIS-silent. The SQL does the bbox / proximity / silence / cooldown filtering;
+    the heading-toward gate + closest-first cap are applied here (closest to a
+    terminal ⇒ most likely coastal ⇒ most likely re-acquirable for the credit)."""
+    rows = await conn.fetch(
+        APPROACH_CANDIDATE_SQL,
+        APPROACH_SWEEP_MIN_KM,
+        MIN_SILENCE_HOURS,
+        STALE_CEILING_HOURS,
+    )
+    scored: list[tuple[float, Candidate]] = []
+    for r in rows:
+        if not heading_toward(
+            r["last_cog"], r["bearing_deg"], APPROACH_SWEEP_ANGLE_DEG
+        ):
+            continue
+        scored.append((r["near_km"], _row_to_candidate(r, "approach_sweep", now)))
+    scored.sort(key=lambda t: t[0])  # closest to a terminal first
+    return [c for _, c in scored[:APPROACH_SWEEP_MAX_VESSELS]]
 
 
 async def _load_outage_candidates(
@@ -1387,6 +1516,7 @@ async def run_rescue(
                 await _load_dest_candidates(conn, now),  # #4 destination capture
                 await _load_outage_candidates(conn, now),  # #5 outage confirmation
                 await _load_eta_candidates(conn, now),  # #7 imminent-ETA discovery
+                await _load_approach_candidates(conn, now),  # #8 wide-basin sweep
             ]
     if only_mmsi is None:
         # #6 floating-vs-phantom uses pipeline.legs (manages its own pool conns),

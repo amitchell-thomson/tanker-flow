@@ -244,6 +244,23 @@ def test_sanity_teleport():
     )
 
 
+# --- heading_toward / is_closing / is_settled ---------------------------------
+def test_heading_toward_is_range_agnostic():
+    # Unlike is_closing, heading_toward has no distance gate — used by the #8
+    # wide-basin sweep, where the vessel is far beyond CLOSING_INCLUDE_KM.
+    assert vr.heading_toward(90.0, 90.0, 60.0) is True
+    assert vr.heading_toward(90.0, 140.0, 60.0) is True  # 50° off, within 60°
+    assert vr.heading_toward(90.0, 200.0, 60.0) is False  # 110° off
+    assert vr.heading_toward(None, 90.0, 60.0) is False  # no cog
+    assert vr.heading_toward(90.0, None, 60.0) is False  # no bearing
+
+
+def test_approach_sweep_is_lowest_priority():
+    # #8 is surplus-only: it must not outrank the leg-defining P0 classes.
+    assert vr.CLASS_PRIORITY["approach_sweep"] >= 1
+    assert vr.CLASS_PRIORITY["approach_sweep"] > vr.CLASS_PRIORITY["import_arrival"]
+
+
 # --- is_closing / is_settled --------------------------------------------------
 def test_is_closing_toward_within_range():
     assert vr.is_closing(last_cog=90.0, bearing_deg=90.0, near_km=40.0) is True
@@ -458,12 +475,12 @@ def _cand(mmsi, cls):
 
 
 def test_merge_dedups_keeping_highest_priority():
-    silence = [_cand(1, "import_arrival"), _cand(2, "import_berth")]
+    silence = [_cand(1, "import_arrival"), _cand(2, "floating_check")]
     dest = [_cand(2, "dest_capture"), _cand(3, "dest_capture")]
     merged = {c.mmsi: c.rescue_class for c in vr.merge_candidates(silence, dest)}
     assert merged == {
         1: "import_arrival",
-        2: "import_berth",  # priority 1 beats dest_capture's... both are 1; first wins
+        2: "floating_check",  # tie (both P1) ⇒ first source (silence) wins
         3: "dest_capture",
     }
 
@@ -576,10 +593,11 @@ def _sorted_cands(*classes):
 
 def test_split_budget_p0_exempt_from_cap():
     # Cap exhausted (spent == cap): P0 still chosen, P≥1 skipped even with surplus.
-    cands = _sorted_cands("import_arrival", "export_departure", "import_berth")
+    # (dest_capture is the P1 representative; import_berth is now P0.)
+    cands = _sorted_cands("import_arrival", "export_departure", "dest_capture")
     chosen, skipped = vr.split_budget(cands, spent=14, cap=14, surplus=100.0)
     assert [c.rescue_class for c in chosen] == ["import_arrival", "export_departure"]
-    assert [c.rescue_class for c in skipped] == ["import_berth"]
+    assert [c.rescue_class for c in skipped] == ["dest_capture"]
 
 
 def test_split_budget_p1_spends_surplus_within_cap():
@@ -590,7 +608,7 @@ def test_split_budget_p1_spends_surplus_within_cap():
 
 def test_split_budget_negative_surplus_starves_p1():
     # Behind the glide line: only the P0 candidate is polled.
-    cands = _sorted_cands("import_arrival", "import_berth", "export_arrival")
+    cands = _sorted_cands("import_arrival", "dest_capture", "export_arrival")
     chosen, skipped = vr.split_budget(cands, spent=0, cap=14, surplus=-3.0)
     assert [c.rescue_class for c in chosen] == ["import_arrival"]
     assert len(skipped) == 2
@@ -598,7 +616,7 @@ def test_split_budget_negative_surplus_starves_p1():
 
 def test_split_budget_p1_limited_by_fractional_surplus():
     # surplus 1.7 ⇒ floor ⇒ exactly one P≥1 slot.
-    cands = _sorted_cands("import_berth", "import_berth", "import_berth")
+    cands = _sorted_cands("dest_capture", "dest_capture", "dest_capture")
     chosen, skipped = vr.split_budget(cands, spent=0, cap=14, surplus=1.7)
     assert len(chosen) == 1 and len(skipped) == 2
 
@@ -700,3 +718,22 @@ def test_glide_cap_final_day_spends_whats_left():
 def test_glide_cap_clamped_against_balance_drift():
     # A topped-up/corrupt balance must not trigger a spending spree.
     assert vr.glide_cap(100_000, NOW + timedelta(days=30), NOW) == vr.GLIDE_CAP_CEILING
+
+
+def test_glide_target_date_applies_headroom():
+    # Spend-faster buffer: the effective target is GLIDE_HEADROOM_DAYS before expiry.
+    expires = NOW + timedelta(days=363)
+    assert vr._glide_target_date(expires) == expires - timedelta(
+        days=vr.GLIDE_HEADROOM_DAYS
+    )
+    assert vr._glide_target_date(None) is None
+
+
+def test_glide_headroom_raises_cap():
+    # Against the headroom-shifted target the daily cap is strictly higher than
+    # against the raw expiry — i.e. the reserve depletes faster (the owner's
+    # spend-faster directive). 4898 cr, 363 d → 14 flat; ~303 d → 17.
+    expires = NOW + timedelta(days=363)
+    flat = vr.glide_cap(4898, expires, NOW)
+    faster = vr.glide_cap(4898, vr._glide_target_date(expires), NOW)
+    assert faster > flat
