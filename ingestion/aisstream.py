@@ -179,6 +179,15 @@ class IngestionState:
     # flush time so a vessel the scan rotation just discovered near a terminal
     # isn't dropped before the next hourly scoring pass. Cleared each flush.
     inzone_mmsi: dict[int, str] = field(default_factory=dict)
+    # Phase-1 discovery capture (bbox catch-all only). An UNKNOWN tanker (AIS type
+    # 80-89) loitering in a terminal geofence is almost certainly an LNG carrier we
+    # never registered. discovery_tanker_mmsis flags an unlisted MMSI once its
+    # ShipStaticData shows a tanker type, so its subsequent PositionReports are
+    # captured for position; discovery_buf holds rows to upsert into
+    # discovery_candidates. Resets per connection (~hourly); the table accumulates
+    # across reconnects via ON CONFLICT (mmsi). No-op on MMSI-filtered conns.
+    discovery_tanker_mmsis: set[int] = field(default_factory=set)
+    discovery_buf: list[tuple] = field(default_factory=list)
 
 
 def build_subscribe_payload(api_key: str, mmsis: list[int]) -> dict:
@@ -193,13 +202,15 @@ def build_subscribe_payload(api_key: str, mmsis: list[int]) -> dict:
 def build_bbox_subscribe_payload(api_key: str, boxes: list[list[list[float]]]) -> dict:
     """Stage-3c catch-all: subscribe to a geofence (the terminal-approach boxes)
     with NO MMSI filter, so we hear every vessel there — the point is to catch the
-    LNG carriers we did NOT predict into a slot. PositionReport only: ShipStaticData
-    for a re-acquired carrier arrives once it's promoted into an MMSI slot, and the
-    allow-list (is_lng_carrier, non-FSRU) drops everything else before insert."""
+    LNG carriers we did NOT predict into a slot. ShipStaticData is included (on top
+    of PositionReport) for Phase-1 discovery capture: it carries the AIS ship type,
+    which lets us flag UNKNOWN tankers (type 80-89) loitering at a terminal as
+    likely-missed LNG carriers (see _capture_discovery_candidate). The allow-list
+    (is_lng_carrier, non-FSRU) still drops everything else before insert."""
     return {
         "APIKey": api_key,
         "BoundingBoxes": boxes,
-        "FilterMessageTypes": ["PositionReport"],
+        "FilterMessageTypes": ["PositionReport", "ShipStaticData"],
     }
 
 
@@ -430,6 +441,58 @@ def chunk_persistent(mmsis: list[int], num_chunks: int) -> list[list[int]]:
     return chunks
 
 
+def _capture_discovery_candidate(
+    msg: "PositionReport | ShipStaticData",
+    mmsi: int,
+    ingest_state: IngestionState,
+) -> None:
+    """Phase-1 discovery capture for the bbox catch-all (called only for MMSIs the
+    allow-list would otherwise drop). An UNKNOWN MMSI whose ShipStaticData shows a
+    tanker type (80-89) is recorded to discovery_candidates — a tanker loitering at
+    an LNG terminal geofence is almost certainly an LNG carrier we never
+    registered. Once flagged, its PositionReports attach the latest position so the
+    is-it-at-an-LNG-berth refinement can run offline (PostGIS against the berth
+    polygons), keeping this hot path free of spatial work. The two message shapes
+    upsert into the same row (COALESCE merge on mmsi); ShipStaticData always lands
+    first (it sets the flag), so the row never lacks a type."""
+    if isinstance(msg, ShipStaticData):
+        vtype = msg.Message.Type
+        if vtype in TANKER_TYPES:
+            ingest_state.discovery_tanker_mmsis.add(mmsi)
+            ingest_state.discovery_buf.append(
+                (
+                    mmsi,
+                    vtype,
+                    msg.MetaData.ShipName,
+                    msg.Message.ImoNumber,
+                    None,  # lat — attached from PositionReport
+                    None,  # lon
+                    None,  # sog
+                    None,  # nav_status
+                    msg.MetaData.time_utc,
+                )
+            )
+        elif vtype is not None:
+            # Confirmed non-tanker: stop tracking so its positions aren't captured.
+            ingest_state.discovery_tanker_mmsis.discard(mmsi)
+    elif (
+        isinstance(msg, PositionReport) and mmsi in ingest_state.discovery_tanker_mmsis
+    ):
+        ingest_state.discovery_buf.append(
+            (
+                mmsi,
+                None,  # ais_type — already set by ShipStaticData
+                None,  # ship_name
+                None,  # imo
+                msg.Message.Latitude,
+                msg.Message.Longitude,
+                msg.Message.Sog,
+                msg.Message.NavigationalStatus,
+                msg.MetaData.time_utc,
+            )
+        )
+
+
 def parse_message(
     raw: str | bytes,
     ingest_state: IngestionState,
@@ -452,8 +515,10 @@ def parse_message(
 
     # Bbox catch-all: keep only our in-scope LNG carriers (the allow-list); the
     # geofence otherwise floods us with every ship type near the terminal. No-op
-    # on MMSI-filtered connections (allow_mmsis is None).
+    # on MMSI-filtered connections (allow_mmsis is None). Before dropping an
+    # unlisted MMSI, run the Phase-1 discovery capture (unknown-tanker-at-terminal).
     if ingest_state.allow_mmsis is not None and mmsi not in ingest_state.allow_mmsis:
+        _capture_discovery_candidate(msg, mmsi, ingest_state)
         return
 
     if isinstance(msg, PositionReport):
@@ -568,12 +633,14 @@ async def flush_buffers(pool: asyncpg.Pool, ingest_state: IngestionState) -> Non
     fix_batch = ingest_state.fix_buf
     registry_batch = ingest_state.registry_buf
     state_batch = ingest_state.state_buf
+    discovery_batch = ingest_state.discovery_buf
     inzone = ingest_state.inzone_mmsi
-    if not fix_batch and not registry_batch and not state_batch:
+    if not fix_batch and not registry_batch and not state_batch and not discovery_batch:
         return
     ingest_state.fix_buf = []
     ingest_state.registry_buf = []
     ingest_state.state_buf = []
+    ingest_state.discovery_buf = []
     ingest_state.inzone_mmsi = {}
 
     async with pool.acquire() as conn:
@@ -641,6 +708,38 @@ async def flush_buffers(pool: asyncpg.Pool, ingest_state: IngestionState) -> Non
                 )
                 # ON CONFLICT (state_ts, mmsi) DO NOTHING — safe to replay.
                 ingest_state.state_buf = state_batch + ingest_state.state_buf
+
+        if discovery_batch:
+            try:
+                await conn.executemany(
+                    """
+                    INSERT INTO discovery_candidates
+                        (mmsi, ais_type, ship_name, imo, lat, lon, sog,
+                         nav_status, first_seen, last_seen, n_msgs)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, 1)
+                    ON CONFLICT (mmsi) DO UPDATE SET
+                        ais_type   = COALESCE(EXCLUDED.ais_type, discovery_candidates.ais_type),
+                        ship_name  = COALESCE(EXCLUDED.ship_name, discovery_candidates.ship_name),
+                        imo        = COALESCE(EXCLUDED.imo, discovery_candidates.imo),
+                        lat        = COALESCE(EXCLUDED.lat, discovery_candidates.lat),
+                        lon        = COALESCE(EXCLUDED.lon, discovery_candidates.lon),
+                        sog        = COALESCE(EXCLUDED.sog, discovery_candidates.sog),
+                        nav_status = COALESCE(EXCLUDED.nav_status, discovery_candidates.nav_status),
+                        first_seen = LEAST(discovery_candidates.first_seen, EXCLUDED.first_seen),
+                        last_seen  = GREATEST(discovery_candidates.last_seen, EXCLUDED.last_seen),
+                        n_msgs     = discovery_candidates.n_msgs + 1
+                    """,
+                    discovery_batch,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Batch discovery upsert failed ({len(discovery_batch)} rows):"
+                    f" {e} — re-queuing for retry"
+                )
+                # Idempotent ON CONFLICT (mmsi) upsert — safe to replay.
+                ingest_state.discovery_buf = (
+                    discovery_batch + ingest_state.discovery_buf
+                )
 
         if inzone:
             try:

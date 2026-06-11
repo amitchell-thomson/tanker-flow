@@ -72,6 +72,27 @@ CREATE TABLE vessel_registry (
     updated_at          TIMESTAMPTZ      DEFAULT now()
 );
 
+-- Phase-1 discovery capture: UNKNOWN tankers (AIS type 80-89) heard on the bbox
+-- catch-all's terminal geofence but not on the in-scope-LNG allow-list. A tanker
+-- loitering at an LNG terminal is almost certainly an unregistered LNG carrier;
+-- the bbox loop upserts it here (ingestion/aisstream.py:_capture_discovery_candidate)
+-- instead of dropping it. The is-it-at-an-LNG-berth refinement runs offline
+-- (PostGIS against terminal_zones berth polygons). Feeds the Phase-2 auto-add.
+CREATE TABLE discovery_candidates (
+    mmsi        BIGINT       PRIMARY KEY,
+    ais_type    SMALLINT,            -- AIS numeric type (80-89 = tanker)
+    ship_name   TEXT,
+    imo         BIGINT,
+    lat         DOUBLE PRECISION,    -- latest position (for berth refinement)
+    lon         DOUBLE PRECISION,
+    sog         DOUBLE PRECISION,    -- speed over ground (sitting ⇒ ~0)
+    nav_status  SMALLINT,            -- AIS nav status (5 = moored, 1 = anchored)
+    first_seen  TIMESTAMPTZ  NOT NULL,
+    last_seen   TIMESTAMPTZ  NOT NULL,
+    n_msgs      INTEGER      NOT NULL DEFAULT 1
+);
+CREATE INDEX ix_discovery_candidates_last_seen ON discovery_candidates (last_seen DESC);
+
 -- LNG terminal metadata: one row per terminal, referenced by terminal_zones
 CREATE TABLE terminals (
     terminal_id     SERIAL PRIMARY KEY,
