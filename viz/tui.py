@@ -71,6 +71,9 @@ settings = _Settings()  # type: ignore
 
 
 from config import ZONES as _ZONES  # noqa: E402
+from config import settings as _cfg  # noqa: E402
+from ingestion.aisstream import NUM_CONNECTIONS as _NUM_CONN  # noqa: E402
+from ingestion.aisstream import _source_label  # noqa: E402
 
 
 def _classify_zone(lat: float | None, lon: float | None) -> str | None:
@@ -97,7 +100,20 @@ _ZONE_COLORS: dict[str, str] = {
     "emed": "white",
 }
 
-_EXPECTED_SOURCES = [f"aisstream-mmsi-{i + 1}" for i in range(3)]
+# Every connection across every worker, using the same labels aisstream.py emits
+# (`aisstream-mmsi-{n}` for a single worker, `aisstream-w{id}-{n}` when sharded).
+# Drives the per-source liveness strip + status dots, so a second worker's three
+# connections are monitored automatically.
+_WORKER_COUNT = max(1, _cfg.worker_count)
+_EXPECTED_SOURCES = [
+    _source_label(w, _WORKER_COUNT, c)
+    for w in range(_WORKER_COUNT)
+    for c in range(_NUM_CONN)
+]
+# This (home) worker's scan-rotation connection — its last `subscribed` event
+# drives the scan-rotation countdown. Chunk index NUM_CONNECTIONS-1 is the scan
+# conn; the TUI runs on worker 0.
+_HOME_SCAN_SOURCE = _source_label(0, _WORKER_COUNT, _NUM_CONN - 1)
 
 # Unified tier palette — used across tier table, watchlist explorer, and
 # promotions log. Mirrors the web frontend's tier ring colours so the two
@@ -386,19 +402,14 @@ class TankerFlowApp(App):
 
     /* FIELD ZONE */
     #field-zone { height: 1.05fr; }
-    #zone-container, #terminal-container, #stale-container, #vf-rescue-container {
+    #terminal-container, #stale-container, #vf-rescue-container {
         border: round #7a7a7a;
         border-title-color: #c0c0c0;
         border-title-style: bold;
     }
-    #zone-container { width: 1fr; }
     #terminal-container { width: 2fr; }
     #stale-container { width: 2fr; }
     #vf-rescue-container { width: 2fr; }
-    #zone-summary {
-        height: 1fr;
-        padding: 0 1;
-    }
     #terminal-table, #stale-table { height: 1fr; border: none; }
 
     /* Bottom footer — key hints. */
@@ -433,9 +444,6 @@ class TankerFlowApp(App):
         self._overnight: dict[str, dict[str, int | float]] = {}
         # vessel_state ingest health — populated by the fast timer.
         self._vessel_state_rate: tuple[int, int | None] | None = None
-        # Slow-timer cache: distinct vessels per zone in last 6h. The 6h
-        # window costs too much to recompute on the 2s fast timer.
-        self._zone_distinct_6h: dict[str, int] = {}
 
     @property
     def _view_mode(self) -> tuple[int, int, int]:
@@ -511,7 +519,7 @@ class TankerFlowApp(App):
         # ---------------- HEALTH ZONE ----------------
         with Vertical(id="health-zone"):
             with Horizontal(id="per-source-strip"):
-                for i in range(3):
+                for i in range(len(_EXPECTED_SOURCES)):
                     yield Static(
                         "…", id=f"per-source-{i + 1}", classes="per-source-cell",
                         markup=True,
@@ -552,8 +560,6 @@ class TankerFlowApp(App):
 
         # ---------------- FIELD ZONE ----------------
         with Horizontal(id="field-zone"):
-            with Vertical(id="zone-container"):
-                yield Static("…", id="zone-summary", markup=True)
             with Vertical(id="terminal-container"):
                 yield DataTable(id="terminal-table")
             with Vertical(id="stale-container"):
@@ -620,9 +626,6 @@ class TankerFlowApp(App):
         self.query_one("#watchlist-left", Vertical).border_title = "Watchlist"
         self.query_one("#watchlist-explorer-container", Vertical).border_title = (
             "Watchlist explorer"
-        )
-        self.query_one("#zone-container", Vertical).border_title = (
-            "Zone occupancy · last 6h"
         )
         self.query_one("#terminal-container", Vertical).border_title = (
             "Terminal activity · last 6h"
@@ -931,8 +934,9 @@ class TankerFlowApp(App):
                         """
                             SELECT MAX(event_ts) AS last_sub
                             FROM ingestion_events
-                            WHERE source = 'aisstream-mmsi-3' AND event_type = 'subscribed'
-                            """
+                            WHERE source = $1 AND event_type = 'subscribed'
+                            """,
+                        _HOME_SCAN_SOURCE,
                     ),
                     self._pool.fetchrow(
                         """
@@ -1126,57 +1130,36 @@ class TankerFlowApp(App):
         if not self._pool:
             return
         try:
-            rows, zone_fix_rows = await asyncio.gather(
-                self._pool.fetch(
-                    """
-                    WITH wl AS (
-                        SELECT mmsi, vessel_name FROM vessel_registry
-                        WHERE (is_lng_carrier OR is_fsru) AND NOT excluded
-                    ),
-                    last_fix AS (
-                        SELECT DISTINCT ON (mmsi)
-                               mmsi, fix_ts AS ts, lat, lon, sog
-                        FROM ais_fixes
-                        WHERE fix_ts > now() - INTERVAL '24 hours'
-                        ORDER BY mmsi, fix_ts DESC
-                    )
-                    SELECT wl.mmsi, wl.vessel_name,
-                           lf.ts, lf.lat, lf.lon, lf.sog,
-                           CASE WHEN lf.lat IS NOT NULL THEN
-                             EXISTS (
-                               SELECT 1 FROM terminal_zones tz
-                               WHERE ST_DWithin(
-                                 ST_SetSRID(ST_Point(lf.lon, lf.lat), 4326),
-                                 tz.geom,
-                                 0.5
-                               )
-                             )
-                           ELSE FALSE END AS near_terminal
-                    FROM wl LEFT JOIN last_fix lf USING (mmsi)
-                    """
+            rows = await self._pool.fetch(
+                """
+                WITH wl AS (
+                    SELECT mmsi, vessel_name FROM vessel_registry
+                    WHERE (is_lng_carrier OR is_fsru) AND NOT excluded
                 ),
-                # Zone-occupancy source: all (mmsi, lat, lon) over the last 6h.
-                # We dedupe + classify in Python so the bbox predicates stay
-                # in config.ZONES (one source of truth).
-                self._pool.fetch(
-                    """
-                    SELECT mmsi, lat, lon
+                last_fix AS (
+                    SELECT DISTINCT ON (mmsi)
+                           mmsi, fix_ts AS ts, lat, lon, sog
                     FROM ais_fixes
-                    WHERE fix_ts > now() - INTERVAL '6 hours'
-                      AND source LIKE 'aisstream%'
-                    """
-                ),
+                    WHERE fix_ts > now() - INTERVAL '24 hours'
+                    ORDER BY mmsi, fix_ts DESC
+                )
+                SELECT wl.mmsi, wl.vessel_name,
+                       lf.ts, lf.lat, lf.lon, lf.sog,
+                       CASE WHEN lf.lat IS NOT NULL THEN
+                         EXISTS (
+                           SELECT 1 FROM terminal_zones tz
+                           WHERE ST_DWithin(
+                             ST_SetSRID(ST_Point(lf.lon, lf.lat), 4326),
+                             tz.geom,
+                             0.5
+                           )
+                         )
+                       ELSE FALSE END AS near_terminal
+                FROM wl LEFT JOIN last_fix lf USING (mmsi)
+                """
             )
         except Exception:
             return
-
-        # --- Zone occupancy (6h) ---
-        zone_sets: dict[str, set[int]] = {name: set() for name, *_ in _ZONES}
-        for r in zone_fix_rows:
-            z = _classify_zone(r["lat"], r["lon"])
-            if z is not None and z in zone_sets:
-                zone_sets[z].add(r["mmsi"])
-        self._zone_distinct_6h = {z: len(s) for z, s in zone_sets.items()}
 
         now = datetime.now(timezone.utc)
         reporting = silent = dormant = 0
@@ -1474,28 +1457,15 @@ class TankerFlowApp(App):
             else:
                 ov_line = "[dim]12h   loading…[/]"
 
-            head = f"[bold]aisstream-{i + 1}[/]"
+            # Show the real source label ('mmsi-1' single-worker, 'w0-1'/'w1-3'
+            # when sharded) so the two workers' connections are distinguishable.
+            head = f"[bold]{src.replace('aisstream-', '')}[/]"
             if scan_src:
                 head += " [dim](scan)[/]"
             else:
                 head += " [dim](persistent)[/]"
             content = "\n".join([head, live_line, ov_line, meta_line]).rstrip("\n")
             self.query_one(f"#per-source-{i + 1}", Static).update(content)
-
-        # --- Zone occupancy bar (6h, cached by the slow timer) ---
-        zone_counts = self._zone_distinct_6h
-        max_count = max(zone_counts.values(), default=0) or 1
-        zone_lines: list[str] = []
-        for name, *_ in _ZONES:
-            n = zone_counts.get(name, 0)
-            bar_w = 16
-            filled = int(round(bar_w * n / max_count)) if max_count > 0 else 0
-            colour = _ZONE_COLORS.get(name, "white")
-            # Block + thin trailing fill so empty zones still have a track.
-            bar = f"[{colour}]{'█' * filled}[/][dim]{'·' * (bar_w - filled)}[/]"
-            count_str = f"[bold]{n}[/]" if n > 0 else "[dim]0[/]"
-            zone_lines.append(f"[{colour}]{name:10s}[/] {bar} {count_str:>3}")
-        self.query_one("#zone-summary", Static).update("\n".join(zone_lines))
 
         # --- Long-term chart (fixes/hour) ---
         lt_data = [float(row["cnt"]) for row in lt_bucket_rows]
