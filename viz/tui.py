@@ -1,25 +1,26 @@
 """Operational/pipeline-health dashboard for tanker-flow ingestion.
 
 Launched alongside `make ingest`. Surfaces connection liveness, ingestion
-quality, watchlist health, scoring heartbeat, and terminal staleness — the
-information you need to know whether the pipeline is healthy.
+quality, watchlist health, and the scoring heartbeat — the information you
+need to know whether the pipeline is healthy.
 
 This is NOT a map / vessel-data surface. The map, port events, track
 history, density raster, and (future) signal display all live in the web
 viz (`viz/app.py` + `viz/static/`).
 
-Layout is organised into three horizontal bands:
-    - Health zone (top):     dense status row, per-source strip, errors feed,
-                             reconnect rate, ingest-lag and fixes/hour charts
-    - Watchlist zone (mid):  tier breakdown, scan rotation, promotions,
-                             plus a full priority_watchlist explorer
-    - Field zone (bottom):   zone occupancy, per-terminal staleness,
-                             silent vessels
+Layout is organised into two horizontal bands:
+    - Health zone (top):     dense status row, the WebSocket-connections table
+                             (one row per connection: what it is, what it
+                             covers, whether it's up), errors feed, fleet
+                             coverage, ingest-lag and fixes/hour charts
+    - Watchlist zone (bot):  tier breakdown, scan rotation, promotions, the
+                             priority_watchlist explorer, and the VF-rescue panel
 """
 
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import asyncpg
@@ -70,50 +71,110 @@ class _Settings(BaseSettings):
 settings = _Settings()  # type: ignore
 
 
-from config import ZONES as _ZONES  # noqa: E402
 from config import settings as _cfg  # noqa: E402
 from ingestion.aisstream import NUM_CONNECTIONS as _NUM_CONN  # noqa: E402
 from ingestion.aisstream import _source_label  # noqa: E402
 
-
-def _classify_zone(lat: float | None, lon: float | None) -> str | None:
-    """Mirror of ingestion.metrics.classify_zone — duplicated here to avoid a
-    cross-package import dependency. Used to bucket fixes by geographic zone
-    AND to test whether a last-known position fell inside our terrestrial-AIS
-    coverage envelope (vessels last seen outside any zone bbox are most likely
-    mid-ocean and silent for benign reasons). First match wins."""
-    if lat is None or lon is None:
-        return None
-    for name, lat_min, lat_max, lon_min, lon_max in _ZONES:
-        if lat_min <= lat <= lat_max and lon_min <= lon <= lon_max:
-            return name
-    return None
-
-
-_ZONE_COLORS: dict[str, str] = {
-    "usgulf": "bright_magenta",
-    "usatlantic": "bright_red",
-    "iberian": "bright_yellow",
-    "nweurope": "bright_green",
-    "baltic": "bright_cyan",
-    "wmed": "bright_blue",
-    "emed": "white",
-}
-
-# Every connection across every worker, using the same labels aisstream.py emits
-# (`aisstream-mmsi-{n}` for a single worker, `aisstream-w{id}-{n}` when sharded).
-# Drives the per-source liveness strip + status dots, so a second worker's three
-# connections are monitored automatically.
+# --- The connection plan: one descriptor per live WebSocket -------------------
+# The 6 connections are 2 egress IPs × 3 each (AISstream caps 3/IP). Per worker,
+# chunks 0-1 are the persistent block and the last chunk is EITHER scan-rotation
+# OR — on the bbox-enabled second egress — the terminal-geofence catch-all. The
+# TUI knows its own (home) config directly; for the second egress it follows the
+# documented deployment (the last worker runs the catch-all) so the table mirrors
+# what aisstream.py actually opens. Drives the connections table, status dots,
+# overnight cache, and reconnect counts — all from one source of truth.
 _WORKER_COUNT = max(1, _cfg.worker_count)
-_EXPECTED_SOURCES = [
-    _source_label(w, _WORKER_COUNT, c)
-    for w in range(_WORKER_COUNT)
-    for c in range(_NUM_CONN)
-]
-# This (home) worker's scan-rotation connection — its last `subscribed` event
-# drives the scan-rotation countdown. Chunk index NUM_CONNECTIONS-1 is the scan
-# conn; the TUI runs on worker 0.
-_HOME_SCAN_SOURCE = _source_label(0, _WORKER_COUNT, _NUM_CONN - 1)
+_EGRESS_NAMES = {0: "home", 1: "oracle"}
+
+
+@dataclass(frozen=True)
+class _Conn:
+    source: str  # ais_fixes.source label this connection writes
+    worker: int
+    egress: str  # human egress name (home / oracle)
+    role: str  # 'persistent' | 'scan' | 'catch-all'
+    covers: str  # one-line "what does it do"
+    sparse: bool  # idle minutes are normal (scan + catch-all) → wider tolerances
+
+
+def _build_connections(worker_count: int, home_bbox: bool) -> list[_Conn]:
+    conns: list[_Conn] = []
+    for w in range(worker_count):
+        egress = _EGRESS_NAMES.get(w, f"egress-{w}")
+        half = f" · half {chr(65 + w)}" if worker_count > 1 else ""
+        for c in range(_NUM_CONN):
+            if c < _NUM_CONN - 1:
+                conns.append(
+                    _Conn(
+                        _source_label(w, worker_count, c),
+                        w,
+                        egress,
+                        "persistent",
+                        f"top tiers 1-3{half}",
+                        False,
+                    )
+                )
+                continue
+            # Last chunk: scan rotation, unless this egress runs the catch-all.
+            is_bbox = (w == 0 and home_bbox) or (
+                worker_count > 1 and w == worker_count - 1
+            )
+            if is_bbox:
+                conns.append(
+                    _Conn(
+                        "aisstream-bbox",
+                        w,
+                        egress,
+                        "catch-all",
+                        "33 terminal boxes · all LNG",
+                        True,
+                    )
+                )
+            else:
+                conns.append(
+                    _Conn(
+                        _source_label(w, worker_count, c),
+                        w,
+                        egress,
+                        "scan",
+                        f"tier 4/5 rotation{half}",
+                        True,
+                    )
+                )
+    return conns
+
+
+_CONNECTIONS = _build_connections(_WORKER_COUNT, _cfg.bbox_catchall)
+# Kept for the existing aggregate/overnight loops that key off source labels.
+_EXPECTED_SOURCES = [c.source for c in _CONNECTIONS]
+# This (home) worker's scan-rotation connection (if any) — its last `subscribed`
+# event drives the scan-rotation countdown.
+_HOME_SCAN_SOURCE = next(
+    (c.source for c in _CONNECTIONS if c.worker == 0 and c.role == "scan"), None
+)
+# Reconnect cadence (planned) — used to judge "connected but idle" for the
+# sparse connections, which can legitimately go a while between fixes.
+_RECONNECT_GRACE_S = 4200  # ~70 min, covers the 1h planned-reconnect cycle
+
+
+def _conn_state(role: str, fix_age_s: float, evt_age_s: float) -> str:
+    """Per-connection health: 'up' (data flowing), 'idle' (connected, no recent
+    fix — normal for the sparse scan/catch-all), or 'down'. Role-aware so an idle
+    catch-all isn't mistaken for an outage, while a silent persistent conn is."""
+    if fix_age_s < 120:
+        return "up"
+    sparse = role in ("scan", "catch-all")
+    if evt_age_s < (_RECONNECT_GRACE_S if sparse else 600):
+        return "idle"
+    return "down"
+
+
+_STATE_DOT = {"up": "[green]●[/]", "idle": "[cyan]●[/]", "down": "[red]●[/]"}
+_ROLE_COLOR = {
+    "persistent": "bright_green",
+    "scan": "bright_yellow",
+    "catch-all": "bright_cyan",
+}
 
 # Unified tier palette — used across tier table, watchlist explorer, and
 # promotions log. Mirrors the web frontend's tier ring colours so the two
@@ -303,23 +364,21 @@ class TankerFlowApp(App):
     #health-zone {
         height: auto;
     }
-    #per-source-strip {
-        height: 5;
+    #connections-panel {
+        height: 11;
         border: round #7a7a7a;
         border-title-color: #c0c0c0;
         border-title-style: bold;
         padding: 0 1;
     }
-    #per-source-strip.ok      { border: round #2c5e3a; border-title-color: ansi_bright_green;  }
-    #per-source-strip.warn    { border: round #6b5d1a; border-title-color: ansi_bright_yellow; }
-    #per-source-strip.bad     { border: round #6b1a1a; border-title-color: ansi_bright_red;    }
-    .per-source-cell {
-        width: 1fr;
-        padding: 0 1;
-    }
+    #connections-panel.ok   { border: round #2c5e3a; border-title-color: ansi_bright_green;  }
+    #connections-panel.warn { border: round #6b5d1a; border-title-color: ansi_bright_yellow; }
+    #connections-panel.bad  { border: round #6b1a1a; border-title-color: ansi_bright_red;    }
+    #connections-summary { height: 1; padding: 0 0; }
+    #connections-table { height: 1fr; border: none; }
 
     #health-tables { height: 8; }
-    #errors-container, #coverage-container, #reconnect-container {
+    #errors-container, #coverage-container {
         border: round #7a7a7a;
         border-title-color: #c0c0c0;
         border-title-style: bold;
@@ -327,10 +386,9 @@ class TankerFlowApp(App):
     }
     #errors-container.ok  { border: round #2c5e3a; border-title-color: ansi_bright_green; }
     #errors-container.bad { border: round #6b1a1a; border-title-color: ansi_bright_red;   }
-    #errors-container { width: 2fr; }
+    #errors-container { width: 3fr; }
     #coverage-container { width: 2fr; }
     #coverage-panel { height: 1fr; padding: 0 0; }
-    #reconnect-container { width: 1fr; }
     #errors-table {
         height: 1fr;
         border: none;
@@ -340,10 +398,6 @@ class TankerFlowApp(App):
         padding: 1 0;
         color: ansi_bright_green;
         text-align: center;
-    }
-    #reconnect-strip {
-        height: 1fr;
-        padding: 0 0;
     }
 
     #charts-row { height: 11; }
@@ -400,17 +454,16 @@ class TankerFlowApp(App):
     }
     #explorer-table { height: 1fr; border: none; }
 
-    /* FIELD ZONE */
-    #field-zone { height: 1.05fr; }
-    #terminal-container, #stale-container, #vf-rescue-container {
+    /* VF rescue — now the third column of the watchlist zone. */
+    #vf-rescue-container {
+        width: 1.6fr;
         border: round #7a7a7a;
         border-title-color: #c0c0c0;
         border-title-style: bold;
+        padding: 0 1;
     }
-    #terminal-container { width: 2fr; }
-    #stale-container { width: 2fr; }
-    #vf-rescue-container { width: 2fr; }
-    #terminal-table, #stale-table { height: 1fr; border: none; }
+    #vf-credit-status { height: 2; padding: 0 0; }
+    #vf-rescue-table { height: 1fr; border: none; }
 
     /* Bottom footer — key hints. */
     #footer {
@@ -518,12 +571,9 @@ class TankerFlowApp(App):
 
         # ---------------- HEALTH ZONE ----------------
         with Vertical(id="health-zone"):
-            with Horizontal(id="per-source-strip"):
-                for i in range(len(_EXPECTED_SOURCES)):
-                    yield Static(
-                        "…", id=f"per-source-{i + 1}", classes="per-source-cell",
-                        markup=True,
-                    )
+            with Vertical(id="connections-panel"):
+                yield Static("…", id="connections-summary", markup=True)
+                yield DataTable(id="connections-table")
             with Horizontal(id="health-tables"):
                 with Vertical(id="errors-container"):
                     yield DataTable(id="errors-table")
@@ -534,8 +584,6 @@ class TankerFlowApp(App):
                     )
                 with Vertical(id="coverage-container"):
                     yield Static("…", id="coverage-panel", markup=True)
-                with Vertical(id="reconnect-container"):
-                    yield Static("…", id="reconnect-strip", markup=True)
             with Horizontal(id="charts-row"):
                 with Vertical(id="vessels-container"):
                     yield Static("…", id="vessels-label", markup=True)
@@ -547,25 +595,25 @@ class TankerFlowApp(App):
         # ---------------- WATCHLIST ZONE ----------------
         with Horizontal(id="watchlist-zone"):
             with Vertical(id="watchlist-left"):
-                yield Label("[bold cyan]Tiers[/] [dim]· priority_watchlist[/]", id="tier-label")
+                yield Label(
+                    "[bold cyan]Tiers[/] [dim]· priority_watchlist[/]", id="tier-label"
+                )
                 yield DataTable(id="tier-table")
                 yield Label("[bold cyan]Scan rotation[/]", id="scan-label")
                 yield Static("…", id="scan-progress", markup=True)
-                yield Label("[bold cyan]Promotions[/] [dim]· recent (persisted)[/]", id="promo-label")
+                yield Label(
+                    "[bold cyan]Promotions[/] [dim]· recent (persisted)[/]",
+                    id="promo-label",
+                )
                 yield DataTable(id="promo-table")
             with Vertical(id="watchlist-explorer-container"):
                 yield Static("[dim]sort: tier[/]", id="explorer-status", markup=True)
                 yield Input(placeholder="Search vessel name…", id="explorer-search")
                 yield DataTable(id="explorer-table")
-
-        # ---------------- FIELD ZONE ----------------
-        with Horizontal(id="field-zone"):
-            with Vertical(id="terminal-container"):
-                yield DataTable(id="terminal-table")
-            with Vertical(id="stale-container"):
-                yield DataTable(id="stale-table")
             with Vertical(id="vf-rescue-container"):
-                yield Static("[bold cyan]VF rescue[/]", id="vf-credit-status", markup=True)
+                yield Static(
+                    "[bold cyan]VF rescue[/]", id="vf-credit-status", markup=True
+                )
                 yield DataTable(id="vf-rescue-table")
 
         yield Static(
@@ -580,11 +628,18 @@ class TankerFlowApp(App):
         self.register_theme(_THEME)
         self.theme = "tanker"
 
-        terminal_table = self.query_one("#terminal-table", DataTable)
-        terminal_table.add_columns("Zone", "Terminal", "Vessels", "Fixes", "Newest fix")
-
-        stale_table = self.query_one("#stale-table", DataTable)
-        stale_table.add_columns("Vessel", "MMSI", "Last seen", "Last zone")
+        connections_table = self.query_one("#connections-table", DataTable)
+        connections_table.add_columns(
+            "",
+            "Connection",
+            "Egress IP",
+            "Role",
+            "Subscription",
+            "Fixes · lag (5m)",
+            "Fixes · miss (12h)",
+            "Reconnects (p·wd)",
+        )
+        connections_table.cursor_type = "none"
 
         tier_table = self.query_one("#tier-table", DataTable)
         tier_table.add_columns("Tier", "Count", "In slot", "Description")
@@ -600,8 +655,14 @@ class TankerFlowApp(App):
 
         explorer_table = self.query_one("#explorer-table", DataTable)
         explorer_table.add_columns(
-            "T", "Vessel", "MMSI", "Reason",
-            "Last fix", "Dest", "ETA", "Slot",
+            "T",
+            "Vessel",
+            "MMSI",
+            "Reason",
+            "Last fix",
+            "Dest",
+            "ETA",
+            "Slot",
         )
         explorer_table.cursor_type = "row"
         explorer_table.zebra_stripes = True
@@ -609,33 +670,24 @@ class TankerFlowApp(App):
         # Inline panel titles, rendered as `border-title` so they ride the
         # frame and free up a full row inside each container.
         self.query_one("#header-panel", Vertical).border_title = "AIS ingestion"
-        self.query_one("#per-source-strip", Horizontal).border_title = (
-            "WebSocket connections · live / 12h"
-        )
-        self.query_one("#errors-container", Vertical).border_title = (
-            "Recent errors · ingestion_events"
-        )
-        self.query_one("#coverage-container", Vertical).border_title = (
-            "Fleet coverage · data/coverage"
-        )
-        self.query_one("#reconnect-container", Vertical).border_title = (
-            "Reconnects · 12h"
-        )
+        self.query_one(
+            "#connections-panel", Vertical
+        ).border_title = "WebSocket connections"
+        self.query_one(
+            "#errors-container", Vertical
+        ).border_title = "Recent errors · ingestion_events"
+        self.query_one(
+            "#coverage-container", Vertical
+        ).border_title = "Fleet coverage · data/coverage"
         self.query_one("#vessels-container", Vertical).border_title = "Ingest lag"
         self.query_one("#longterm-container", Vertical).border_title = "Fixes / hour"
         self.query_one("#watchlist-left", Vertical).border_title = "Watchlist"
-        self.query_one("#watchlist-explorer-container", Vertical).border_title = (
-            "Watchlist explorer"
-        )
-        self.query_one("#terminal-container", Vertical).border_title = (
-            "Terminal activity · last 6h"
-        )
-        self.query_one("#stale-container", Vertical).border_title = (
-            "Silent vessels · active <24h, gone >30m"
-        )
-        self.query_one("#vf-rescue-container", Vertical).border_title = (
-            "VF rescue · live-position backstop"
-        )
+        self.query_one(
+            "#watchlist-explorer-container", Vertical
+        ).border_title = "Watchlist explorer"
+        self.query_one(
+            "#vf-rescue-container", Vertical
+        ).border_title = "VF rescue · live-position backstop"
 
         self._update_explorer_label()
 
@@ -655,8 +707,6 @@ class TankerFlowApp(App):
         # Fast timer: every 2s — status, charts, per-source strip, zone bar.
         self.set_interval(2, self.refresh_data)
         # Slow timers: every 30s — heavier queries / stable signals.
-        self.set_interval(30, self.refresh_terminal_panel)
-        asyncio.create_task(self.refresh_terminal_panel())
         self.set_interval(30, self.refresh_slow_stats)
         asyncio.create_task(self.refresh_slow_stats())
         self.set_interval(30, self.refresh_watchlist_panels)
@@ -795,30 +845,6 @@ class TankerFlowApp(App):
                     msg,
                 )
 
-        # --- Reconnect strip (12h: watchdog · planned · disconnects) ---
-        # Planned reconnects fire ~1/h (so ~12 over the 12h window). Watchdog
-        # firings above ~planned/2 mean AISstream is dropping that connection
-        # often. Source 3 (scan rotation) naturally sees more — its 50 MMSIs
-        # are often silent (mid-ocean), tripping the watchdog as a side-effect
-        # of expected silence rather than a real fault.
-        lines = []
-        for src in _EXPECTED_SOURCES:
-            o = self._overnight.get(src, {})
-            wd = int(o.get("watchdog_12h", 0))
-            planned = int(o.get("planned_12h", 0))
-            dc = int(o.get("disconnects_12h", 0))
-            num = f"{wd}wd · {planned}p · {dc}dc"
-            scan_src = src.endswith("-3")
-            healthy_wd = wd <= max(1, planned // 2) if not scan_src else wd <= planned * 2
-            if not healthy_wd and wd > planned:
-                colour = "red"
-            elif wd > 0 and not scan_src:
-                colour = "yellow"
-            else:
-                colour = "green"
-            lines.append(f"[{colour}]●[/] [bold]{src[-1]}[/]  {num}")
-        self.query_one("#reconnect-strip", Static).update("\n".join(lines))
-
     async def refresh_coverage(self) -> None:
         """Fleet-coverage panel: how much of the in-scope LNG fleet we are
         actually hearing (live/stale/blind), the subscribed total, the
@@ -919,47 +945,51 @@ class TankerFlowApp(App):
         if not self._pool:
             return
         try:
-            tier_rows, scan_event, in_slot_summary, promo_rows, scoring_row = (
-                await asyncio.gather(
-                    self._pool.fetch(
-                        """
+            (
+                tier_rows,
+                scan_event,
+                in_slot_summary,
+                promo_rows,
+                scoring_row,
+            ) = await asyncio.gather(
+                self._pool.fetch(
+                    """
                             SELECT tier,
                                    COUNT(*) AS n,
                                    COUNT(*) FILTER (WHERE in_slot) AS n_in_slot
                             FROM priority_watchlist
                             GROUP BY tier ORDER BY tier
                             """
-                    ),
-                    self._pool.fetchrow(
-                        """
+                ),
+                self._pool.fetchrow(
+                    """
                             SELECT MAX(event_ts) AS last_sub
                             FROM ingestion_events
                             WHERE source = $1 AND event_type = 'subscribed'
                             """,
-                        _HOME_SCAN_SOURCE,
-                    ),
-                    self._pool.fetchrow(
-                        """
+                    _HOME_SCAN_SOURCE,
+                ),
+                self._pool.fetchrow(
+                    """
                             SELECT
                                 COUNT(*) FILTER (WHERE slot_kind IN ('persistent', 'pinned')) AS n_persistent,
                                 COUNT(*) FILTER (WHERE slot_kind = 'pinned') AS n_pinned,
                                 COUNT(*) FILTER (WHERE slot_kind = 'scan') AS n_scan
                             FROM priority_watchlist
                             """
-                    ),
-                    self._pool.fetch(
-                        """
+                ),
+                self._pool.fetch(
+                    """
                             SELECT pw.mmsi, pw.tier, pw.score_reason,
                                    vr.vessel_name
                             FROM priority_watchlist pw
                             JOIN vessel_registry vr USING (mmsi)
                             WHERE pw.in_slot AND pw.slot_kind = 'persistent'
                             """
-                    ),
-                    self._pool.fetchrow(
-                        "SELECT MAX(computed_at) AS last_scoring FROM priority_watchlist"
-                    ),
-                )
+                ),
+                self._pool.fetchrow(
+                    "SELECT MAX(computed_at) AS last_scoring FROM priority_watchlist"
+                ),
             )
         except Exception:
             return
@@ -1022,7 +1052,9 @@ class TankerFlowApp(App):
         for r in promo_log:
             ago = _fmt_age((now - r["promoted_at"]).total_seconds())
             name = r["vessel_name"].strip() if r["vessel_name"] else f"MMSI {r['mmsi']}"
-            tier_cell = f"{_tier_chip(r['old_tier'])}[dim]→[/]{_tier_chip(r['new_tier'])}"
+            tier_cell = (
+                f"{_tier_chip(r['old_tier'])}[dim]→[/]{_tier_chip(r['new_tier'])}"
+            )
             where = r["zone"] or r["reason"] or ""
             promo_table.add_row(ago, name, tier_cell, r["via"], f"[dim]{where}[/]")
 
@@ -1121,11 +1153,10 @@ class TankerFlowApp(App):
             )
 
     async def refresh_slow_stats(self) -> None:
-        """Watchlist coverage + silent-vessels table, on the 30s timer.
-
-        "Silent" is restricted to vessels with strong evidence they actually
-        stopped reporting while in coverage, rather than just sailing out of
-        the terrestrial-AIS envelope.
+        """Watchlist coverage counts (reporting / silent / dormant) for the
+        status row, on the 30s timer. "Silent" is restricted to vessels with
+        strong evidence they actually stopped reporting while in coverage (near
+        a terminal, slow), not just sailing out of the terrestrial-AIS envelope.
         """
         if not self._pool:
             return
@@ -1163,12 +1194,8 @@ class TankerFlowApp(App):
 
         now = datetime.now(timezone.utc)
         reporting = silent = dormant = 0
-        silent_rows: list[tuple[int, str, int, float, float]] = []
         for r in rows:
             ts = r["ts"]
-            lat, lon = r["lat"], r["lon"]
-            sog = r["sog"]
-            near_terminal = r["near_terminal"]
             if ts is None:
                 dormant += 1
                 continue
@@ -1177,35 +1204,19 @@ class TankerFlowApp(App):
                 reporting += 1
             elif (
                 age_s < 86400
-                and near_terminal
-                and (sog is None or sog < 8.0)
+                and r["near_terminal"]
+                and (r["sog"] is None or r["sog"] < 8.0)
             ):
+                # Near a terminal, slow, and gone quiet — strong evidence of a
+                # real silence (feeds the status-row watchlist coverage cell).
                 silent += 1
-                silent_rows.append(
-                    (r["mmsi"], r["vessel_name"] or "—", age_s, lat, lon)
-                )
             else:
                 dormant += 1
 
         self._watchlist_stats = (len(rows), reporting, silent, dormant)
 
-        silent_rows.sort(key=lambda r: -r[2])
-        table = self.query_one("#stale-table", DataTable)
-        table.clear()
-        for mmsi, name, age_s, lat, lon in silent_rows[:15]:
-            if age_s < 3600:
-                age_label = f"[yellow]{age_s // 60}m[/yellow]"
-            elif age_s < 86400:
-                age_label = f"[red]{age_s // 3600}h{(age_s % 3600) // 60}m[/red]"
-            else:
-                age_label = f"[red]{age_s // 86400}d[/red]"
-            zone = _classify_zone(lat, lon)
-            zone_color = _ZONE_COLORS.get(zone, "white") if zone else "dim"
-            zone_label = f"[{zone_color}]{zone}[/]" if zone else "[dim]—[/dim]"
-            table.add_row(name, str(mmsi), age_label, zone_label)
-
     async def refresh_data(self) -> None:
-        """Fast 2s timer: status row, charts, per-source strip, zone bar."""
+        """Fast 2s timer: status row, charts, connections table, summary."""
         if not self._pool:
             return
 
@@ -1262,7 +1273,7 @@ class TankerFlowApp(App):
                         FROM ingestion_events
                         WHERE source LIKE 'aisstream%'
                           AND event_type IN ('connect','subscribed','planned_reconnect','watchdog_reconnect')
-                          AND event_ts > now() - INTERVAL '30 minutes'
+                          AND event_ts > now() - INTERVAL '75 minutes'
                         GROUP BY source
                         """
                 ),
@@ -1303,39 +1314,36 @@ class TankerFlowApp(App):
         if vstate_row is not None:
             self._vessel_state_rate = (
                 int(vstate_row["rows_1h"] or 0),
-                int(vstate_row["last_age_s"]) if vstate_row["last_age_s"] is not None else None,
+                int(vstate_row["last_age_s"])
+                if vstate_row["last_age_s"] is not None
+                else None,
             )
 
-        # --- Connection-liveness summary for the status row ---
-        fix_ages: dict[str, int] = {row["source"]: row["age_s"] for row in conn_age_rows}
-        evt_ages: dict[str, int] = {row["source"]: row["age_s"] for row in lifecycle_age_rows}
-        active = sum(1 for s in _EXPECTED_SOURCES if fix_ages.get(s, 10**9) < 120)
-        silent_n = sum(
-            1
-            for s in _EXPECTED_SOURCES
-            if fix_ages.get(s, 10**9) >= 120 and evt_ages.get(s, 10**9) < 600
-        )
-        dead = len(_EXPECTED_SOURCES) - active - silent_n
-        # Three coloured dots — one per source — read at a glance.
-        dots = []
-        for s in _EXPECTED_SOURCES:
-            fa = fix_ages.get(s, 10**9)
-            ea = evt_ages.get(s, 10**9)
-            if fa < 120:
-                dots.append("[green]●[/]")
-            elif ea < 600:
-                dots.append("[cyan]●[/]")
-            else:
-                dots.append("[red]●[/]")
-        if active == len(_EXPECTED_SOURCES):
+        # --- Per-connection liveness (shared by the status row + the table) ---
+        # Role-aware: an idle catch-all/scan is 'idle' (normal), a silent
+        # persistent conn is 'down'. Computed once, reused below.
+        fix_ages: dict[str, float] = {r["source"]: r["age_s"] for r in conn_age_rows}
+        evt_ages: dict[str, float] = {
+            r["source"]: r["age_s"] for r in lifecycle_age_rows
+        }
+        conn_state: dict[str, str] = {
+            c.source: _conn_state(
+                c.role, fix_ages.get(c.source, 1e9), evt_ages.get(c.source, 1e9)
+            )
+            for c in _CONNECTIONS
+        }
+        states = list(conn_state.values())
+        up, idle, dead = states.count("up"), states.count("idle"), states.count("down")
+        dots = "".join(_STATE_DOT[conn_state[c.source]] for c in _CONNECTIONS)
+        if dead == 0 and idle == 0:
             conn_word = "[green]live[/]"
         elif dead == 0:
             conn_word = "[cyan]alive[/]"
-        elif active + silent_n > 0:
+        elif up + idle > 0:
             conn_word = "[yellow]degraded[/]"
         else:
             conn_word = "[red]down[/]"
-        conn_label = f"{''.join(dots)} {conn_word}"
+        conn_label = f"{dots} {conn_word}"
 
         # --- Watchlist coverage cell ---
         if self._watchlist_stats is None:
@@ -1354,17 +1362,11 @@ class TankerFlowApp(App):
         elif self._last_scoring_age_s > 5400:
             # >90 min — scoring runs every 60 min, this means the background
             # task is stalled.
-            scoring_label = (
-                f"[red]scoring {_fmt_age(self._last_scoring_age_s)}[/]"
-            )
+            scoring_label = f"[red]scoring {_fmt_age(self._last_scoring_age_s)}[/]"
         elif self._last_scoring_age_s > 3900:
-            scoring_label = (
-                f"[yellow]scoring {_fmt_age(self._last_scoring_age_s)}[/]"
-            )
+            scoring_label = f"[yellow]scoring {_fmt_age(self._last_scoring_age_s)}[/]"
         else:
-            scoring_label = (
-                f"scoring [green]{_fmt_age(self._last_scoring_age_s)}[/]"
-            )
+            scoring_label = f"scoring [green]{_fmt_age(self._last_scoring_age_s)}[/]"
 
         # --- vessel_state ingest cell (D) ---
         if self._vessel_state_rate is None:
@@ -1388,84 +1390,73 @@ class TankerFlowApp(App):
             f"{vstate_label}{sep}{now_str}"
         )
 
-        # --- Per-source strip border colour mirrors the aggregate liveness ---
-        strip = self.query_one("#per-source-strip", Horizontal)
+        # --- Connections panel border mirrors the aggregate liveness ---
+        panel = self.query_one("#connections-panel", Vertical)
         for cls in ("ok", "warn", "bad"):
-            strip.remove_class(cls)
-        if active == len(_EXPECTED_SOURCES):
-            strip.add_class("ok")
-        elif active + silent_n > 0:
-            strip.add_class("warn")
-        else:
-            strip.add_class("bad")
+            panel.remove_class(cls)
+        panel.add_class("ok" if dead == 0 else ("warn" if up + idle > 0 else "bad"))
 
-        # --- Per-source granularity strip (live + overnight roll-up) ---
+        # --- Connections table: one scannable row per WebSocket ---
         ps_map = {r["source"]: r for r in per_source_rows}
-        for i, src in enumerate(_EXPECTED_SOURCES):
-            row = ps_map.get(src)
-            ov = self._overnight.get(src, {})
-            scan_src = src.endswith("-3")
+        table = self.query_one("#connections-table", DataTable)
+        table.clear()
+        for c in _CONNECTIONS:
+            row = ps_map.get(c.source)
+            ov = self._overnight.get(c.source, {})
 
-            # Live block (last 5 min)
-            if row is None:
-                live_line = "[dim]live  —  no data in 5m[/]"
-                meta_line = ""
+            # Live (last 5m): fix count + p95 lag.
+            if not row or not row["fix_count"]:
+                live = "[dim]no fix · 5m[/]"
             else:
-                mean = float(row["mean_s"] or 0.0)
                 p95 = float(row["p95_s"] or 0.0)
-                mmsi = row["distinct_mmsi"] or 0
-                fc = row["fix_count"] or 0
-                lag_color = (
-                    "green" if p95 < 10 else "yellow" if p95 < 30 else "red"
-                )
-                live_line = (
-                    f"[dim]live[/]  lag [{lag_color}]{mean:.1f}/{p95:.1f}s[/]"
-                    f"  fix {fc:>3}  mmsi {mmsi:>2}"
-                )
-                meta_line = ""
+                lag_color = "green" if p95 < 10 else "yellow" if p95 < 30 else "red"
+                live = f"[bold]{int(row['fix_count']):>3}[/] fix · [{lag_color}]{p95:.0f}s[/]"
 
-            # Overnight block (12h)
+            # 12h: total fixes + missing-minute %, lenient for the sparse conns
+            # (scan/catch-all are idle most minutes by design — not a fault).
             if ov:
-                fixes_12h = int(ov["fixes_12h"])
-                missing_min = int(ov["missing_min"])
-                worst_gap = int(ov["worst_gap_min"])
-                # Format fixes with k suffix above 1000.
-                fixes_fmt = (
-                    f"{fixes_12h / 1000:.1f}k" if fixes_12h >= 1000 else f"{fixes_12h}"
-                )
-                # Sparse-by-design source 3 has wider tolerances.
-                gap_red_thresh = 60 if scan_src else 30
-                gap_yel_thresh = 30 if scan_src else 10
-                if worst_gap >= gap_red_thresh:
-                    gap_color = "red"
-                elif worst_gap >= gap_yel_thresh:
-                    gap_color = "yellow"
-                else:
-                    gap_color = "green"
-                # missing-minute % of 12h window
-                miss_pct = missing_min * 100.0 / 720
-                miss_color = (
-                    "green" if miss_pct < (50 if scan_src else 10)
-                    else "yellow" if miss_pct < (80 if scan_src else 30)
-                    else "red"
-                )
-                ov_line = (
-                    f"[dim]12h [/] {fixes_fmt:>5} fixes"
-                    f"  worst-gap [{gap_color}]{worst_gap}m[/]"
-                    f"  miss [{miss_color}]{miss_pct:.0f}%[/]"
-                )
+                f12 = int(ov["fixes_12h"])
+                f12_fmt = f"{f12 / 1000:.1f}k" if f12 >= 1000 else str(f12)
+                miss = int(ov["missing_min"]) * 100.0 / 720
+                lo, hi = (60, 85) if c.sparse else (10, 30)
+                mcol = "green" if miss < lo else "yellow" if miss < hi else "red"
+                twelve = f"{f12_fmt:>5} · [{mcol}]{miss:.0f}%↓[/]"
             else:
-                ov_line = "[dim]12h   loading…[/]"
+                twelve = "[dim]…[/]"
 
-            # Show the real source label ('mmsi-1' single-worker, 'w0-1'/'w1-3'
-            # when sharded) so the two workers' connections are distinguishable.
-            head = f"[bold]{src.replace('aisstream-', '')}[/]"
-            if scan_src:
-                head += " [dim](scan)[/]"
-            else:
-                head += " [dim](persistent)[/]"
-            content = "\n".join([head, live_line, ov_line, meta_line]).rstrip("\n")
-            self.query_one(f"#per-source-{i + 1}", Static).update(content)
+            # Reconnects (12h): planned (≈1/h) vs watchdog (AISstream forced drops).
+            wd = int(ov.get("watchdog_12h", 0)) if ov else 0
+            planned = int(ov.get("planned_12h", 0)) if ov else 0
+            ok_wd = wd == 0 or c.sparse or wd <= max(1, planned // 2)
+            wcol = "green" if wd == 0 else ("yellow" if ok_wd else "red")
+            reconn = f"{planned}p · [{wcol}]{wd}wd[/]"
+
+            table.add_row(
+                _STATE_DOT[conn_state[c.source]],
+                f"[bold]{c.source.replace('aisstream-', '')}[/]",
+                c.egress,
+                f"[{_ROLE_COLOR.get(c.role, 'white')}]{c.role}[/]",
+                f"[dim]{c.covers}[/]",
+                live,
+                twelve,
+                reconn,
+            )
+
+        # --- Connections summary line above the table ---
+        n_persist = sum(1 for c in _CONNECTIONS if c.role == "persistent")
+        has_bbox = any(c.role == "catch-all" for c in _CONNECTIONS)
+        summary = [f"[bold]{up}[/]/{len(_CONNECTIONS)} up"]
+        if idle:
+            summary.append(f"[cyan]{idle} idle[/]")
+        if dead:
+            summary.append(f"[red]{dead} down[/]")
+        summary.append(f"{n_persist} persistent [dim](~{n_persist * 50} vessels)[/]")
+        if has_bbox:
+            summary.append("[bright_cyan]+ bbox catch-all[/]")
+        summary.append(f"{_WORKER_COUNT} egress IP{'s' if _WORKER_COUNT > 1 else ''}")
+        self.query_one("#connections-summary", Static).update(
+            "  [dim]·[/]  ".join(summary)
+        )
 
         # --- Long-term chart (fixes/hour) ---
         lt_data = [float(row["cnt"]) for row in lt_bucket_rows]
@@ -1525,78 +1516,6 @@ class TankerFlowApp(App):
             f"[bright_red]●[/] p95 [bold]{v_p95_now:.1f}s[/]"
             f"  [dim](peak {v_p95_peak:.1f}s)[/]"
         )
-
-    async def refresh_terminal_panel(self) -> None:
-        """Per-terminal vessel count + newest-fix age over the same 6h /
-        aisstream-only window the zone-occupancy bar uses, so terminal
-        activity reads as a sum-breakdown of zone occupancy.
-
-        Three things matter in this query:
-        - dedupe a fix that falls in multiple sub-polygons (berth + anchorage
-          can overlap) via the DISTINCT in the CTE
-        - skip non-matching LEFT JOIN rows via COUNT(... FILTER), otherwise
-          `COUNT(*)` counts the polygon rows themselves and a terminal with
-          three polygons + zero fixes still shows '3'
-        - filter to `aisstream%` so the count matches zone occupancy
-        """
-        if not self._pool:
-            return
-        try:
-            rows = await self._pool.fetch(
-                """
-                WITH per_fix AS (
-                    SELECT DISTINCT t.terminal_id, t.zone, t.terminal_name,
-                                    f.mmsi, f.fix_ts
-                    FROM terminals t
-                    JOIN terminal_zones tz USING (terminal_id)
-                    LEFT JOIN ais_fixes f
-                      ON f.fix_ts > now() - INTERVAL '6 hours'
-                     AND f.source LIKE 'aisstream%'
-                     AND ST_Within(
-                           ST_SetSRID(ST_Point(f.lon, f.lat), 4326),
-                           tz.geom
-                         )
-                    WHERE t.in_signal_scope
-                )
-                SELECT terminal_id, zone, terminal_name,
-                       COUNT(DISTINCT mmsi) FILTER (WHERE fix_ts IS NOT NULL) AS vessels_6h,
-                       COUNT(fix_ts) AS fixes_6h,
-                       EXTRACT(EPOCH FROM (now() - MAX(fix_ts)))::int AS age_s
-                FROM per_fix
-                GROUP BY terminal_id, zone, terminal_name
-                ORDER BY zone, terminal_name
-                """
-            )
-        except Exception:
-            return
-
-        table = self.query_one("#terminal-table", DataTable)
-        table.clear()
-        for row in rows:
-            age_s = row["age_s"]
-            vessels = row["vessels_6h"] or 0
-            fixes = row["fixes_6h"] or 0
-            zone = row["zone"] or "—"
-            zone_color = _ZONE_COLORS.get(zone, "white")
-            if age_s is None:
-                age_label = "[dim]>6h[/]"
-            elif age_s < 60:
-                age_label = f"[green]{age_s}s[/]"
-            elif age_s < 600:
-                age_label = f"[yellow]{age_s // 60}m{age_s % 60:02d}s[/]"
-            elif age_s < 3600:
-                age_label = f"[yellow]{age_s // 60}m[/]"
-            else:
-                age_label = f"[red]{age_s // 3600}h{(age_s % 3600) // 60:02d}m[/]"
-            vessel_cell = f"[bold]{vessels}[/]" if vessels else "[dim]0[/]"
-            fix_cell = f"{fixes:,}" if fixes else "[dim]0[/]"
-            table.add_row(
-                f"[{zone_color}]{zone}[/]",
-                row["terminal_name"],
-                vessel_cell,
-                fix_cell,
-                age_label,
-            )
 
 
 if __name__ == "__main__":
