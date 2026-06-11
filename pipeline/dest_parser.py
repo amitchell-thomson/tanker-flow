@@ -98,6 +98,14 @@ FREEFORM_TO_LOCODE: dict[str, str] = {
     "CAMERON": "USCAU",
     "FREEPORT": "USFPO",
     "GOLDENPASS": "USPSX",
+    # Operator shorthand seen in real US-Gulf LNG traffic, resolved by where the
+    # declaring carriers actually moor (DB audit 2026-06-11, not the design doc's
+    # stale counts): "USNSS"/"US NSS" → Sabine Pass (41 carriers declare it, 31
+    # next-moor at Sabine); "USLCH"/"US LCH" (Lake Charles) → Calcasieu Pass (12
+    # carriers, 9 next-moor there). The internal space is stripped before lookup,
+    # so the spaced and unspaced forms hit the same key.
+    "USNSS": "USSAB",
+    "USLCH": "USCLU",
     # US Atlantic
     "COVEPOINT": "USCVL",
     "ELBAISLAND": "USEII",

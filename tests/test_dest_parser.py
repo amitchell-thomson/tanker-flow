@@ -17,6 +17,7 @@ LOCODES = {
     "BEZEE": 12,
     "USSAB": 1,
     "USPLQ": 2,
+    "USCLU": 3,
     "USCRP": 4,
     "USCAU": 5,
     "USFPO": 6,
@@ -65,7 +66,8 @@ def test_chained_destination_uses_rhs():
     # the next destination.
     assert parse_destination("USSAB>NLRTM", LOCODES) == (10, False)
     assert parse_destination("USFPO > NLRTM", LOCODES) == (10, False)
-    assert parse_destination("KRYOS > USNSS", LOCODES) == (None, False)
+    # RHS that resolves to no terminal we track → None (USXXX is unmapped).
+    assert parse_destination("KRYOS > USXXX", LOCODES) == (None, False)
 
 
 def test_chained_to_for_orders():
@@ -86,10 +88,25 @@ def test_freeform_with_spaces():
 
 
 def test_unknown_returns_none():
-    # USNSS appears 6000+ times in our data but isn't a known LNG terminal
-    # LOCODE (looks like operator shorthand). We don't fail — we return None.
-    assert parse_destination("USNSS", LOCODES) == (None, False)
+    # Real US-Gulf ports we deliberately DON'T track (Galveston, Houston,
+    # Beaumont/Port Arthur area) must stay unresolved — mapping them would
+    # mis-attribute non-LNG-terminal traffic. (USNSS/USLCH are handled
+    # separately below; a 2026-06-11 DB audit confirmed they're really ours.)
+    assert parse_destination("USGLS", LOCODES) == (None, False)
+    assert parse_destination("USHOU", LOCODES) == (None, False)
     assert parse_destination("RANDOM GARBAGE", LOCODES) == (None, False)
+
+
+def test_us_gulf_operator_shorthand_aliases():
+    # Data-grounded aliases (2026-06-11 audit of where declaring LNG carriers
+    # actually moor): USNSS → Sabine Pass, USLCH (Lake Charles) → Calcasieu Pass.
+    # Both the spaced and unspaced forms normalise to the same key.
+    assert parse_destination("USNSS", LOCODES) == (1, False)
+    assert parse_destination("US NSS", LOCODES) == (1, False)
+    assert parse_destination("USLCH", LOCODES) == (3, False)
+    assert parse_destination("US LCH", LOCODES) == (3, False)
+    # A named alias still wins over an appended "FOR ORDERS" qualifier.
+    assert parse_destination("USNSS FOR ORDERS", LOCODES) == (1, False)
 
 
 def test_terminal_not_in_provided_locodes_returns_none():
