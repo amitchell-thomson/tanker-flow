@@ -12,6 +12,10 @@ services:
       - ./db/init:/docker-entrypoint-initdb.d:ro
     ports:
       - "127.0.0.1:5432:5432"
+      # Tailnet-only exposure for the second-egress ingester (worker-1 on the
+      # Oracle VM reaches the DB at the home node's Tailscale IP). NOT 0.0.0.0 —
+      # the public/LAN interface stays closed; scram still authenticates.
+      - "100.117.10.28:5432:5432"
     shm_size: 256mb
     command: >
       postgres
@@ -19,7 +23,7 @@ services:
         -c effective_cache_size=24GB
         -c work_mem=64MB
         -c maintenance_work_mem=512MB
-        -c max_connections=20
+        -c max_connections=40
         -c wal_compression=on
         -c timescaledb.telemetry_level=off
 
