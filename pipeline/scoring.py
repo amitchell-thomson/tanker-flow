@@ -10,9 +10,12 @@ Tier definitions (also documented in CLAUDE.md):
     1 — recent fix inside any terminal_zones polygon (within 3d) — must be
         plausibly *currently* in zone, not "was there a week ago and is now
         mid-Atlantic"
-    2 — vessel_state.dest parses to a known terminal AND (state_ts < 14d old
-        OR a parsed ETA within ETA_IMMINENT_HOURS — the ETA path rescues
-        long-voyage vessels whose declaration is stale but arrival is near)
+    2 — a parsed ETA within ETA_IMMINENT_HOURS ahead (or ETA_PAST_GRACE_HOURS
+        just past — a slightly-late vessel stays pinned through berthing),
+        regardless of whether the declared dest resolves ("FOR ORDERS" carriers
+        still count), OR vessel_state.dest parses to a known terminal with
+        state_ts < 14d old. The ETA path rescues long-voyage vessels whose
+        declaration is stale or absent but whose arrival is imminent
     3 — recent fix inside any config.ZONES rectangle (within 14d), not 1/2;
         ordered within-tier by closing-ness (proximity + heading to the nearest
         zone, see _closing_bonus) so the scarce slots go to vessels approaching
@@ -228,14 +231,24 @@ async def load_unlocode_map(conn: asyncpg.Connection) -> dict[str, int]:
 
 # --- Predictive promotion + closing-ness tuning (watchlist coverage) ---
 #
-# Item 2 — imminent-ETA promotion. A vessel with a destination that resolves to
-# a known terminal AND a parsed ETA within this horizon is force-promoted into
-# the persistent band (tier 2) even when its vessel_state is older than the
-# 14-day tier-2 freshness window. An imminent ETA is itself a freshness signal,
-# and these are exactly the inbound vessels we must not lose to tier-decay on a
-# long voyage. Gated on a resolved terminal: an ETA to an unrecognised port is
-# not actionable enough to spend a scarce persistent slot on.
+# Item 2 — imminent-ETA promotion. A vessel with a parsed ETA within this horizon
+# is force-promoted into the persistent band (tier 2) even when its vessel_state
+# is older than the 14-day tier-2 freshness window. An imminent ETA is itself a
+# freshness signal, and these are exactly the inbound vessels we must not lose to
+# tier-decay on a long voyage. The ETA path is NOT gated on a resolved terminal:
+# a ballast carrier approaching a US load terminal commonly broadcasts a real ETA
+# but "FOR ORDERS" as its destination (the discharge port is still being traded),
+# which leaves dest_terminal_id NULL — yet the arrival is real and imminent and we
+# must hold a slot through final approach (VENTURE CREOLE went dark this way,
+# 2026-06). The plain dest-declaration path below still requires a resolved
+# terminal, since a fresh "FOR ORDERS" alone carries no arrival timing.
 ETA_IMMINENT_HOURS = 48
+# A just-passed ETA still holds the slot for this grace window: an inbound vessel
+# is at its most arrival-critical right around its declared ETA, and ETAs are
+# routinely a few hours optimistic. Without grace, a vessel running slightly late
+# drops out of the persistent band at the worst possible moment — exactly during
+# final approach / berthing. Mirrors vf_rescue's ETA_RESCUE_PAST_GRACE_HOURS.
+ETA_PAST_GRACE_HOURS = 12
 # Large base so imminent-ETA vessels sort above plain dest-declarations within
 # tier 2 (sooner ETA ⇒ higher score). Well above epoch-second scores (~1.7e9)
 # yet representable in the REAL score column.
@@ -365,21 +378,34 @@ def assign_tier(
         )
         return (1, f"in-zone:{label} @ {ts:%Y-%m-%d}", score)
 
-    # Tier 2 — declared inbound to a known terminal. Fires on EITHER a fresh
-    # vessel_state (state_ts < 14d) OR an imminent parsed ETA regardless of
-    # state age. The ETA path rescues long-voyage vessels whose "bound for X"
-    # declaration is now stale but whose arrival is imminent (Item 2).
-    eta_imminent = parsed_eta is not None and now <= parsed_eta <= now + timedelta(
-        hours=ETA_IMMINENT_HOURS
+    # Tier 2 — inbound to the persistent band. Fires on EITHER an imminent parsed
+    # ETA (regardless of state age OR whether the declared dest resolves) OR a
+    # fresh dest-declaration to a known terminal. The ETA path rescues long-voyage
+    # vessels whose arrival is imminent, including "FOR ORDERS" carriers with no
+    # parseable dest (Item 2).
+    eta_imminent = parsed_eta is not None and (
+        now - timedelta(hours=ETA_PAST_GRACE_HOURS)
+        <= parsed_eta
+        <= now + timedelta(hours=ETA_IMMINENT_HOURS)
     )
-    if dest_terminal_id and ((state_ts and state_ts > fourteen_days) or eta_imminent):
-        if eta_imminent:
-            hours_to_eta = (parsed_eta - now).total_seconds() / 3600.0
-            return (
-                2,
-                f"eta:terminal_id={dest_terminal_id} in {hours_to_eta:.0f}h",
-                ETA_SCORE_BASE - (parsed_eta - now).total_seconds(),
-            )
+    if eta_imminent:
+        hours_to_eta = (parsed_eta - now).total_seconds() / 3600.0
+        dest_label = (
+            f"terminal_id={dest_terminal_id}" if dest_terminal_id else "for-orders"
+        )
+        # Negative hours_to_eta ⇒ ETA already passed (within grace); render as
+        # "Nh ago" so the reason stays readable.
+        when = (
+            f"in {hours_to_eta:.0f}h"
+            if hours_to_eta >= 0
+            else f"{-hours_to_eta:.0f}h ago"
+        )
+        return (
+            2,
+            f"eta:{dest_label} {when}",
+            ETA_SCORE_BASE - (parsed_eta - now).total_seconds(),
+        )
+    if dest_terminal_id and state_ts and state_ts > fourteen_days:
         return (
             2,
             f"dest:terminal_id={dest_terminal_id} @ {state_ts:%Y-%m-%d}",

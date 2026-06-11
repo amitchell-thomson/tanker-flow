@@ -12,6 +12,8 @@ from datetime import datetime, timedelta, timezone
 
 from pipeline.scoring import (
     DEFAULT_VOYAGE_DAYS,
+    ETA_IMMINENT_HOURS,
+    ETA_PAST_GRACE_HOURS,
     FSRU_TIER,
     PIN_MAX,
     PIN_POST_WINDOW_DAYS,
@@ -64,6 +66,74 @@ def test_non_fsru_at_berth_still_scores_tier_1():
         False, last_berth_fix_ts=berth_fix, last_polygon_fix_ts=berth_fix
     )
     assert tier == 1
+
+
+def test_imminent_eta_without_dest_promotes_to_tier_2():
+    # VENTURE CREOLE case: a ballast carrier broadcasting "FOR ORDERS" (so
+    # dest_terminal_id is NULL) with a real imminent ETA must still take a
+    # persistent slot, not decay to tier 3 and go dark on final approach.
+    tier, reason, _score = _assign(
+        False,
+        dest_terminal_id=None,
+        state_ts=None,
+        parsed_eta=NOW + timedelta(hours=6),
+        last_bbox_fix_ts=NOW - timedelta(days=2),  # would otherwise be tier 3
+    )
+    assert tier == 2
+    assert "eta:for-orders" in reason
+
+
+def test_imminent_eta_with_dest_keeps_terminal_label():
+    tier, reason, _score = _assign(
+        False,
+        dest_terminal_id=7,
+        parsed_eta=NOW + timedelta(hours=6),
+    )
+    assert tier == 2
+    assert "terminal_id=7" in reason
+
+
+def test_just_passed_eta_still_holds_slot_within_grace():
+    # A vessel running slightly late (ETA a few hours ago) is at its most
+    # arrival-critical moment — it must stay in tier 2 through berthing.
+    tier, reason, _score = _assign(
+        False,
+        dest_terminal_id=None,
+        parsed_eta=NOW - timedelta(hours=ETA_PAST_GRACE_HOURS - 2),
+        last_bbox_fix_ts=NOW - timedelta(days=2),
+    )
+    assert tier == 2
+    assert "ago" in reason
+
+
+def test_eta_past_grace_window_does_not_promote():
+    # Beyond the grace window the ETA is stale, not late — fall through.
+    tier, _reason, _score = _assign(
+        False,
+        dest_terminal_id=None,
+        parsed_eta=NOW - timedelta(hours=ETA_PAST_GRACE_HOURS + 2),
+        last_bbox_fix_ts=NOW - timedelta(days=2),
+    )
+    assert tier == 3
+
+
+def test_non_imminent_eta_without_dest_does_not_promote():
+    # An ETA beyond the horizon is not an arrival signal; with no other freshness
+    # the vessel falls through to its position-based tier (here tier 3 via bbox).
+    tier, reason, _score = _assign(
+        False,
+        dest_terminal_id=None,
+        parsed_eta=NOW + timedelta(hours=ETA_IMMINENT_HOURS + 12),
+        last_bbox_fix_ts=NOW - timedelta(days=2),
+    )
+    assert tier == 3
+    assert "for-orders" not in reason
+
+
+def test_sooner_eta_outscores_later_eta_within_tier_2():
+    _t1, _r1, soon = _assign(False, parsed_eta=NOW + timedelta(hours=3))
+    _t2, _r2, later = _assign(False, parsed_eta=NOW + timedelta(hours=40))
+    assert soon > later
 
 
 def _leg(
