@@ -20,7 +20,7 @@ Layout is organised into three horizontal bands:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import asyncpg
 from pydantic_settings import BaseSettings
@@ -32,6 +32,8 @@ from textual.widgets import DataTable, Input, Label, Static
 from textual_hires_canvas import Canvas as _HiResCanvas
 from textual_plot import AxisFormatter, HiResMode, NumericAxisFormatter, PlotWidget
 
+from data import coverage as cov
+from ingestion import vf_rescue
 from ingestion.vf_rescue import CREDIT_RESERVE_ESTIMATE, DAILY_CREDIT_CAP
 
 _THEME = Theme(
@@ -300,8 +302,8 @@ class TankerFlowApp(App):
         padding: 0 1;
     }
 
-    #health-tables { height: 7; }
-    #errors-container, #reconnect-container {
+    #health-tables { height: 8; }
+    #errors-container, #coverage-container, #reconnect-container {
         border: round #7a7a7a;
         border-title-color: #c0c0c0;
         border-title-style: bold;
@@ -310,6 +312,8 @@ class TankerFlowApp(App):
     #errors-container.ok  { border: round #2c5e3a; border-title-color: ansi_bright_green; }
     #errors-container.bad { border: round #6b1a1a; border-title-color: ansi_bright_red;   }
     #errors-container { width: 2fr; }
+    #coverage-container { width: 2fr; }
+    #coverage-panel { height: 1fr; padding: 0 0; }
     #reconnect-container { width: 1fr; }
     #errors-table {
         height: 1fr;
@@ -520,6 +524,8 @@ class TankerFlowApp(App):
                         id="errors-empty",
                         markup=True,
                     )
+                with Vertical(id="coverage-container"):
+                    yield Static("…", id="coverage-panel", markup=True)
                 with Vertical(id="reconnect-container"):
                     yield Static("…", id="reconnect-strip", markup=True)
             with Horizontal(id="charts-row"):
@@ -603,6 +609,9 @@ class TankerFlowApp(App):
         self.query_one("#errors-container", Vertical).border_title = (
             "Recent errors · ingestion_events"
         )
+        self.query_one("#coverage-container", Vertical).border_title = (
+            "Fleet coverage · data/coverage"
+        )
         self.query_one("#reconnect-container", Vertical).border_title = (
             "Reconnects · 12h"
         )
@@ -651,6 +660,9 @@ class TankerFlowApp(App):
         asyncio.create_task(self.refresh_watchlist_panels())
         self.set_interval(30, self.refresh_errors_and_reconnects)
         asyncio.create_task(self.refresh_errors_and_reconnects())
+        # Coverage panel changes slowly + the fleet query is heavier — 60s.
+        self.set_interval(60, self.refresh_coverage)
+        asyncio.create_task(self.refresh_coverage())
         self.set_interval(30, self.refresh_explorer)
         asyncio.create_task(self.refresh_explorer())
         self.set_interval(30, self.refresh_vf_rescue)
@@ -803,6 +815,40 @@ class TankerFlowApp(App):
                 colour = "green"
             lines.append(f"[{colour}]●[/] [bold]{src[-1]}[/]  {num}")
         self.query_one("#reconnect-strip", Static).update("\n".join(lines))
+
+    async def refresh_coverage(self) -> None:
+        """Fleet-coverage panel: how much of the in-scope LNG fleet we are
+        actually hearing (live/stale/blind), the subscribed total, the
+        cold-start mooring rate, and unmet rescue demand. Reuses
+        data.coverage.compute so this panel and `make coverage` never drift
+        (analysis/DATA_QUALITY.md §1). 60s timer — the fleet query is heavier."""
+        if not self._pool:
+            return
+        try:
+            s = await cov.compute(self._pool, now=datetime.now(timezone.utc))
+        except Exception:
+            return
+
+        b = s.buckets
+        heard = "—" if s.heard_rate is None else f"{s.heard_rate * 100:.0f}%"
+        cold_rate = s.cold_start_rate or 0.0
+        cold = "—" if s.cold_start_rate is None else f"{cold_rate * 100:.1f}%"
+        cold_colour = (
+            "red" if cold_rate >= 0.15 else "yellow" if cold_rate > 0 else "green"
+        )
+        unmet_colour = "red" if s.unmet_today else "green"
+        lines = [
+            f"[dim]fleet[/] [b]{s.fleet_total}[/] "
+            f"[dim]· heard≤{cov.STALE_MAX_DAYS}d[/] [b]{heard}[/]",
+            f"[green]live {b['live']}[/] [dim]·[/] [yellow]stale {b['stale']}[/]",
+            f"[red]blind {b['blind']}[/] [dim]·[/] [dim]unseen {b['unseen']}[/]",
+            f"[dim]subscribed[/] [b]{s.in_slot_total}[/][dim]/{s.fleet_total}[/]",
+            f"[dim]cold-start[/] [{cold_colour}]{cold}[/] "
+            f"[dim]({s.cold_starts}/{s.moored_recent}·{cov.COLDSTART_WINDOW_DAYS}d)[/]",
+            f"[dim]unmet rescue[/] [{unmet_colour}]{s.unmet_today}[/] today "
+            f"[dim]· {s.unmet_week}/7d[/]",
+        ]
+        self.query_one("#coverage-panel", Static).update("\n".join(lines))
 
     async def refresh_explorer(self) -> None:
         """Full priority_watchlist explorer with tier / sort / name filters."""
@@ -1014,19 +1060,47 @@ class TankerFlowApp(App):
 
         now = datetime.now(timezone.utc)
         spent = budget_row["spent"]
+        # The real spend ceiling is the *derived* glide cap (reserve ÷ days to the
+        # headroom-adjusted target), not the static DAILY_CREDIT_CAP fallback —
+        # and the glide *surplus* is what gates the priority-≥1 capture classes.
+        # Pull both from the canonical loaders so the panel mirrors the worker.
+        try:
+            async with self._pool.acquire() as conn:
+                cap = await vf_rescue.load_glide_cap(conn, now)
+                surplus = await vf_rescue.load_glide_surplus(conn, now)
+        except Exception:
+            cap, surplus = DAILY_CREDIT_CAP, 0.0
+
         if status_row is not None:
             # Live balance from the /status endpoint (true remaining + expiry).
             age = _fmt_age((now - status_row["checked_at"]).total_seconds())
             exp = status_row["expiration_date"]
-            exp_str = f" [dim]· exp {exp:%Y-%m-%d}[/]" if exp else ""
-            balance = f"[b]{status_row['credits']}[/] credits [dim]({age} ago)[/]{exp_str}"
+            balance = f"[b]{status_row['credits']}[/] cr [dim]({age} ago)[/]"
+            if exp:
+                target = exp - timedelta(days=vf_rescue.GLIDE_HEADROOM_DAYS)
+                glide = (
+                    f"glide→0 by [b]{target:%Y-%m-%d}[/] "
+                    f"[dim](exp {exp:%Y-%m-%d} − {vf_rescue.GLIDE_HEADROOM_DAYS}d)[/]"
+                )
+            else:
+                glide = "[dim]glide: no expiry in snapshot[/]"
         else:
             # Fallback before the first /status snapshot: rough estimate.
             left = max(0, CREDIT_RESERVE_ESTIMATE - lifetime_row["lifetime"])
-            balance = f"~[b]{left}[/] credits left [dim](est)[/]"
+            balance = f"~[b]{left}[/] cr [dim](est)[/]"
+            glide = "[dim]glide: awaiting first /status[/]"
+
+        # surplus sign = whether the priority-≥1 capture classes can spend (P0 is
+        # always exempt; P≥1 spends only the surplus above the glide line).
+        if surplus >= 1:
+            p1 = f"[green]P≥1 open[/] [dim](+{surplus:.0f}cr)[/]"
+        else:
+            p1 = f"[yellow]P≥1 starved[/] [dim]({surplus:+.0f}cr)[/]"
+
         self.query_one("#vf-credit-status", Static).update(
-            f"[bold cyan]VF rescue[/] [dim]·[/] today [b]{spent}[/]/{DAILY_CREDIT_CAP}cr "
-            f"[dim]·[/] {balance}"
+            f"[bold cyan]VF rescue[/] [dim]·[/] today [b]{spent}[/]/[b]{cap}[/]cr "
+            f"[dim](glide cap · P0 exempt)[/] [dim]·[/] {balance}\n"
+            f"{glide} [dim]·[/] {p1} [dim]· brake {vf_rescue.GLIDE_CAP_CEILING}cr[/]"
         )
         table = self.query_one("#vf-rescue-table", DataTable)
         table.clear()
