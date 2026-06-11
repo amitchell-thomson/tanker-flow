@@ -18,6 +18,7 @@ from . import vf_rescue
 from .dynamic_enrichment import EnrichmentState, enrichment_worker, load_known_mmsis
 from .metrics import MinuteAggregator, classify_zone, record_event
 from .models import AISMessage, PositionReport, ShipStaticData
+from .terminal_boxes import load_terminal_boxes
 
 logging.basicConfig(
     level=logging.INFO,
@@ -122,6 +123,7 @@ def _source_label(worker_id: int, worker_count: int, chunk_index: int) -> str:
         return f"aisstream-mmsi-{chunk_index + 1}"
     return f"aisstream-w{worker_id}-{chunk_index + 1}"
 
+
 # Reconnect every hour. Each reconnect:
 #   1. Triggers a fresh scoring run (see scoring_loop) just beforehand
 #   2. Re-queries priority_watchlist for the current top-150
@@ -160,6 +162,11 @@ class IngestionState:
 
     source_name: str = "aisstream"
     non_tanker_mmsis: set[int] = field(default_factory=set)
+    # Positive allow-list for the bbox catch-all (None on MMSI-filtered conns,
+    # where the server-side filter already constrains). When set, parse_message
+    # drops any MMSI not in it — the bbox hears every ship type at a terminal, so
+    # this keeps only our in-scope LNG carriers (FSRUs excluded; see bbox loop).
+    allow_mmsis: set[int] | None = None
     fix_inserts: int = 0
     registry_upserts: int = 0
     state_inserts: int = 0
@@ -180,6 +187,19 @@ def build_subscribe_payload(api_key: str, mmsis: list[int]) -> dict:
         "BoundingBoxes": GLOBAL_BBOX,
         "FilterMessageTypes": ["PositionReport", "ShipStaticData"],
         "FiltersShipMMSI": [str(m) for m in mmsis],
+    }
+
+
+def build_bbox_subscribe_payload(api_key: str, boxes: list[list[list[float]]]) -> dict:
+    """Stage-3c catch-all: subscribe to a geofence (the terminal-approach boxes)
+    with NO MMSI filter, so we hear every vessel there — the point is to catch the
+    LNG carriers we did NOT predict into a slot. PositionReport only: ShipStaticData
+    for a re-acquired carrier arrives once it's promoted into an MMSI slot, and the
+    allow-list (is_lng_carrier, non-FSRU) drops everything else before insert."""
+    return {
+        "APIKey": api_key,
+        "BoundingBoxes": boxes,
+        "FilterMessageTypes": ["PositionReport"],
     }
 
 
@@ -430,6 +450,12 @@ def parse_message(
 
     mmsi = msg.MetaData.MMSI
 
+    # Bbox catch-all: keep only our in-scope LNG carriers (the allow-list); the
+    # geofence otherwise floods us with every ship type near the terminal. No-op
+    # on MMSI-filtered connections (allow_mmsis is None).
+    if ingest_state.allow_mmsis is not None and mmsi not in ingest_state.allow_mmsis:
+        return
+
     if isinstance(msg, PositionReport):
         if mmsi in ingest_state.non_tanker_mmsis:
             return
@@ -623,30 +649,48 @@ async def flush_buffers(pool: asyncpg.Pool, ingest_state: IngestionState) -> Non
                 logger.warning(f"Inline in-zone promotion failed: {e}")
 
 
+async def load_lng_allowlist(pool: asyncpg.Pool) -> set[int]:
+    """MMSIs the bbox catch-all is allowed to inject: in-scope LNG carriers,
+    FSRUs excluded. FSRUs sit moored at their host for months and are
+    short-circuited to a synthetic event (pipeline.port_events) — re-hearing them
+    on the geofence adds no signal and churns the band (a probe found 3/5 raw
+    catches were deployed FSRUs). Reloaded each reconnect so newly-discovered
+    newbuilds (IGU discovery → registry) join the allow-list within the hour."""
+    rows = await pool.fetch(
+        "SELECT mmsi FROM vessel_registry "
+        "WHERE is_lng_carrier AND NOT is_fsru AND NOT excluded"
+    )
+    return {r["mmsi"] for r in rows}
+
+
 async def connect_and_drain(
     url: str,
     pool: asyncpg.Pool,
     ingest_state: IngestionState,
-    mmsis: list[int],
+    payload: dict,
     source_name: str,
+    detail: dict,
 ) -> None:
-    """One MMSI-filtered WebSocket lifecycle: subscribe + drain until disconnect.
+    """One WebSocket lifecycle: subscribe with `payload` + drain until disconnect.
 
-    Tasks: drain_socket, parser, flusher, watchdog, planned_reconnect.
-    No rotation — the MMSI filter is fixed for this connection's lifetime; a
-    fresh chunk is loaded from vessel_registry on each reconnect. Liveness is
-    derived downstream from `ingestion_stats_minute` per source (see viz/tui.py)
-    rather than from a separate heartbeat table.
+    Shared by the MMSI-filtered connections and the Stage-3c bbox catch-all — the
+    only differences are the `payload` (server-side MMSI filter vs terminal
+    geofence) and the allow-list carried on `ingest_state`. `detail` is logged and
+    recorded to ingestion_events.
+
+    Tasks: drain_socket, parser, flusher, watchdog, planned_reconnect. No rotation
+    within a connection; the caller's loop builds a fresh subscription on each
+    reconnect. Liveness is derived downstream from `ingestion_stats_minute` per
+    source (see viz/tui.py) rather than from a separate heartbeat table.
     """
     minute_agg = MinuteAggregator(source=source_name)
-    payload = build_subscribe_payload(settings.aisstream_api_key, mmsis)
 
-    logger.info(f"[{source_name}] Connecting to aisstream.io ({len(mmsis)} MMSIs)...")
-    await record_event(pool, source_name, "connect", {"mmsi_count": len(mmsis)})
+    logger.info(f"[{source_name}] Connecting to aisstream.io ({detail})...")
+    await record_event(pool, source_name, "connect", detail)
     async with websockets.connect(url, ping_timeout=None) as ws:
         await ws.send(json.dumps(payload))
         logger.info(f"[{source_name}] Subscribed.")
-        await record_event(pool, source_name, "subscribed", {"mmsi_count": len(mmsis)})
+        await record_event(pool, source_name, "subscribed", detail)
         minute_agg.note_connection_start()
 
         last_message_time = time.monotonic()
@@ -861,7 +905,14 @@ async def ingest():
                     # Persistent conn 0 is the only one that writes the slot
                     # assignments — coordinated single-writer, no races.
                     if chunk_index == 0:
-                        scan_mmsis = await load_scan_mmsis(pool)
+                        # When this worker runs the bbox catch-all in place of a
+                        # scan connection, there are no scan slots to mark — the
+                        # geofence covers terminal discovery, not a fixed MMSI set.
+                        scan_mmsis = (
+                            []
+                            if settings.bbox_catchall
+                            else await load_scan_mmsis(pool)
+                        )
                         try:
                             await mark_slot_assignments(
                                 pool, persistent_mmsis, scan_mmsis
@@ -874,7 +925,15 @@ async def ingest():
                     await asyncio.sleep(60)
                     continue
                 ingest_state = IngestionState(source_name=source_name)
-                await connect_and_drain(url, pool, ingest_state, my_mmsis, source_name)
+                payload = build_subscribe_payload(settings.aisstream_api_key, my_mmsis)
+                await connect_and_drain(
+                    url,
+                    pool,
+                    ingest_state,
+                    payload,
+                    source_name,
+                    {"mmsi_count": len(my_mmsis)},
+                )
             except websockets.ConnectionClosed as e:
                 logger.warning(
                     f"[{source_name}] Websocket closed: {e}. Reconnecting in 30s"
@@ -898,13 +957,72 @@ async def ingest():
                 )
                 await asyncio.sleep(60)
 
+    async def bbox_connection_loop(source_name: str):
+        """Reconnect loop owning the Stage-3c terminal-bbox catch-all (replaces
+        this worker's scan connection when settings.bbox_catchall). Subscribes to
+        the terminal-approach geofence with no MMSI filter and injects fixes for
+        any in-scope LNG carrier (FSRUs excluded) heard there — the free safety-net
+        for cold-start / crowd-out carriers the MMSI filter missed. Fixes dedup
+        against the MMSI feed via the ais_fixes (fix_ts, mmsi) unique index, so
+        it's purely additive; the allow-list + boxes reload each reconnect."""
+        while True:
+            try:
+                allow = await load_lng_allowlist(pool)
+                boxes = await load_terminal_boxes(pool)
+                if not boxes:
+                    logger.warning(
+                        f"[{source_name}] no terminal boxes (terminal_zones empty?)"
+                        " — sleeping 60s"
+                    )
+                    await asyncio.sleep(60)
+                    continue
+                ingest_state = IngestionState(
+                    source_name=source_name, allow_mmsis=allow
+                )
+                payload = build_bbox_subscribe_payload(
+                    settings.aisstream_api_key, boxes
+                )
+                await connect_and_drain(
+                    url,
+                    pool,
+                    ingest_state,
+                    payload,
+                    source_name,
+                    {"boxes": len(boxes), "allow_mmsis": len(allow)},
+                )
+            except websockets.ConnectionClosed as e:
+                logger.warning(
+                    f"[{source_name}] Websocket closed: {e}. Reconnecting in 30s"
+                )
+                await record_event(
+                    pool,
+                    source_name,
+                    "error",
+                    {"kind": "ConnectionClosed", "msg": str(e)},
+                )
+                await asyncio.sleep(30)
+            except Exception as e:
+                logger.warning(
+                    f"[{source_name}] Unexpected error: {e}. Reconnecting in 60s"
+                )
+                await record_event(
+                    pool,
+                    source_name,
+                    "error",
+                    {"kind": type(e).__name__, "msg": str(e)},
+                )
+                await asyncio.sleep(60)
+
+    def make_connection_loop(i: int):
+        # The bbox-enabled worker swaps its scan connection (chunk SCAN_CHUNK_INDEX)
+        # for the single terminal-geofence catch-all; the persistent chunks are
+        # unchanged. Default off ⇒ all NUM_CONNECTIONS are MMSI-filtered as before.
+        if settings.bbox_catchall and i == SCAN_CHUNK_INDEX:
+            return bbox_connection_loop("aisstream-bbox")
+        return connection_loop(_source_label(WORKER_ID, WORKER_COUNT, i), i)
+
     try:
-        await asyncio.gather(
-            *[
-                connection_loop(_source_label(WORKER_ID, WORKER_COUNT, i), i)
-                for i in range(NUM_CONNECTIONS)
-            ]
-        )
+        await asyncio.gather(*[make_connection_loop(i) for i in range(NUM_CONNECTIONS)])
     finally:
         for t in bg_tasks:
             t.cancel()

@@ -32,6 +32,17 @@ class Settings(BaseSettings):
     run_port_events: bool | None = None
     run_vf_rescue: bool | None = None
 
+    # Stage-3c terminal-bbox catch-all. When true, THIS worker replaces its
+    # scan-rotation connection (chunk SCAN_CHUNK_INDEX) with a single bbox-only
+    # subscription over the terminal-approach boxes, injecting fixes for any
+    # is_lng_carrier (non-FSRU) heard there. It's the free safety-net for the
+    # cold-start / crowd-out carriers MMSI filtering misses (a 2026-06-11 throttle
+    # probe heard ~337 msg/min and re-acquired weeks-blind carriers at terminals;
+    # the FSRU filter is because ~3/5 raw catches were deployed FSRUs we
+    # short-circuit anyway). Enable on EXACTLY ONE worker (the second egress) so
+    # the single global geofence isn't double-subscribed. Default off ⇒ unchanged.
+    bbox_catchall: bool = False
+
     @model_validator(mode="after")
     def _default_singletons_to_primary(self) -> "Settings":
         primary = self.worker_id == 0

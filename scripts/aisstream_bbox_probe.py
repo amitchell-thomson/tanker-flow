@@ -46,21 +46,9 @@ import asyncpg  # noqa: E402
 import websockets  # noqa: E402
 
 from config import settings  # noqa: E402
+from ingestion.terminal_boxes import load_terminal_boxes  # noqa: E402
 
 AISSTREAM_URL = "wss://stream.aisstream.io/v0/stream"
-
-# Per-terminal bounding box from the terminal_zones polygons (the approach
-# envelopes), padded by --pad degrees so we catch vessels on final approach, not
-# only those already alongside. One small box per terminal = the "small ask".
-BOXES_SQL = """
-SELECT t.terminal_name,
-       ST_YMin(e.ext) AS lat_min, ST_YMax(e.ext) AS lat_max,
-       ST_XMin(e.ext) AS lon_min, ST_XMax(e.ext) AS lon_max
-FROM (SELECT terminal_id, ST_Extent(geom) AS ext FROM terminal_zones GROUP BY terminal_id) e
-JOIN terminals t USING (terminal_id)
-WHERE t.in_signal_scope
-ORDER BY t.terminal_name
-"""
 
 # A report cadence gap longer than this is the throttle symptom (a vessel we
 # should be hearing steadily went quiet on the bbox feed).
@@ -76,20 +64,13 @@ class VesselStat:
 
 
 async def load_boxes(pad: float) -> list[list[list[float]]]:
+    # Shared with the live catch-all (ingestion.terminal_boxes) so the geofence we
+    # probe and the one we deploy can't drift.
     pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=1)
     try:
-        rows = await pool.fetch(BOXES_SQL)
+        boxes = await load_terminal_boxes(pool, pad)
     finally:
         await pool.close()
-    boxes = []
-    for r in rows:
-        # AISstream box format: [[lat_min, lon_min], [lat_max, lon_max]].
-        boxes.append(
-            [
-                [r["lat_min"] - pad, r["lon_min"] - pad],
-                [r["lat_max"] + pad, r["lon_max"] + pad],
-            ]
-        )
     print(f"Derived {len(boxes)} terminal-approach boxes (pad {pad}°)")
     return boxes
 
@@ -142,7 +123,9 @@ def _report(stats: dict[int, VesselStat], total_msgs: int, elapsed_min: float) -
     print("\n" + "=" * 64)
     print(f"bbox probe — {elapsed_min:.1f} min")
     print(f"  distinct MMSIs heard : {distinct}")
-    print(f"  total messages       : {total_msgs}  ({total_msgs / max(elapsed_min, 1e-9):.0f}/min)")
+    print(
+        f"  total messages       : {total_msgs}  ({total_msgs / max(elapsed_min, 1e-9):.0f}/min)"
+    )
     # Cadence: among vessels seen >=3 times (enough for a gap series), how steady?
     multi = [s for s in stats.values() if len(s.gaps) >= 2]
     if multi:
@@ -163,8 +146,10 @@ def _report(stats: dict[int, VesselStat], total_msgs: int, elapsed_min: float) -
             f"← the throttle symptom; high = bbox-mode still drops vessels"
         )
     print("=" * 64)
-    print("Decide: steady cadence + low gap% ⇒ deploy the 3c catch-all; "
-          "sparse / high gap% ⇒ abandon 3c, use the 2nd IP for pure-MMSI sharding.")
+    print(
+        "Decide: steady cadence + low gap% ⇒ deploy the 3c catch-all; "
+        "sparse / high gap% ⇒ abandon 3c, use the 2nd IP for pure-MMSI sharding."
+    )
 
 
 def main() -> None:
@@ -178,7 +163,11 @@ def main() -> None:
         help="which AISstream key (per-IP cap is unaffected by key; see conn-test)",
     )
     args = p.parse_args()
-    key = settings.aisstream_api_key_alt if args.key == "alt" else settings.aisstream_api_key
+    key = (
+        settings.aisstream_api_key_alt
+        if args.key == "alt"
+        else settings.aisstream_api_key
+    )
     asyncio.run(run(args.minutes, args.pad, key))
 
 
