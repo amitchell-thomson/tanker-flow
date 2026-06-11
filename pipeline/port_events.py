@@ -45,11 +45,13 @@ TRUNCATE_SQL = "TRUNCATE port_events RESTART IDENTITY"
 
 # In-scope vessels: LNG carriers + FSRUs (the VesselFinder taxonomy classifies
 # FSRUs as 'Offshore Support Vessel', so is_lng_carrier=FALSE for them — they
-# must be admitted via is_fsru explicitly).
+# must be admitted via is_fsru explicitly). `excluded` is the durable manual
+# override (e.g. an LPG carrier VF mis-classifies as 'LNG Tanker') — honoured
+# here so re-enrichment can't flip is_lng_carrier back and resurrect it.
 IN_SCOPE_MMSIS_SQL = """
 SELECT mmsi, is_fsru, design_draught
 FROM vessel_registry
-WHERE is_lng_carrier = TRUE OR is_fsru = TRUE
+WHERE (is_lng_carrier = TRUE OR is_fsru = TRUE) AND NOT excluded
 """
 
 # Berth centroids (lat,lon) per terminal — used by the nearest-berth tiebreaker
