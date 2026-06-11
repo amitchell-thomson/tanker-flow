@@ -1,0 +1,27 @@
+# systemd unit for the second-egress ingester (worker-1) on the Oracle VM.
+# Install: sudo cp deploy/tanker-ingester-worker.service /etc/systemd/system/
+#          sudo systemctl daemon-reload && sudo systemctl enable --now tanker-ingester-worker
+# Adjust User / WorkingDirectory / the uv path to match the VM (the runbook
+# assumes the `ubuntu` user and a repo clone at ~/tanker-flow).
+
+[Unit]
+Description=tanker-flow AIS ingester (worker-1, second egress)
+# Wait for the Tailscale tunnel: worker-1 reaches the home DB over the tailnet,
+# so starting before tailscaled is up just burns restart attempts.
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/tanker-flow
+# .env in the repo root carries WORKER_ID=1 / WORKER_COUNT=2 / RUN_*=false /
+# DB_HOST=<home tailscale IP> (see deploy/worker.env.example).
+ExecStart=/home/ubuntu/.local/bin/uv run python -m ingestion.aisstream
+Restart=on-failure
+RestartSec=30
+# A Tailscale drop makes DB writes fail and the process exit; restart keeps
+# trying until the tunnel heals (coverage degraded, not lost, meanwhile).
+
+[Install]
+WantedBy=multi-user.target
