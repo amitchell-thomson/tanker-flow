@@ -292,6 +292,12 @@ WHERE pw.parsed_dest_terminal_id IS NOT NULL AND t.zone IS NOT NULL
 """
 
 # Latest fix per LNG/FSRU vessel — the last-fix evidence for the overdue split.
+# NOTE: DISTINCT ON + ORDER BY fix_ts DESC does a sequential scan of the full
+# ais_fixes hypertable. This is fast against the live feed (~weeks of data) but
+# will be slow once NOAA historical backfill lands (potentially 100M+ rows).
+# At that point, replace with a per-MMSI subquery or a materialised latest-fix
+# view; the TimescaleDB per-chunk index on (mmsi, fix_ts) makes a per-MMSI MAX
+# approach faster than a global sort.
 LAST_FIX_SQL = """
 SELECT DISTINCT ON (a.mmsi) a.mmsi, a.fix_ts, a.lat, a.lon
 FROM ais_fixes a

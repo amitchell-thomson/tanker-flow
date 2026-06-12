@@ -66,6 +66,7 @@ from rich.logging import RichHandler
 from config import settings
 
 from .legs import Leg, compute_legs
+from .utils import parse_as_of
 from .visits import Visit, compute_visits
 
 
@@ -605,16 +606,6 @@ def _log_summary(summary: dict, wall_seconds: float) -> None:
     logger.info("=" * 60)
 
 
-def _parse_as_of(raw: str) -> datetime:
-    raw = raw.strip()
-    if raw.endswith("Z"):
-        raw = raw[:-1] + "+00:00"
-    dt = datetime.fromisoformat(raw)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    return dt
-
-
 async def main() -> None:
     parser = argparse.ArgumentParser(
         description="Rebuild the signal_daily panel from legs + visits "
@@ -622,7 +613,7 @@ async def main() -> None:
     )
     parser.add_argument(
         "--as-of",
-        type=_parse_as_of,
+        type=parse_as_of,
         default=None,
         metavar="ISO8601",
         help="Pin the wall-clock reference (passed to compute_legs and used as the "

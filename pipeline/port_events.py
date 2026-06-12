@@ -15,7 +15,7 @@ import logging
 import time
 from collections import defaultdict
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Callable
 
 import asyncpg
 from rich.logging import RichHandler
@@ -24,6 +24,7 @@ from config import settings
 
 from .geo import haversine_nm
 from .laden import Side, build_draught_lookup, infer_laden, sanitize_design_draughts
+from .utils import parse_as_of
 from .state_machine import (
     Event,
     Fix,
@@ -339,7 +340,7 @@ def _classify_envelope_sides(events: list[Event]) -> list[Side]:
             i + 1 < len(events) and events[i + 1].event_type == "zone_entry"
         )
         if envelope_ends_here or next_starts_new:
-            close_idx = i if envelope_ends_here else i
+            close_idx = i
             moored_idx = next(
                 (
                     j
@@ -366,7 +367,7 @@ def _classify_envelope_sides(events: list[Event]) -> list[Side]:
 def _process_vessel(
     mmsi: int,
     fixes: list[Fix],
-    nearest_berth,
+    nearest_berth: Callable[..., Any],
     terminal_zone_map: dict[int, str],
     terminal_flow_map: dict[int, str],
     design_draught: dict[int, float | None],
@@ -533,23 +534,13 @@ def _log_summary(summary: dict[str, Any], wall_seconds: float) -> None:
     logger.info("=" * 60)
 
 
-def _parse_as_of(raw: str) -> datetime:
-    raw = raw.strip()
-    if raw.endswith("Z"):
-        raw = raw[:-1] + "+00:00"
-    dt = datetime.fromisoformat(raw)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    return dt
-
-
 async def main() -> None:
     parser = argparse.ArgumentParser(
         description="Recompute port_events from ais_fixes (TRUNCATE + rebuild)."
     )
     parser.add_argument(
         "--as-of",
-        type=_parse_as_of,
+        type=parse_as_of,
         default=None,
         metavar="ISO8601",
         help="Pin the wall-clock reference for stale-envelope closing "
