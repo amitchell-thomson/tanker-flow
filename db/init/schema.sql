@@ -89,9 +89,16 @@ CREATE TABLE discovery_candidates (
     nav_status  SMALLINT,            -- AIS nav status (5 = moored, 1 = anchored)
     first_seen  TIMESTAMPTZ  NOT NULL,
     last_seen   TIMESTAMPTZ  NOT NULL,
-    n_msgs      INTEGER      NOT NULL DEFAULT 1
+    n_msgs      INTEGER      NOT NULL DEFAULT 1,
+    -- Phase-2 auto-add resolution (scripts/discover_berth_tankers.py). A candidate
+    -- in an LNG berth is VF-checked at most once; these record the outcome so it's
+    -- never re-polled (a VF record costs credits even when the answer is "not LNG").
+    resolved_at TIMESTAMPTZ,                      -- NULL = not yet VF-checked
+    outcome     TEXT,                             -- registered | not_lng | no_master | error
+    vf_type     TEXT                              -- VF MASTERDATA.TYPE seen at resolution
 );
 CREATE INDEX ix_discovery_candidates_last_seen ON discovery_candidates (last_seen DESC);
+CREATE INDEX ix_discovery_candidates_unresolved ON discovery_candidates (resolved_at) WHERE resolved_at IS NULL;
 
 -- LNG terminal metadata: one row per terminal, referenced by terminal_zones
 CREATE TABLE terminals (
@@ -287,12 +294,13 @@ CREATE TABLE vf_rescue_log (
     mmsi           BIGINT      NOT NULL,
     imo            BIGINT,
     vessel_name    TEXT,
-    rescue_class   TEXT        NOT NULL,   -- inport|open_leg|eta|tier2|manual
+    rescue_class   TEXT        NOT NULL,   -- inport|open_leg|eta|tier2|manual|discovery|berth_discovery
     sat            BOOLEAN     NOT NULL DEFAULT FALSE,
     src            TEXT,                    -- TER|SAT|NULL (no position returned)
     result         TEXT        NOT NULL CHECK (result IN (
                        'rescued','no_position','rejected_stale',
-                       'rejected_teleport','error','dry_run','skipped_budget')),
+                       'rejected_teleport','error','dry_run','skipped_budget',
+                       'not_lng')),         -- not_lng: berth-discovery VF hit, wrong type (still billed)
     credits        SMALLINT    NOT NULL DEFAULT 0,
     requested_imos SMALLINT,
     returned_rows  SMALLINT,

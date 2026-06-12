@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     run_scoring: bool | None = None
     run_port_events: bool | None = None
     run_vf_rescue: bool | None = None
+    # Phase-2 berth auto-add (scripts/discover_berth_tankers.py): consume
+    # discovery_candidates, VF-enrich unknown tankers found in an LNG berth, and
+    # register the confirmed LNG carriers. Spends VF credits + reads shared state,
+    # so it's a primary-only singleton like the loops above. It consumes whatever
+    # the bbox catch-all worker wrote, so it runs on the primary even though the
+    # catch-all itself runs on the second egress.
+    run_berth_discovery: bool | None = None
 
     # Stage-3c terminal-bbox catch-all. When true, THIS worker replaces its
     # scan-rotation connection (chunk SCAN_CHUNK_INDEX) with a single bbox-only
@@ -52,6 +59,8 @@ class Settings(BaseSettings):
             self.run_port_events = primary
         if self.run_vf_rescue is None:
             self.run_vf_rescue = primary
+        if self.run_berth_discovery is None:
+            self.run_berth_discovery = primary
         return self
 
     @property

@@ -146,6 +146,11 @@ SCORING_INTERVAL_SECONDS = 300
 # the signal layer needs (outage/queue nowcasts, not per-second updates).
 PORT_EVENTS_INTERVAL_SECONDS = 120
 
+# Berth auto-add cadence. Candidates accrue slowly (a tanker has to actually berth
+# at an LNG terminal) and resolution is a cheap negative-cached query, so a 30-min
+# pass is ample; aligns with the rescue loop's tempo.
+BERTH_DISCOVERY_INTERVAL_SECONDS = 1800
+
 # Use full-globe bbox; the MMSI filter does the actual constraining.
 GLOBAL_BBOX = [[[-85.0, -180.0], [85.0, 180.0]]]
 
@@ -982,6 +987,25 @@ async def ingest():
 
     if settings.run_vf_rescue:
         bg_tasks.append(asyncio.create_task(vf_rescue_loop()))
+
+    async def berth_discovery_loop():
+        # Phase-2 auto-add: periodically resolve unknown tankers the bbox catch-all
+        # caught sitting in an LNG berth — VF-enrich, and register the ones VF
+        # confirms are LNG carriers (scripts/discover_berth_tankers.py). Shares the
+        # VF glide budget (logs to vf_rescue_log); self-limiting via a per-candidate
+        # negative cache. No initial run — discovery_candidates is filled by the
+        # catch-all worker over time.
+        from scripts.discover_berth_tankers import run as run_berth_discovery
+
+        while True:
+            await asyncio.sleep(BERTH_DISCOVERY_INTERVAL_SECONDS)
+            try:
+                await run_berth_discovery(dry_run=False)
+            except Exception as e:
+                logger.warning(f"berth_discovery run failed: {e}")
+
+    if settings.run_berth_discovery:
+        bg_tasks.append(asyncio.create_task(berth_discovery_loop()))
 
     async def connection_loop(source_name: str, chunk_index: int):
         """Reconnect loop owning one MMSI-filtered subscription. On each

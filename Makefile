@@ -1,4 +1,4 @@
-.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events scoring signals vf-rescue vf-rescue-dry vf-status refresh-fleet discover discover-dry backup eia eia-full capture-rate coverage
+.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events scoring signals vf-rescue vf-rescue-dry vf-status refresh-fleet discover discover-dry discover-berths discover-berths-dry backup eia eia-full capture-rate coverage
 
 up:
 	docker compose up -d
@@ -116,3 +116,13 @@ discover:
 
 discover-dry:
 	uv run python scripts/discover_newbuilds.py --dry-run
+
+# Phase-2 berth auto-add: VF-enrich unknown tankers the bbox catch-all caught
+# sitting in an LNG berth, and register the ones VF confirms are LNG carriers.
+# Each candidate is checked at most once (negative-cached). discover-berths-dry
+# previews candidates + cost with no VF spend.
+discover-berths:
+	uv run python scripts/discover_berth_tankers.py
+
+discover-berths-dry:
+	uv run python scripts/discover_berth_tankers.py --dry-run
