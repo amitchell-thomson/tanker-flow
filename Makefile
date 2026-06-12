@@ -1,4 +1,4 @@
-.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events backfill-noaa backfill-noaa-reload scoring signals vf-rescue vf-rescue-dry vf-status refresh-fleet discover discover-dry discover-berths discover-berths-dry backup eia eia-full capture-rate coverage
+.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events backfill-noaa backfill-noaa-reload backfill-gfw backfill-gfw-dry reconcile reconcile-dry scoring signals vf-rescue vf-rescue-dry vf-status refresh-fleet discover discover-dry discover-berths discover-berths-dry backup eia eia-full capture-rate coverage
 
 up:
 	docker compose up -d
@@ -62,6 +62,23 @@ backfill-noaa:
 # Usage: make backfill-noaa-reload START=2022-01-01 END=2022-12-31
 backfill-noaa-reload:
 	uv run python -m ingestion.historical.noaa_ais --reload --start $(START) --end $(END)
+
+# GFW PORT_VISIT events -> port_events (EU arrivals + pre-2016 gap). Then reconcile
+# against NOAA (suppress duplicate US visits) BEFORE rebuilding signals.
+# Usage: make backfill-gfw START=2017-01-01 END=2025-12-31
+backfill-gfw:
+	uv run python -m ingestion.historical.gfw_events --start $(START) --end $(END)
+
+backfill-gfw-dry:
+	uv run python -m ingestion.historical.gfw_events --start $(START) --end $(END) --dry-run
+
+# NOAA<->GFW dedup (PLAN 3.7): run after backfill-gfw and after every port-events
+# rebuild, before signals. --dry-run previews matches + the laden QC.
+reconcile:
+	uv run python -m ingestion.historical.reconcile
+
+reconcile-dry:
+	uv run python -m ingestion.historical.reconcile --dry-run
 
 seed-unlocodes:
 	docker exec -i tanker_db psql -U tanker_user -d tanker_flow < db/seed/terminal_unlocodes.sql
