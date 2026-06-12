@@ -10,6 +10,37 @@ data**, plus how to control for the many non-tanker drivers of the spread.
 
 ## 0 · The small-sample problem, stated precisely
 
+> **Backfill reframe (2026-06, read this first).** This section was written for the
+> live-only corpus (`N ≈ 45`, the 2026-05-30 seam). The historical backfill
+> (`ingestion/historical/PLAN.md`) changes the picture *asymmetrically*, and the
+> rest of this doc should be read through that lens:
+>
+> - **US supply side — the small-sample problem largely dissolves.** NOAA gives
+>   exhaustive Class-A history to 2015 and *retroactively overwrites* the throttled
+>   `bbox` window, so the US export signals (#6–11, `gas_loading_us`) become a
+>   clean, **seam-free decade** at the same fidelity as the live feed. The §1–§5
+>   physical nowcasts (kinematic ETA, Poisson/NB counts, Cox/Weibull survival,
+>   Hawkes) can be **trained and walk-forward-validated on years, not weeks**, and
+>   the hierarchical terminal pooling (Part IV.2) finally has the data to bite.
+> - **EU demand side — deeper but coarser, with one real seam.** GFW voyage arcs
+>   give EU *arrival counts* to 2017 but no queue/berth internals (#12–16 stay
+>   live-cutover-only; see SIGNALS.md §0·6·1). The `gfw → mmsi_filter` boundary is
+>   a genuine **fidelity step** that must enter EU models as a regime indicator —
+>   not the kind of seam you train across, but one you *condition on*.
+> - **Spread model — moves from "premature" to "trainable."** With NOAA (2015+) +
+>   GFW (2017+) + the control set (EIA, GIE AGSI, degree-days, all with deep
+>   history), the daily panel goes from `N ≈ 45` to **~3,000 rows (2017→now)** where
+>   both US-export and EU-arrival signals coexist. `N_eff` rises from ~28 into the
+>   hundreds. Part III's framing flips from *"confirm edge only"* to *"fit and
+>   validate with walk-forward CV"* — the shrinkage/Bayesian tooling stays the
+>   right default (the spread is still low-SNR and confounded), but it is no longer
+>   a placeholder. The one caveat that survives in full force: the EU fidelity seam
+>   and the Part V control-partialling matter *more*, not less, on a long panel.
+>
+> The numbers in the rest of §0 (`N ≈ 45`, `N_eff ≈ 28`) describe the **live-only**
+> corpus and remain the correct figures for any signal with no historical source
+> (#12–16) and for the live tail in isolation.
+
 Everything below is shaped by one number: the effective sample size.
 
 At daily resolution, a year is `N ≈ 250` rows; today you have `N ≈ 45`. But the
@@ -460,8 +491,22 @@ control (V.1) to absorb any residual FX sensitivity.
    size — with weeks of data and 30+ features they overfit badly; the "Transformer
    wins on financial time series" literature almost always has a leakage bug.
 
-The honest summary: on a few months you **confirm edge** (Parts II + V.2) rather
-than **forecast the spread** (Part III). The physical nowcasts and the
-partial-effect controls are what make the work defensible now; the spread model
-is a Bayesian, uncertainty-first placeholder that strengthens as the panel grows.
+The honest summary (live-only corpus): on a few months you **confirm edge**
+(Parts II + V.2) rather than **forecast the spread** (Part III). The physical
+nowcasts and the partial-effect controls are what make the work defensible now;
+the spread model is a Bayesian, uncertainty-first placeholder that strengthens as
+the panel grows.
+
+**Post-backfill, the build order shifts** (see the §0 reframe): steps 1–3 (target,
+AR(1)+controls baseline, physical nowcasts) run on a **decade of US data** rather
+than weeks, so they graduate from "confirm edge" to genuinely fitted, walk-forward-
+validated models with terminal pooling (step 5) live from the start. Step 6 (the
+spread model) becomes a real fit on the ~3,000-row 2017→now panel — still
+Bayesian/regularised and uncertainty-first because the spread is low-SNR, but no
+longer a placeholder — with the `gfw → mmsi_filter` EU fidelity seam carried as a
+regime indicator and the Part V controls partialled out on the long panel. Step 7's
+deferrals (constrained LightGBM, full cross-exciting Hawkes) come *forward* once the
+event count is in the tens of thousands; step 8's prohibitions (deep sequence
+models) still hold — a long panel of an autocorrelated, regime-broken spread is not
+the i.i.d. corpus those models need.
 ```

@@ -14,7 +14,7 @@ pipeline.
 | Field       | Detail                                                      |
 |-------------|-------------------------------------------------------------|
 | Coverage    | Full US coastline — all seven `usgulf` / `usatlantic` terminals |
-| Depth       | 2015 to ~1–3 months ago (quarterly release lag)             |
+| Depth       | 2015 available, but **start at 2016** — see note below       |
 | Granularity | ~1-min intervals for Class A vessels (LNG carriers)         |
 | Format      | Zipped CSV by UTM zone × year × month                       |
 | Licence     | Public domain (US federal data)                             |
@@ -29,6 +29,14 @@ No schema changes required — `ais_fixes.source` already exists and the state m
 is already source-agnostic. The only operational change is that `make port-events` will
 run over a much larger `ais_fixes` table (potentially 100M+ rows); the `LAST_FIX_SQL`
 comment in `legs.py` flags the query that will need reworking at that point.
+
+**Start the backfill window at 2016, not 2015.** US LNG exports effectively begin
+with **Sabine Pass cargo #1 in February 2016** — before that the US Gulf export
+terminals had no laden departures to observe, so 2015 NOAA data contains no US
+supply-side signal. Backfilling from 2016 captures the entire US export era from
+its origin (you watch new terminals — Calcasieu Pass 2022, Plaquemines 2023 — light
+up from zero, which is signal, not noise) and saves a year of downloads with
+nothing in them. 2016 is the floor for the NOAA US backfill.
 
 ### 1.2 GFW AIS Voyages (EU + global, bulk voyage arcs)
 
@@ -204,17 +212,60 @@ GFW provides vessel type and the terminal's zone is known — so `laden_source =
 This is the same logic already used by `port_events.py` for `laden_source =
 'flow_direction'` events today.
 
-### 3.4 Regime tagging
+### 3.4 Regime tagging — `regime` must become source-aware (a required change)
 
-`port_events.regime` is a GENERATED column keyed on `event_time`. Historical events
-will all land in `regime = 'bbox'` (pre-2026-05-30). `signal.py` already handles
-the regime seam correctly (SIGNALS.md §0.5). No changes needed.
+`port_events.regime` is today a STORED GENERATED column keyed purely on
+`event_time` (`'bbox'` before the 2026-05-30 09:27 UTC cutover, `'mmsi_filter'`
+after). Under backfill this is **wrong**: every NOAA-historical event is
+pre-cutover, so it would land in `regime = 'bbox'` — tagging the *cleanest*
+source (exhaustive Class A, no throttle) as if it were the throttled bbox block.
+`signal.py`'s "never aggregate across the seam" segmentation keys on `regime`, so
+it would silently lump clean NOAA with throttled bbox. This is not "no changes
+needed" — it is the central correctness change for the backfill.
 
-`regime` captures the live-pipeline collection method (bbox throttling vs MMSI filter).
-It does NOT distinguish NOAA backfill from AISstream-bbox events, even though their
-coverage properties differ (NOAA: 100% Class A, no watchlist bias; AISstream-bbox:
-~10–40% per-vessel visibility due to throttling). Use `source` for that split in
-any model that needs to condition on data-collection quality within the bbox window.
+**`regime` must tag *fidelity*, not just calendar.** Redefine the generated
+column to be source-aware (the `source` column from §2.1 makes this possible):
+
+```sql
+regime TEXT GENERATED ALWAYS AS (
+    CASE
+        WHEN source = 'noaa-ais'                  THEN 'noaa'         -- exhaustive Class A, US, 2015+
+        WHEN source IN ('gfw_voyages','gfw_events') THEN 'gfw'        -- arc-fidelity, endpoints only
+        WHEN event_time < TIMESTAMPTZ '2026-05-30 09:27:00+00' THEN 'bbox'
+        ELSE 'mmsi_filter'
+    END) STORED
+```
+
+Why these four values capture the real data-generating processes:
+
+| `regime` | Source | Span | Fidelity |
+|---|---|---|---|
+| `noaa` | NOAA bulk CSV | 2015–~1–3 mo ago, US | exhaustive Class A, draught present — **highest** |
+| `gfw` | GFW Voyages / Events | 2017–present (2012+ events), EU+global | voyage-arc: endpoints only, no internal events, no draught |
+| `bbox` | AISstream throttled | 2026-04-14 → 05-30 | ~23% per-vessel capture — **lowest** |
+| `mmsi_filter` | AISstream MMSI filter | 2026-05-30 → present | near-100% capture for subscribed LNG MMSIs |
+
+**Consequence — the US-side seam disappears.** NOAA coverage runs to ~1–3 months
+ago, so it retroactively *overwrites* the throttled `bbox` dates on the US side.
+`noaa` and `mmsi_filter` are the **same fidelity** for US events (NOAA exhaustive;
+the MMSI filter subscribes to every LNG MMSI), so the US export series
+(`gas_loading_us`, #6–11) concatenates into one continuous, seam-free **2015→now**
+line. The 2026-05-30 obstacle that shaped `MODELS.md` is a US-side non-issue once
+NOAA lands. The **EU side keeps a fidelity step** at the `gfw → mmsi_filter`
+boundary (arc-fidelity → full-fidelity) — that one is real and must enter any EU
+model as a regime indicator.
+
+**Code ripple (do this in Phase 1, before any `make signals`):**
+- `config.regime_of(ts)` currently takes only a timestamp. It must become
+  `regime_of(ts, source)` to mirror the new generated column. Callers:
+  `pipeline/legs.py:209`, `pipeline/visits.py:99` (both already have the event's
+  `source` in scope once `port_events.source` exists).
+- `signal_daily.regime`'s CHECK constraint (`IN ('bbox','mmsi_filter','all')`)
+  must widen to include `'noaa'` and `'gfw'`.
+- `signal.py`'s segmentation generalises from "never cross the 2026-05-30 seam" to
+  the **multi-fidelity rule**: only concatenate series of equal fidelity; render
+  every fidelity change as a visible discontinuity (US `noaa`⧺`mmsi_filter` =
+  continuous; EU `gfw`→`mmsi_filter` = a modelled level-shift, never a blend).
 
 ### 3.5 EU queue time is not a meaningful gap
 
@@ -238,12 +289,82 @@ NOAA historical data. Not having EU raw AIS historically is therefore barely a g
 for queue-time analysis. Stress events (e.g. 2022 post-Ukraine EU congestion) show
 up better in ALSI inventory drawdown than in AIS queue depth anyway.
 
-### 3.6 Vessel registry matching
+### 3.6 Vessel identity — key on IMO, not MMSI; admit historical hulls
 
-NOAA fixes carry MMSI directly — no lookup needed. GFW events carry `ssvid` (=MMSI)
-and `vessel_id`. The loader must JOIN GFW events against `vessel_registry` on MMSI
-to get `terminal_id` from the anchorage lat/lon and to filter to LNG carriers only.
-Vessels not in the registry (not yet enriched) are skipped.
+The live pipeline resolves vessels by MMSI against `vessel_registry`. For the
+backfill that rule breaks twice over a decade, so **historical identity is
+IMO-keyed and self-sufficient from the source's own fields** — never a plain
+MMSI-join against the live registry:
+
+- **MMSI is reused.** Over 2016–2026 an MMSI is reassigned when a hull is scrapped
+  or re-flagged, so a 2017 NOAA fix joined to the 2026 registry *on MMSI* can
+  attach to the wrong vessel. IMO is the stable, lifetime identifier. NOAA CSVs
+  carry `IMO` directly; GFW carries a stable `vessel_id` (and `ssvid`=MMSI). Resolve
+  and dedup historical vessels on **IMO** (GFW: via `vessel_id`), using MMSI only as
+  the join key *within a known time window* once IMO has pinned the hull.
+- **The registry was populated only since 2026-04**, so "skip MMSIs not in the
+  registry" (the live rule) would **drop most of the 2016–2024 fleet** — scrapped
+  carriers, and hulls VF no longer returns. The historical loaders must instead
+  **create/upsert `vessel_registry` rows from the source's own identity fields**
+  (NOAA: `IMO` + `VesselName` + `VesselType`; GFW: `vessel_id` + type), keyed on
+  IMO, admitting any LNG carrier the source identifies — not gated on prior live
+  enrichment.
+- **Weights for un-enrichable hulls.** Scrapped vessels VF can't enrich won't have
+  `gas_capacity_m3`; fall back to a DWT-derived estimate (or fleet-mean) so they
+  still contribute to the volume signals. `laden_source` and the §3.7 dedup are
+  unaffected.
+
+GFW events/voyages still resolve `terminal_id` from the anchorage lat/lon
+(proximity to `terminals`); the change here is purely *which identifier* keys the
+vessel and that unknown historical hulls are **admitted, not skipped**.
+
+### 3.7 NOAA ⋈ GFW reconciliation — do NOT double-count US departures
+
+This is the highest-priority signal-correctness rule and the reason for a new
+`reconcile.py` (§4). A US→EU laden voyage has its `departed` produced **twice**:
+once by the NOAA state machine (real fix stream) and once as a synthetic event by
+the GFW Voyages adapter (`trip_start` → synthetic `departed`). If both land in
+`port_events`, `legs.py` pairs the leg **twice** — NOAA-`departed` → GFW-`zone_entry`
+*and* GFW-`departed` → GFW-`zone_entry` — and **`gas_in_transit_volume` doubles for
+every US-origin laden leg.**
+
+The two sources are **complementary halves of one leg**, not redundant copies:
+NOAA owns the clean *departure* endpoint (with draught → real laden), GFW owns the
+*arrival* endpoint (EU terminals no free raw AIS can deliver). The reconciliation
+rule:
+
+- **GFW Voyages contributes only the endpoint NOAA cannot see.**
+  - **US-origin legs:** keep the NOAA `departed`; emit **only** the GFW `zone_entry`
+    (EU arrival). Suppress the GFW `departed`.
+  - **Legs with no NOAA-covered endpoint** (EU→EU, non-US origins): emit the full
+    synthetic `departed` + `zone_entry` pair as today.
+- **Match key:** GFW `trip_start` ↔ NOAA `departed` on `(mmsi,
+  |Δt| ≤ MATCH_TOLERANCE_HOURS, same origin terminal)`. A match suppresses the GFW
+  `departed`.
+- **Free QC cross-check:** where both sources see a US departure, NOAA's
+  draught-laden vs GFW's flow_direction-laden should agree — a disagreement flags a
+  bad draught read or a mis-typed terminal.
+
+This reconciliation is the leg-level reason the headline `gas_in_transit_volume`
+gets clean pre-2026 history (NOAA departure ⋈ GFW arrival = a fully-observed leg),
+*provided* the dedup runs. Without it, the same history is inflated 2×.
+
+### 3.8 Spatially pre-filter NOAA before it reaches `ais_fixes`
+
+Open question #5 worries about `LAST_FIX_SQL` full-scanning a 100M-row hypertable.
+The cheaper fix is upstream: **don't load mid-ocean NOAA fixes at all.** Every
+signal the backfill feeds — leg endpoints, draught-at-departure, anchorage
+crossings, queue depth — lives within ~50 km of a terminal, and we are
+terrestrial-AIS-blind mid-ocean *by design* (SIGNALS.md §0). So:
+
+- `noaa_ais.py` pre-filters each fix to `ST_DWithin(terminal_zones polygon, 50 km)`
+  (US terminals + a Gulf approach buffer) **before** insert. This drops the row
+  count by 1–2 orders of magnitude, keeps `ais_fixes` lean, and the state machine
+  stays fast — the `LAST_FIX_SQL` rework (open Q #5) becomes unnecessary.
+
+The leg endpoints we keep (departure terminal, arrival terminal) plus the
+near-terminal draught and anchorage crossings are *all* within the buffer; the
+mid-Gulf transit fixes we drop add nothing any signal consumes.
 
 ---
 
@@ -253,14 +374,42 @@ Vessels not in the registry (not yet enriched) are skipped.
 ingestion/historical/
 ├── PLAN.md                  ← this file
 ├── __init__.py
-├── noaa_ais.py              ← NOAA bulk-CSV loader → ais_fixes
+├── noaa_ais.py              ← NOAA bulk-CSV loader → ais_fixes (spatially pre-filtered, §3.8)
 ├── gfw_voyages.py           ← GFW AIS Voyages bulk adapter → port_events
 ├── gfw_events.py            ← GFW Events API adapter → port_events
+├── reconcile.py             ← NOAA ⋈ GFW dedup (§3.7): suppress GFW departed where NOAA covers it
 └── alsi.py                  ← GIE ALSI + ENTSO-G loader → alsi_daily
 ```
 
-The existing pipeline (`port_events.py`, `legs.py`, `signal.py`) is unchanged;
-it just reads a richer `port_events` table.
+The existing pipeline (`port_events.py`, `legs.py`, `signal.py`) is unchanged
+*except* for the `regime` source-awareness in §3.4 (`config.regime_of` signature +
+generated column + `signal.py` segmentation); it otherwise just reads a richer
+`port_events` table.
+
+### 4.1 Signal fidelity by source — which signals get real history
+
+The fidelity matrix below drives the build order: it says which signals get deep
+history (build/validate the model on them now) and which begin only at the live
+cutover (no historical training set). Mirrored in `SIGNALS.md` §0.6.
+
+| Signal family | `noaa` (US) | `gfw` (EU) | `mmsi_filter` (live) |
+|---|---|---|---|
+| US loadings #9–11, `gas_loading_us` | ✅ full, 2015+ | — | ✅ |
+| US queue/berth #6–8 | ✅ full, 2015+ | — | ✅ |
+| EU arrivals #4, `gas_discharging_eu` (count) | — | ✅ count, 2017+ | ✅ |
+| EU berth-amortized `gas_discharging_eu` | — | ⚠️ no real dwell → estimate from terminal mean | ✅ |
+| EU queue #12–16 | — | ❌ no `anchorage_entry` | ✅ |
+| In-transit #1/#2, `gas_in_transit_volume` | ⚠️ departure only | ⚠️ arrival only | ✅ |
+| **#1 reconstructed: NOAA dep ⋈ GFW arr (§3.7)** | **✅ full leg, 2017+** | | ✅ |
+| Voyage age #20 | ✅ dep obs | arr obs | ✅ |
+| laden source | ✅ draught | ❌ flow_direction | ✅ draught |
+
+Reading: the US supply side (loadings, queue, berth, `gas_loading_us`) gets a
+clean, seam-free decade — train/validate the §1–§3 `MODELS.md` physical nowcasts
+on it freely. EU queue/berth (#12–16) gets **no history** (GFW arcs can't produce
+`anchorage_entry`); §3.5 already argues EU queue is structurally near-zero, so
+this is tolerable, but those signals begin only at the live cutover. The headline
+in-transit volume gets full history *only via the §3.7 reconciliation*.
 
 Makefile targets to add:
 ```makefile
@@ -279,17 +428,27 @@ phase until the previous phase is committed and tests pass.
 
 **Phase 1 — Schema + NOAA US backfill (highest leverage)**
 
-1. Alembic migration: add `port_events.source` column; update `port_events.py`
-   TRUNCATE to `DELETE WHERE source = 'state_machine'`.
-2. Write `noaa_ais.py`: download UTM-zone zips for target years/months, parse CSV
-   columns (MMSI, BaseDateTime, LAT, LON, SOG, COG, Heading, VesselName, IMO,
-   CallSign, VesselType, Status, Length, Width, Draft, Cargo, TransceiverClass),
-   filter to `VesselType IN (80..89)` (tankers) + registry-join on MMSI/IMO, batch
-   upsert into `ais_fixes` with `source = 'noaa-ais'`.
+1. Alembic migration: add `port_events.source` column; **redefine the `regime`
+   generated column to be source-aware (§3.4)** and widen `signal_daily.regime`'s
+   CHECK to include `'noaa'`/`'gfw'`; update `config.regime_of` to
+   `regime_of(ts, source)` and its two callers (`legs.py:209`, `visits.py:99`);
+   update `port_events.py` TRUNCATE to `DELETE WHERE source = 'state_machine'`.
+2. Write `noaa_ais.py`: download UTM-zone zips for **2016→present** (the US LNG
+   export era — §1.1), parse CSV columns (MMSI, BaseDateTime, LAT, LON, SOG, COG,
+   Heading, VesselName, IMO, CallSign, VesselType, Status, Length, Width, Draft,
+   Cargo, TransceiverClass), filter to `VesselType IN (80..89)` (tankers), resolve
+   vessel identity **by IMO** and upsert any LNG hull into `vessel_registry`
+   (§3.6 — admit historical hulls, don't skip), batch upsert into `ais_fixes` with
+   `source = 'noaa-ais'`.
+   - **2a. Spatial pre-filter (§3.8):** keep only fixes within ~50 km of a US
+     `terminal_zones` polygon before insert — keeps `ais_fixes` lean and makes the
+     `LAST_FIX_SQL` rework (open Q #5) unnecessary.
 3. Run `make port-events` over NOAA + live data combined → verify state machine
-   produces sensible events at Sabine/Freeport for 2022–2025.
+   produces sensible events at Sabine/Freeport for 2022–2025, and that NOAA events
+   carry `regime = 'noaa'` (not `'bbox'`).
 4. Run `make signals` → confirm `signal_daily` now has pre-2026 history for
-   `gas_loading_us` / `gas_in_transit_volume`.
+   `gas_loading_us`, and that the US series concatenates `noaa`⧺`mmsi_filter`
+   seam-free (the `bbox` window is NOAA-overwritten).
 
 **Phase 2 — GFW Voyages (EU arrivals, 2017+)**
 
@@ -300,7 +459,13 @@ phase until the previous phase is committed and tests pass.
    against a pre-built GFW anchorage-id → terminal_id mapping (proximity lookup
    against `terminals.lat/lon`), emit synthetic `departed` + `zone_entry` events
    into `port_events` with `source = 'gfw_voyages'`.
-3. Run `make signals` → confirm EU arrival signals appear in `signal_daily`.
+3. **Write `reconcile.py` (§3.7) and run it before `make signals`:** suppress the
+   GFW `departed` for any US-origin leg whose departure NOAA already covers
+   (match on `mmsi` + `|Δt|` + origin terminal), so `legs.py` pairs each US→EU leg
+   once. Without this the in-transit volume doubles.
+4. Run `make signals` → confirm EU arrival signals appear, and that
+   `gas_in_transit_volume` is **not** doubled vs the Phase-1 US-only baseline (the
+   reconciliation invariant — a quick `n_legs` sanity check on the US→EU lane).
 
 **Phase 3 — GFW Events API (2012–2016 gap fill)**
 
@@ -339,9 +504,11 @@ phase until the previous phase is committed and tests pass.
    several GB. Filter early to `vessel_type = 'BUNKER_OR_TANKER'` or to the LNG
    carrier MMSI list before loading into memory.
 
-5. **`LAST_FIX_SQL` rework timing**: The `DISTINCT ON` query in `legs.py` (noted
-   with a comment) will full-scan the hypertable once NOAA rows land. Rework to a
-   per-MMSI MAX subquery before Phase 1 `make signals` to avoid OOM.
+5. **`LAST_FIX_SQL` rework timing** — *largely resolved by §3.8.* The `DISTINCT ON`
+   query in `legs.py` would full-scan the hypertable once NOAA rows land, but the
+   §3.8 spatial pre-filter keeps `ais_fixes` 1–2 orders of magnitude smaller than
+   the naive load, so the scan stays tractable. Re-measure after Phase 1; only
+   rework to a per-MMSI MAX subquery if the pre-filtered table still strains it.
 
 6. **ALSI TOS check**: Confirm GIE API licence permits use in a commercially-oriented
    research/portfolio context before publishing any ALSI-derived output.

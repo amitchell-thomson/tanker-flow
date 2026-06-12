@@ -81,6 +81,21 @@ clean series — they step. Rules for the modelling layer:
   `'mmsi_filter'` after, mirroring `config.regime_of`), so every series below can
   be segmented on it directly in SQL — no derivation needed.
 
+- **Backfill generalises the seam into a multi-fidelity rule.** The historical
+  backfill (`ingestion/historical/PLAN.md`) adds two more regimes — `noaa`
+  (exhaustive Class A, US, 2015+) and `gfw` (voyage-arc fidelity, EU+global,
+  2017+) — so `regime` becomes source-aware (§3.4 of the plan), and the rule above
+  generalises from "never cross the 2026-05-30 seam" to **"only concatenate series
+  of equal fidelity; render every fidelity change as a visible discontinuity."**
+  The crucial consequence for signal-building: on the **US side**, `noaa` and
+  `mmsi_filter` are the *same* fidelity (NOAA exhaustive; the MMSI filter
+  subscribes to every LNG MMSI), and NOAA retroactively overwrites the throttled
+  `bbox` window — so the US export series (#6–11, `gas_loading_us`) becomes a
+  clean, seam-free **2015→now** line and the small-sample obstacle below
+  *disappears* there. The **EU side** keeps one real fidelity step at the
+  `gfw → mmsi_filter` boundary (arc-fidelity → full-fidelity) that must enter any
+  EU model as a regime indicator, never a blend.
+
 Full provenance and per-signal impact: `docs/review-2026-05-31-pre-signal-audit.md`
 (§0) and the post-hardening re-audit `docs/review-2026-05-31-post-hardening-audit.md`,
 which records the must-fixes (naive pairing, phantom legs, dest_parser, FSRU hosts)
@@ -105,6 +120,33 @@ avoid looking for fields where they don't live:
 - **Registry weights:** `vessel_registry.dwt` is 100% populated (#1 fully
   supported); `gas_capacity_m3` is missing for 4 (#2); `design_draught ≤ 0` for
   75/780 in-scope (those laden flags fall back to flow-direction).
+
+### 0·6·1 · Signal fidelity by source (which signals get historical depth)
+
+Once the backfill lands, not every signal gets the same history. This matrix
+(mirrored in `ingestion/historical/PLAN.md` §4.1) says which signals can be
+trained/validated on a deep panel *now* and which begin only at the live cutover:
+
+| Signal family | `noaa` (US) | `gfw` (EU) | `mmsi_filter` (live) |
+|---|---|---|---|
+| US loadings #9–11, `gas_loading_us` | ✅ full, 2015+ | — | ✅ |
+| US queue/berth #6–8 | ✅ full, 2015+ | — | ✅ |
+| EU arrivals #4, `gas_discharging_eu` (count) | — | ✅ count, 2017+ | ✅ |
+| EU berth-amortized `gas_discharging_eu` | — | ⚠️ no real dwell → terminal-mean estimate | ✅ |
+| **EU queue/berth #12–16** | — | ❌ **no history** (no `anchorage_entry`) | ✅ |
+| In-transit #1/#2, `gas_in_transit_volume` | ⚠️ departure only | ⚠️ arrival only | ✅ |
+| **#1 reconstructed: NOAA dep ⋈ GFW arr** | **✅ full leg, 2017+** | | ✅ |
+| Voyage age #20 | ✅ dep obs | arr obs | ✅ |
+| laden source | ✅ draught | ❌ flow_direction | ✅ draught |
+
+The headline in-transit volume (#1/#2/`gas_in_transit_volume`) gets full history
+*only via the NOAA-departure ⋈ GFW-arrival reconciliation* (`PLAN.md` §3.7) — the
+two sources are complementary halves of one leg, and without the dedup the leg is
+paired twice and the volume doubles. **EU queue/berth signals #12–16 get no
+historical training set** (GFW voyage arcs carry no `anchorage_entry`); they begin
+only at the live `mmsi_filter` cutover. §3.5 of the plan argues EU queue is
+structurally near-zero in normal conditions, so this is a tolerable gap, not a
+hole in the spread thesis.
 
 ---
 
@@ -207,6 +249,14 @@ Decisions baked in:
 > *Mechanism*: Long European queue = cargoes stacking up = local oversupply, TTF
 > softens, spread narrows. Short queue = terminals accepting immediately =
 > tight demand, TTF firms, spread widens.
+
+> **No historical depth (live-cutover-only).** #12–16 need `anchorage_entry`,
+> which only the live state machine emits — GFW voyage arcs can't produce it (§0·6·1).
+> So these series begin at the 2026-05-30 `mmsi_filter` cutover with no backfill
+> training set, unlike the US queue signals (#6–8), which NOAA reconstructs to 2015.
+> Per §3.5 of `PLAN.md`, EU queue time is structurally near-zero in normal markets
+> (laden boil-off forces pre-coordinated berthing), so the missing history is a
+> minor gap rather than a hole in the thesis.
 
 ---
 
