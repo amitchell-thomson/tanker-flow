@@ -77,17 +77,19 @@ def parse_imo(value) -> int | None:
 # ----------------------------------------------------------------------------- #
 # Download + read (Tier 1)
 # ----------------------------------------------------------------------------- #
-def download_zip(d: date, raw_dir: Path) -> Path:
-    """Stream the daily zip to disk (one file at a time). Returns the local path."""
+async def _download(client: httpx.AsyncClient, d: date, raw_dir: Path) -> Path:
+    """Stream one daily zip to disk over a shared async client (so many days
+    download in parallel — NOAA throttles a single TCP stream to ~21 Mbps, well
+    below a fast line, so parallel streams aggregate). Raises FileNotFoundError on
+    a NOAA gap day so the caller can skip it."""
     raw_dir.mkdir(parents=True, exist_ok=True)
     dest = raw_dir / f"AIS_{d.year}_{d.month:02d}_{d.day:02d}.zip"
-    url = day_url(d)
-    with httpx.stream("GET", url, follow_redirects=True, timeout=None) as r:
+    async with client.stream("GET", day_url(d)) as r:
         if r.status_code == 404:
-            raise FileNotFoundError(f"NOAA has no file for {d} ({url})")
+            raise FileNotFoundError(f"NOAA has no file for {d} ({day_url(d)})")
         r.raise_for_status()
         with dest.open("wb") as fh:
-            for chunk in r.iter_bytes(chunk_size=1 << 20):
+            async for chunk in r.aiter_bytes(chunk_size=1 << 20):
                 fh.write(chunk)
     return dest
 
@@ -111,6 +113,15 @@ def write_archive(df: pd.DataFrame, path: Path) -> None:
     cols = ["MMSI", "fix_ts", "LAT", "LON", "SOG", "COG", "VesselName",
             "imo_int", "VesselType", "Status", "Draft"]
     df[cols].to_parquet(path, compression="zstd", index=False)
+
+
+def _read_and_archive(d: date, zip_path: Path, archive_dir: Path) -> pd.DataFrame:
+    """The CPU-bound half (decompress + parse + parquet write). Run in a worker
+    thread so it never stalls concurrent downloads on the event loop; pyarrow's
+    reader releases the GIL, so several of these genuinely run in parallel."""
+    df = read_tankers(zip_path)
+    write_archive(df, archive_path(d, archive_dir))
+    return df
 
 
 # ----------------------------------------------------------------------------- #
@@ -195,37 +206,105 @@ async def load_tier2(pool: asyncpg.Pool, df: pd.DataFrame) -> tuple[int, int]:
 
 
 # ----------------------------------------------------------------------------- #
-# Per-day orchestration
+# Orchestration — bounded-concurrent download, one-at-a-time processing
 # ----------------------------------------------------------------------------- #
-async def process_day(
+DEFAULT_CONCURRENCY = 6  # parallel day downloads (run natively for full line speed)
+MAX_CONCURRENT_READS = 3  # cap simultaneous CSV reads — each transiently holds the
+#                           full 7M-row file in memory, so this bounds RAM separately
+#                           from the (higher) download concurrency.
+
+
+async def _archive_and_load(
+    pool: asyncpg.Pool | None,
+    d: date,
+    zip_path: Path,
+    archive_dir: Path,
+    read_sem: asyncio.Semaphore,
+) -> None:
+    """Tier-1 archive (in a thread, memory-bounded by read_sem) + Tier-2 DB load."""
+    async with read_sem:
+        df = await asyncio.to_thread(_read_and_archive, d, zip_path, archive_dir)
+    msg = f"{d}: archived {len(df):,} tanker fixes"
+    if pool is not None:
+        fixes, state = await load_tier2(pool, df)
+        msg += f" | tier-2: {fixes:,} ais_fixes + {state:,} vessel_state (LNG near US terminals)"
+    logger.info(msg)
+
+
+async def _process_one(
+    sem: asyncio.Semaphore,
+    read_sem: asyncio.Semaphore,
+    client: httpx.AsyncClient,
     pool: asyncpg.Pool | None,
     d: date,
     *,
-    local: Path | None = None,
+    raw_dir: Path,
+    archive_dir: Path,
+    keep_zip: bool,
+    force: bool,
+) -> None:
+    """One day: download (bounded by `sem`) -> archive -> Tier-2 -> delete the zip.
+    `sem` bounds days *in flight*, so at most `sem._value` zips ever sit on disk —
+    peak raw footprint stays ~N*270MB regardless of range length (PLAN.md §3.8)."""
+    arc = archive_path(d, archive_dir)
+    if arc.exists() and not force:
+        logger.info("%s already archived — skipping", d)
+        return
+    async with sem:
+        try:
+            zip_path = await _download(client, d, raw_dir)
+        except FileNotFoundError as e:
+            logger.warning("%s", e)  # NOAA gap day — skip, keep going
+            return
+        try:
+            await _archive_and_load(pool, d, zip_path, archive_dir, read_sem)
+        finally:
+            if not keep_zip and zip_path.exists():
+                zip_path.unlink()
+
+
+async def run_range(
+    pool: asyncpg.Pool | None,
+    start: date,
+    end: date,
+    *,
+    concurrency: int = DEFAULT_CONCURRENCY,
     raw_dir: Path = RAW_DIR,
     archive_dir: Path = ARCHIVE_DIR,
     keep_zip: bool = False,
     force: bool = False,
 ) -> None:
-    arc = archive_path(d, archive_dir)
-    if arc.exists() and not force and local is None:
-        logger.info("%s already archived (%s) — skipping", d, arc.name)
-        return
+    sem = asyncio.Semaphore(concurrency)
+    read_sem = asyncio.Semaphore(min(concurrency, MAX_CONCURRENT_READS))
+    limits = httpx.Limits(
+        max_connections=concurrency + 2, max_keepalive_connections=concurrency
+    )
+    timeout = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
+    async with httpx.AsyncClient(
+        follow_redirects=True, limits=limits, timeout=timeout
+    ) as client:
+        await asyncio.gather(
+            *(
+                _process_one(
+                    sem, read_sem, client, pool, d,
+                    raw_dir=raw_dir, archive_dir=archive_dir,
+                    keep_zip=keep_zip, force=force,
+                )
+                for d in daterange(start, end)
+            )
+        )
 
-    zip_path = local if local is not None else download_zip(d, raw_dir)
-    try:
-        df = read_tankers(zip_path)
-        write_archive(df, arc)
-        msg = f"{d}: archived {len(df):,} tanker fixes -> {arc}"
-        if pool is not None:
-            fixes, state = await load_tier2(pool, df)
-            msg += f" | tier-2: {fixes:,} ais_fixes + {state:,} vessel_state (LNG near US terminals)"
-        logger.info(msg)
-    finally:
-        # One-at-a-time: drop the raw zip before the next day (unless it was a
-        # caller-supplied --local file, which we leave alone).
-        if local is None and not keep_zip and zip_path.exists():
-            zip_path.unlink()
+
+async def process_local(
+    pool: asyncpg.Pool | None, local_path: Path, archive_dir: Path, *, force: bool = False
+) -> None:
+    """Process an already-downloaded zip (no download, no delete) — dev/validation."""
+    d = _date_from_name(local_path.name)
+    arc = archive_path(d, archive_dir)
+    if arc.exists() and not force:
+        logger.info("%s already archived — skipping", d)
+        return
+    await _archive_and_load(pool, d, local_path, archive_dir, asyncio.Semaphore(1))
 
 
 def daterange(start: date, end: date):
@@ -241,6 +320,10 @@ async def main() -> None:
     ap.add_argument("--start", help="range start YYYY-MM-DD")
     ap.add_argument("--end", help="range end YYYY-MM-DD (inclusive)")
     ap.add_argument("--local", help="process an already-downloaded zip (no download)")
+    ap.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY,
+                    help=f"parallel day downloads (default {DEFAULT_CONCURRENCY}; "
+                         "peak disk ~= N x 270MB. Run NATIVELY for full speed — the "
+                         "agent sandbox throttles + breaks parallel TLS)")
     ap.add_argument("--archive-dir", default=str(ARCHIVE_DIR))
     ap.add_argument("--raw-dir", default=str(RAW_DIR))
     ap.add_argument("--keep-zip", action="store_true", help="don't delete the raw zip after processing")
@@ -250,23 +333,26 @@ async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     archive_dir, raw_dir = Path(args.archive_dir), Path(args.raw_dir)
-    pool = None if args.no_db else await asyncpg.create_pool(config.settings.database_url)
+    pool = (
+        None
+        if args.no_db
+        else await asyncpg.create_pool(
+            config.settings.database_url,
+            min_size=2,
+            max_size=max(10, args.concurrency + 2),
+        )
+    )
     try:
         if args.local:
-            lp = Path(args.local)
-            d = _date_from_name(lp.name)
-            await process_day(pool, d, local=lp, archive_dir=archive_dir,
-                              keep_zip=args.keep_zip, force=args.force)
+            await process_local(pool, Path(args.local), archive_dir, force=args.force)
         elif args.date:
-            await process_day(pool, _d(args.date), raw_dir=raw_dir, archive_dir=archive_dir,
-                              keep_zip=args.keep_zip, force=args.force)
+            d = _d(args.date)
+            await run_range(pool, d, d, concurrency=1, raw_dir=raw_dir,
+                            archive_dir=archive_dir, keep_zip=args.keep_zip, force=args.force)
         elif args.start and args.end:
-            for d in daterange(_d(args.start), _d(args.end)):
-                try:
-                    await process_day(pool, d, raw_dir=raw_dir, archive_dir=archive_dir,
-                                      keep_zip=args.keep_zip, force=args.force)
-                except FileNotFoundError as e:
-                    logger.warning("%s", e)  # NOAA gap day — skip, keep going
+            await run_range(pool, _d(args.start), _d(args.end),
+                            concurrency=args.concurrency, raw_dir=raw_dir,
+                            archive_dir=archive_dir, keep_zip=args.keep_zip, force=args.force)
         else:
             ap.error("give --date, --start/--end, or --local")
     finally:

@@ -1,4 +1,4 @@
-.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events scoring signals vf-rescue vf-rescue-dry vf-status refresh-fleet discover discover-dry discover-berths discover-berths-dry backup eia eia-full capture-rate coverage
+.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events backfill-noaa scoring signals vf-rescue vf-rescue-dry vf-status refresh-fleet discover discover-dry discover-berths discover-berths-dry backup eia eia-full capture-rate coverage
 
 up:
 	docker compose up -d
@@ -49,6 +49,13 @@ viz:
 
 port-events:
 	uv run python -m pipeline.port_events
+
+# Historical NOAA US AIS backfill (two-tier: tanker Parquet archive + LNG-in-buffer
+# into ais_fixes). Bounded-concurrent download, one-at-a-time on disk. RUN NATIVELY
+# (not via the agent sandbox, which throttles + breaks parallel TLS).
+# Usage: make backfill-noaa START=2022-01-01 END=2022-12-31 [N=6]
+backfill-noaa:
+	uv run python -m ingestion.historical.noaa_ais --start $(START) --end $(END) --concurrency $(or $(N),6)
 
 seed-unlocodes:
 	docker exec -i tanker_db psql -U tanker_user -d tanker_flow < db/seed/terminal_unlocodes.sql
