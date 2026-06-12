@@ -364,21 +364,24 @@ async def run_range(
         overall_task = overall.add_task("backfill", total=len(days))
         live_cm = Live(Group(overall, downloads), console=console, refresh_per_second=8)
 
+    # `live_cm` (Live, or nullcontext) is a SYNCHRONOUS context manager — enter it
+    # with a plain `with` nested inside the async client (not `async with`).
     async with httpx.AsyncClient(
         follow_redirects=True, limits=limits, timeout=timeout
-    ) as client, live_cm:
-        await asyncio.gather(
-            *(
-                _process_one(
-                    sem, read_sem, client, pool, d,
-                    raw_dir=raw_dir, archive_dir=archive_dir,
-                    keep_zip=keep_zip, force=force,
-                    overall=overall, overall_task=overall_task,
-                    downloads=downloads, console=console,
+    ) as client:
+        with live_cm:
+            await asyncio.gather(
+                *(
+                    _process_one(
+                        sem, read_sem, client, pool, d,
+                        raw_dir=raw_dir, archive_dir=archive_dir,
+                        keep_zip=keep_zip, force=force,
+                        overall=overall, overall_task=overall_task,
+                        downloads=downloads, console=console,
+                    )
+                    for d in days
                 )
-                for d in days
             )
-        )
 
 
 async def process_local(
