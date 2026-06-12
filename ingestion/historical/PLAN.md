@@ -16,10 +16,21 @@ pipeline.
 | Coverage    | Full US coastline — all seven `usgulf` / `usatlantic` terminals |
 | Depth       | 2015 available, but **start at 2016** — see note below       |
 | Granularity | ~1-min intervals for Class A vessels (LNG carriers)         |
-| Format      | Zipped CSV by UTM zone × year × month                       |
+| Format      | **Nationwide daily zipped CSV** (`AIS_YYYY_MM_DD.zip`) — *verified 2026-06* |
 | Licence     | Public domain (US federal data)                             |
-| URL         | marinecadastre.gov/nationalaisdata/                         |
+| URL         | `https://coast.noaa.gov/htdata/CMSP/AISDataHandler/{YYYY}/AIS_{YYYY}_{MM}_{DD}.zip` |
+| Volume      | ~300 MB/zip, ~900 MB/day decompressed, **~108 GB/yr** (all vessels) |
 | Cost        | Free                                                        |
+
+> **Plan correction (verified 2026-06, resolves open Q#1).** The current
+> MarineCadastre layout is **nationwide daily files**, not the old UTM-zone ×
+> month split (that was the 2009–2017 geodatabase era). So there is **no UTM-zone →
+> terminal mapping to build** — open Q#1 is moot. The trade-off is volume: each day
+> is one ~900 MB nationwide CSV of *all* vessel types, so 2016→now is ~1 TB of
+> downloads. We never *store* that — `noaa_ais.py` streams each daily CSV, filters
+> to tankers (`VesselType 80–89`) within the §3.8 terminal buffer, and discards the
+> rest — but we do have to *fetch and decompress* it. See §6 open Q#1 for the
+> where-to-run-it decision.
 
 **Role in pipeline:** Primary backfill path for the US supply side. Raw fixes go into
 `ais_fixes` (source = `'noaa-ais'`), the existing state machine runs over them, and
@@ -486,10 +497,19 @@ phase until the previous phase is committed and tests pass.
 
 ## 6. Key open questions
 
-1. **NOAA UTM zone mapping**: Which UTM zones cover the `usgulf` / `usatlantic`
-   terminals? Need a zone-to-terminal mapping so we only download the relevant
-   files (US Gulf is UTM 15–16; US Atlantic is UTM 17–18). Confirm at
-   marinecadastre.gov/nationalaisdata/ before downloading.
+1. **NOAA download location — the where-to-run-it decision** *(open; replaces the
+   now-resolved UTM-zone question — see §1.1: the layout is nationwide daily files,
+   so there is no UTM-zone mapping to build)*. 2016→now is ~1 TB of daily
+   nationwide CSVs to fetch and decompress (we keep only the §3.8-filtered tankers).
+   Three places to run it: **(a)** the home box (simplest; ~1 TB over home
+   broadband ties up bandwidth for days); **(b)** the existing Oracle worker-1 VM
+   (ingress is free, streams one file at a time, runs unattended — good fit); **(c)**
+   a temporary larger cloud instance, ideally in the same region as the source if
+   it is mirrored to an S3/GCS open-data bucket, so the filter runs *next to the
+   data* and only the tiny result egresses. **Recommended phasing:** validate the
+   loader on a **single year first (2022 — it contains the Freeport outage, a known
+   labelled test event)**, which runs anywhere, before committing infra to the full
+   2016→now sweep.
 
 2. **GFW anchorage IDs → terminal_id**: GFW's anchorage registry (`anchorages.csv`
    or via API) needs a one-time mapping to `terminals.terminal_id`. Build a
