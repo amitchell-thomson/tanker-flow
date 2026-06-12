@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     aisstream_api_key_alt: str
     vf_api_key: str = ""
     eia_api_key: str = ""  # free key from https://www.eia.gov/opendata/
+    gfw_api_key: str = ""  # Global Fishing Watch API token (historical EU backfill, Phases 2-3)
 
     # --- Multi-worker sharding (Stage 3) -------------------------------------
     # The single-worker default (WORKER_COUNT=1) makes every modulo/partition in

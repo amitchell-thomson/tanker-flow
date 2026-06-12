@@ -25,6 +25,7 @@ dependencies = [
     "matplotlib>=3.10.9",
     "datashader>=0.19.1",
     "pypdf>=6.12.2",
+    "pyarrow>=24.0.0",
 ]
 
 [dependency-groups]

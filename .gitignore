@@ -7,3 +7,7 @@ __pycache__/
 *.gpkg-shm
 *.gpkg-wal
 logs/
+# Historical backfill: raw NOAA downloads (transient) + tanker Parquet archive
+data/noaa_raw/
+data/noaa_archive/
+*.aiscatcher_page.html
