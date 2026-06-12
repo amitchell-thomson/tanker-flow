@@ -10,56 +10,69 @@ data**, plus how to control for the many non-tanker drivers of the spread.
 
 ## 0 · The small-sample problem, stated precisely
 
-> **Backfill reframe (2026-06, read this first).** This section was written for the
-> live-only corpus (`N ≈ 45`, the 2026-05-30 seam). The historical backfill
-> (`ingestion/historical/PLAN.md`) changes the picture *asymmetrically*, and the
-> rest of this doc should be read through that lens:
+> **Two corpora — keep them separate (read this first).** Every sample-size figure
+> in this doc is one of two things, and they differ by ~50×. The whole §0 argument
+> is about the **live-only** corpus; the historical backfill
+> (`ingestion/historical/PLAN.md`) supplies the other.
 >
-> - **US supply side — the small-sample problem largely dissolves.** NOAA gives
->   exhaustive Class-A history to 2015 and *retroactively overwrites* the throttled
->   `bbox` window, so the US export signals (#6–11, `gas_loading_us`) become a
->   clean, **seam-free decade** at the same fidelity as the live feed. The §1–§5
->   physical nowcasts (kinematic ETA, Poisson/NB counts, Cox/Weibull survival,
->   Hawkes) can be **trained and walk-forward-validated on years, not weeks**, and
->   the hierarchical terminal pooling (Part IV.2) finally has the data to bite.
+> | Corpus | Span | `N` (daily rows) | `N_eff` (ρ=0.8) | What it's for |
+> |---|---|---|---|---|
+> | **Live-only** (as of 2026-06-12) | 2026-04-14 → now | **≈ 60** | **≈ 7** | the only data for signals with no historical source (EU queue #12–16) and the live tail in isolation |
+> | *reference: one full clean year* | — | 250 | ≈ 28 | the autocorrelation ceiling — even a year is thin |
+> | **With historical backfill** | 2017 → now | **≈ 3,000** | **≈ 330** | training/validating every signal that *has* a historical source (all of Part II + the spread model) |
+>
+> `N_eff = N·(1−ρ)/(1+ρ) ≈ N/9` at ρ=0.8 — so live `N ≈ 60` is worth only
+> **≈ 7** independent points, while the backfilled `N ≈ 3,000` is worth **≈ 330**.
+> That ~50× jump in effective information is the entire reason for the backfill.
+>
+> The backfill changes the picture **asymmetrically** — read the rest of the doc
+> through this lens:
+>
+> - **US supply side — the small-sample problem dissolves.** NOAA gives exhaustive
+>   Class-A history to 2016 (US LNG exports begin then) and *retroactively
+>   overwrites* the throttled `bbox` window, so the US export signals (#6–11,
+>   `gas_loading_us`) become a clean, **seam-free decade** at the same fidelity as
+>   the live feed. The §1–§5 physical nowcasts (kinematic ETA, Poisson/NB counts,
+>   Cox/Weibull survival, Hawkes) can be **trained and walk-forward-validated on
+>   years, not weeks** (`N_eff` in the hundreds), and the hierarchical terminal
+>   pooling (Part IV.2) finally has the data to bite.
 > - **EU demand side — deeper but coarser, with one real seam.** GFW voyage arcs
->   give EU *arrival counts* to 2017 but no queue/berth internals (#12–16 stay
->   live-cutover-only; see SIGNALS.md §0·6·1). The `gfw → mmsi_filter` boundary is
->   a genuine **fidelity step** that must enter EU models as a regime indicator —
->   not the kind of seam you train across, but one you *condition on*.
-> - **Spread model — moves from "premature" to "trainable."** With NOAA (2015+) +
+>   give EU *arrival counts* to 2017 but no queue/berth internals — **#12–16 stay
+>   live-only** (`N_eff ≈ 7`; see SIGNALS.md §0·6·1). The `gfw → mmsi_filter`
+>   boundary is a genuine **fidelity step** that must enter EU models as a regime
+>   indicator — not a seam you train across, but one you *condition on*.
+> - **Spread model — moves from "premature" to "trainable."** With NOAA (2016+) +
 >   GFW (2017+) + the control set (EIA, GIE AGSI, degree-days, all with deep
->   history), the daily panel goes from `N ≈ 45` to **~3,000 rows (2017→now)** where
->   both US-export and EU-arrival signals coexist. `N_eff` rises from ~28 into the
->   hundreds. Part III's framing flips from *"confirm edge only"* to *"fit and
->   validate with walk-forward CV"* — the shrinkage/Bayesian tooling stays the
->   right default (the spread is still low-SNR and confounded), but it is no longer
->   a placeholder. The one caveat that survives in full force: the EU fidelity seam
->   and the Part V control-partialling matter *more*, not less, on a long panel.
->
-> The numbers in the rest of §0 (`N ≈ 45`, `N_eff ≈ 28`) describe the **live-only**
-> corpus and remain the correct figures for any signal with no historical source
-> (#12–16) and for the live tail in isolation.
+>   history), the daily panel goes from live `N ≈ 60` (`N_eff ≈ 7`) to **≈ 3,000
+>   rows** (`N_eff ≈ 330`). Part III's framing flips from *"confirm edge only"* to
+>   *"fit and validate with walk-forward CV"* — the shrinkage/Bayesian tooling
+>   stays the right default (the spread is still low-SNR and confounded), but it is
+>   no longer a placeholder. The one caveat that survives in full force: the EU
+>   fidelity seam and the Part V control-partialling matter *more*, not less, on a
+>   long panel.
 
-Everything below is shaped by one number: the effective sample size.
+Everything below is shaped by one number: the effective sample size. **Unless a
+passage is explicitly tagged "with backfill", every `N` / `N_eff` figure in §0 is
+the live-only corpus** (≈ 60 rows / `N_eff ≈ 7` as of 2026-06-12) — the regime
+that has no historical source, and the worst case the modelling must survive.
 
-At daily resolution, a year is `N ≈ 250` rows; today you have `N ≈ 45`. But the
-*effective* size is smaller still, because gas prices and flow signals are
-strongly autocorrelated. For an AR(1) series with autocorrelation `ρ`, the
-information content of `N` observations about the mean is only
+For an AR(1) series with autocorrelation `ρ`, the information content of `N`
+observations about the mean is only
 
 ```
 N_eff ≈ N · (1 − ρ) / (1 + ρ)
 ```
 
-With `ρ = 0.8` (typical for a daily spread level), `N = 250` carries the
-information of `N_eff ≈ 28` independent points. **This is the central fact.** It
-means:
+With `ρ = 0.8` (typical for a daily spread level), the live `N ≈ 60` carries the
+information of just `N_eff ≈ 7` independent points; even a *full clean year*
+(`N = 250`) tops out at `N_eff ≈ 28`. **This is the central fact** for the
+live-only regime. It means:
 
 1. **Parameters must be scarce.** OLS variance is `Var(β̂) = σ²(XᵀX)⁻¹`; with
    `p` features and `N_eff` effective rows, the variance of each coefficient
-   blows up as `p → N_eff`. With 40 candidate signals and `N_eff ≈ 28`,
-   unregularised regression is pure noise-fitting.
+   blows up as `p → N_eff`. With 40 candidate signals and live `N_eff ≈ 7`,
+   unregularised regression is pure noise-fitting (the backfilled `N_eff ≈ 330`
+   is what lifts this constraint for any signal with a historical source).
 2. **You must buy information from somewhere other than calendar time.** Three
    escape hatches recur throughout this doc:
    - **Event-level data** (survival, point processes) — hundreds of *events*
@@ -234,9 +247,12 @@ online. Ideal for a live "current US export rate ± band" readout.
 ## Part III · Models for the spread directly (low SNR, small-data hostile)
 
 Target family **T2**: HH/TTF spread, level or first-difference, at 1-week and
-4-week horizons. Honest framing: with `N_eff ≈ 28` you will not get a reliable
-point forecast soon. The goal here is **shrinkage + priors + uncertainty**, not
-heroics. Anything fancier must beat the §6 baseline on *walk-forward* CV.
+4-week horizons. Honest framing **on the live-only corpus** (`N_eff ≈ 7`): you will
+not get a reliable point forecast, so the goal is **shrinkage + priors +
+uncertainty**, not heroics. **With the backfilled panel** (`N_eff ≈ 330`, see §0)
+this stops being a placeholder and becomes a real fit — but the same tooling still
+applies, because the spread is low-SNR and confounded regardless of `N`. Anything
+fancier must beat the §6 baseline on *walk-forward* CV.
 
 ### 6 · Regularised linear regression — Ridge / Lasso / Elastic Net
 

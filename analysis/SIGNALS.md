@@ -51,7 +51,7 @@ inherits an artifactual break.
 
 | | Old regime (bbox + throttle) | New regime (server-side MMSI filter) |
 |---|---|---|
-| Span | 2026-04-14 → 2026-05-30 09:26 (~6.5 wk, **~93% of `port_events`**) | 2026-05-30 09:27 → present |
+| Span | 2026-04-14 → 2026-05-30 09:26 (~6.5 wk, **~77% of *live-collected* `port_events`** as of 2026-06-12, falling as the live tail grows) | 2026-05-30 09:27 → present |
 | Subscription | every vessel inside fixed geographic boxes | ~150 tier-ranked MMSIs from `priority_watchlist` |
 | Missingness | **stochastic** — AISstream throttles by dropping vessels ~at random from the return | **systematic** — vessels the scorer deprioritises are never subscribed |
 | Net bias | unbiased *selection*, noisy *capture* | biased *selection*, reliable *capture* |
@@ -62,12 +62,18 @@ clean series — they step. Rules for the modelling layer:
 - **Never train a model across 2026-05-30.** A spread model fit on data spanning
   the seam will learn the ingestion change as if it were a market move. Segment by
   regime, or start the training corpus at the cutover.
-- **The usable real-time history is ~6.5 weeks of a now-defunct regime + the live
-  tail** — `MODELS.md` works through the consequences (`N ≈ 45`, `N_eff ≈ 28`).
-  The old block is fit for validating *signal logic* (event detection, leg
-  geometry, queue/turn-time realism all survive random fix drops), **not** for
-  training the spread model. The real training corpus only begins accruing now,
-  under the new scheme.
+- **The usable *real-time* history is ~6.5 weeks of a now-defunct regime + the
+  live tail** — this is the **live-only corpus**: `N ≈ 60` daily rows worth only
+  `N_eff ≈ 7` independent points (ρ=0.8) as of 2026-06-12; `MODELS.md` §0 works
+  through the consequences. The old `bbox` block is fit for validating *signal
+  logic* (event detection, leg geometry, queue/turn-time realism all survive random
+  fix drops), **not** for training the spread model. **The historical backfill
+  (`ingestion/historical/PLAN.md`) is the escape from this constraint** — it lifts
+  the modelling corpus to `N ≈ 3,000` (`N_eff ≈ 330`) for every signal with a
+  historical source. The two percentages above (`bbox` ~77% of *live-collected*
+  events) describe only the live stream; once the backfill lands, both live regimes
+  together are a thin recent slice of a `port_events` table dominated by 2016+ NOAA
+  and 2017+ GFW events.
 - **Signal *extraction* is safe today; signal *modelling* is not yet.** Computing
   #1/#6/#9 from `port_events` is unaffected by the seam (each event is individually
   correct); fitting any `MODELS.md` spread model on a series that crosses it is not.
@@ -96,10 +102,11 @@ clean series — they step. Rules for the modelling layer:
   `gfw → mmsi_filter` boundary (arc-fidelity → full-fidelity) that must enter any
   EU model as a regime indicator, never a blend.
 
-Full provenance and per-signal impact: `docs/review-2026-05-31-pre-signal-audit.md`
-(§0) and the post-hardening re-audit `docs/review-2026-05-31-post-hardening-audit.md`,
-which records the must-fixes (naive pairing, phantom legs, dest_parser, FSRU hosts)
-as resolved or quarantined.
+The pre-signal-layer audit and its post-hardening re-audit recorded the must-fixes
+(naive pairing, phantom legs, dest_parser, FSRU hosts) as resolved or quarantined;
+those dated review docs were removed once their fixes landed (commit `5787b87`),
+and the surviving conclusions are folded into this section and the leg-foundation
+note in §1.
 
 ---
 
@@ -384,13 +391,17 @@ for the non-tanker drivers of the spread — has moved to its dedicated companio
 
 - **Physical nowcasts work today** (kinematic ETA propagation, Poisson/NB arrival
   counts, Cox/Weibull survival models for queue & berth time). They are high-SNR,
-  event-level, and validatable against EIA on the existing window.
-- **The spread model does not yet.** With `N ≈ 45` daily rows (`N_eff ≈ 28`) and
-  the 2026-05-30 regime seam, training a spread model is premature; the right
-  tools are shrinkage + Bayesian priors + honest uncertainty (regularised
-  regression, Bayesian structural time series, regime detection), not a point
-  forecast. **Never train across the seam** (§0.5). The usable training corpus
-  only begins accruing now, under the MMSI-filter regime.
+  event-level, and validatable against EIA — on the live window now, and on the
+  **NOAA-backfilled US decade** (2016+) once it lands.
+- **The spread model: premature on live data, trainable with the backfill.** On
+  the **live-only corpus** (`N ≈ 60` daily rows worth `N_eff ≈ 7`, plus the
+  2026-05-30 seam) training a spread model is premature — the right tools are
+  shrinkage + Bayesian priors + honest uncertainty (regularised regression,
+  Bayesian structural time series, regime detection), not a point forecast. The
+  **historical backfill** lifts this to `N ≈ 3,000` (`N_eff ≈ 330`, 2017→now), at
+  which point the spread model becomes a real fit — still uncertainty-first (the
+  spread stays low-SNR), with the `gfw → mmsi_filter` EU fidelity step carried as a
+  regime indicator. **Never train across a fidelity boundary** (§0.5 / §0·6·1).
 - **The edge is the dataset, not the method:** a clean, low-latency, per-vessel
   AIS feed (≈1 s ingest lag vs vendors' hours-to-days) and 24–48 h-early
   outage / change-point detection (#36–#38) — not smooth-model R².
