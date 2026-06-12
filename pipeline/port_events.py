@@ -100,6 +100,7 @@ SELECT
     f.lon,
     f.sog,
     f.nav_status,
+    f.source,
     COALESCE(
         array_agg(tz.terminal_id ORDER BY
             CASE tz.zone_type WHEN 'berth' THEN 0 WHEN 'anchorage' THEN 1 ELSE 2 END,
@@ -127,7 +128,7 @@ LEFT JOIN terminal_zones tz
 WHERE f.mmsi = ANY($1)
   AND f.lat IS NOT NULL
   AND f.lon IS NOT NULL
-GROUP BY f.mmsi, f.fix_ts, f.lat, f.lon, f.sog, f.nav_status
+GROUP BY f.mmsi, f.fix_ts, f.lat, f.lon, f.sog, f.nav_status, f.source
 ORDER BY f.mmsi, f.fix_ts
 """
 
@@ -138,10 +139,9 @@ INSERT INTO port_events
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 """
 
-# Source written for every state-machine event today. The NOAA backfill
-# (PLAN.md §3.4) will instead carry the triggering fix's source ('noaa-ais') so
-# its regime tags as 'noaa'; until that plumbing lands, all live events are
-# 'state_machine' → time-based bbox/mmsi_filter regime.
+# Default source for synthetic FSRU events (emitted without a triggering fix).
+# State-machine events instead carry their originating fix's mapped source
+# (Fix.source -> Event.source -> here), so NOAA-derived events tag regime 'noaa'.
 EVENT_SOURCE = "state_machine"
 
 
@@ -325,6 +325,10 @@ def _row_to_fix(row: asyncpg.Record) -> Fix:
     zone_types: list[str] = row["zone_types"] or []
     sub_zones: list[int] = row["sub_zones"] or []
     zones = tuple(zip(terminal_ids, zone_types, sub_zones, strict=True))
+    # Map ais_fixes.source -> the port_events.source domain: NOAA backfill fixes
+    # carry 'noaa-ais' (so regime tags 'noaa'); every live source (aisstream-*,
+    # vesselfinder) collapses to 'state_machine'. GFW rows never reach the machine.
+    fix_source = "noaa-ais" if row["source"] == "noaa-ais" else "state_machine"
     return Fix(
         fix_ts=row["fix_ts"],
         lat=row["lat"],
@@ -332,6 +336,7 @@ def _row_to_fix(row: asyncpg.Record) -> Fix:
         sog=row["sog"],
         nav_status=row["nav_status"],
         zones=zones,
+        source=fix_source,
     )
 
 
@@ -441,7 +446,7 @@ def _process_vessel(
                 laden,
                 laden_source,
                 ev.cold_start,
-                EVENT_SOURCE,
+                ev.source,
             )
         )
         summary["events_by_kind"][(zone, ev.event_type)] += 1

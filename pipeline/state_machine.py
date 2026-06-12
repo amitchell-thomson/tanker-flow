@@ -50,6 +50,10 @@ class Fix:
     # Candidate (terminal_id, zone_type, sub_zone) tuples for this fix. Empty
     # means the fix is in open ocean (matched no polygon).
     zones: tuple[tuple[int, str, int], ...]
+    # Provenance, mapped to the port_events.source domain ('noaa-ais' for NOAA
+    # backfill fixes, 'state_machine' for live). Carried onto every Event so the
+    # generated regime column tags NOAA events 'noaa' (PLAN.md §3.4).
+    source: str = "state_machine"
 
 
 @dataclass(frozen=True)
@@ -60,6 +64,7 @@ class Event:
     lat: float
     lon: float
     cold_start: bool = False
+    source: str = "state_machine"  # provenance of the originating fix (see Fix.source)
     # Every terminal_id whose polygon contained the originating fix. Used by
     # the inline envelope-reattribution path (_can_reattribute_envelope_to) to
     # detect "earlier event was in a region also covered by the moored
@@ -126,6 +131,12 @@ class _Walker:
 
     events: list[Event] = field(default_factory=list)
 
+    # Source of the fix currently being processed — stamped onto each emitted
+    # Event. Set at the top of step(); homogeneous within a single-source stream
+    # (all NOAA, or all live), so the only imprecision is a back-dated synthetic
+    # close that straddles a NOAA->live gap, which is rare and cosmetic.
+    current_source: str = "state_machine"
+
     def _envelope_start_idx(self) -> int:
         """Index of the most recent zone_entry in self.events (the current envelope's first event)."""
         for i in range(len(self.events) - 1, -1, -1):
@@ -154,6 +165,7 @@ class _Walker:
                 lat=ev.lat,
                 lon=ev.lon,
                 cold_start=ev.cold_start,
+                source=ev.source,
                 candidate_terminal_ids=ev.candidate_terminal_ids,
             )
 
@@ -175,6 +187,7 @@ class _Walker:
                 lat=lat,
                 lon=lon,
                 cold_start=cold_start,
+                source=self.current_source,
                 candidate_terminal_ids=candidate_terminal_ids
                 if candidate_terminal_ids is not None
                 else frozenset({terminal_id}),
@@ -308,6 +321,10 @@ class _Walker:
             # already seen the vessel, just lost coverage).
             is_first_fix = False
 
+        # Stamp this fix's source onto the events it produces. Set AFTER the
+        # gap-close above (which is back-dated to the previous fix, so it keeps
+        # that fix's source — the source then survives a NOAA->live boundary).
+        self.current_source = fix.source
         resolved = self.resolve(fix.zones, fix.lat, fix.lon)
 
         # Cold-start only fires when the very first observed fix is already
