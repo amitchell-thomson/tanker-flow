@@ -103,6 +103,22 @@ AIS_BOUNDING_BOXES = [
 REGIME_CUTOVER = datetime(2026, 5, 30, 9, 27, 0, tzinfo=timezone.utc)
 
 
-def regime_of(ts: datetime) -> str:
-    """Return the ingestion regime ('bbox' | 'mmsi_filter') for a timestamp."""
+def regime_of(ts: datetime, source: str | None = None) -> str:
+    """Return the ingestion regime for an event — a *fidelity* tag, not just a
+    calendar one (see analysis/SIGNALS.md §0.5 and ingestion/historical/PLAN.md §3.4):
+
+      - 'noaa'        NOAA backfill (exhaustive Class A, US)  — source 'noaa-ais'
+      - 'gfw'         GFW voyages/events (voyage-arc fidelity) — source 'gfw_voyages'/'gfw_events'
+      - 'bbox'        live throttled bbox subscription         — live, pre-cutover
+      - 'mmsi_filter' live server-side MMSI filter             — live, post-cutover
+
+    `source` is the originating fix/event source. The live state-machine sources
+    ('state_machine'/'aisstream-*'/'vesselfinder') and a None source fall through
+    to the time-based bbox/mmsi_filter split. Mirrors the source-aware generated
+    `port_events.regime` column in db/init/schema.sql.
+    """
+    if source == "noaa-ais":
+        return "noaa"
+    if source in ("gfw_voyages", "gfw_events"):
+        return "gfw"
     return "bbox" if ts < REGIME_CUTOVER else "mmsi_filter"

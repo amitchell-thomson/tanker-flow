@@ -145,13 +145,25 @@ CREATE TABLE port_events (
     lon             REAL,
     laden_flag      BOOLEAN,
     laden_source    TEXT             CHECK (laden_source IN ('draught', 'flow_direction')),
-    -- Ingestion regime, generated from event_time vs the 2026-05-30 09:27 UTC
-    -- cutover (mirrors config.REGIME_CUTOVER): 'bbox' = old throttled bbox
-    -- subscription, 'mmsi_filter' = server-side MMSI filtering. STORED so it
-    -- can never drift. See docs/review-2026-05-31-pre-signal-audit.md §0.
+    -- Event provenance. 'state_machine' = derived from ais_fixes by the state
+    -- machine (live aisstream/vesselfinder AND NOAA backfill — both flow through
+    -- ais_fixes); 'noaa-ais' = a state-machine event whose triggering fix was a
+    -- NOAA backfill fix (set by the NOAA loader so regime tags 'noaa' — PLAN.md
+    -- §3.4); 'gfw_voyages'/'gfw_events' = directly-written historical rows that
+    -- survive `make port-events` (PLAN.md §2.1/§3.1).
+    source          TEXT             NOT NULL DEFAULT 'state_machine'
+                        CHECK (source IN ('state_machine','noaa-ais','gfw_voyages','gfw_events')),
+    -- Ingestion regime — a *fidelity* tag, source-aware (mirrors config.regime_of;
+    -- analysis/SIGNALS.md §0.5, PLAN.md §3.4). 'noaa' = exhaustive NOAA Class A,
+    -- 'gfw' = voyage-arc fidelity, else the live time split at the 2026-05-30 09:27
+    -- UTC cutover ('bbox' throttled → 'mmsi_filter'). STORED so it can never drift.
     regime          TEXT             GENERATED ALWAYS AS (
-                        CASE WHEN event_time < TIMESTAMPTZ '2026-05-30 09:27:00+00'
-                             THEN 'bbox' ELSE 'mmsi_filter' END) STORED,
+                        CASE
+                            WHEN source = 'noaa-ais' THEN 'noaa'
+                            WHEN source IN ('gfw_voyages','gfw_events') THEN 'gfw'
+                            WHEN event_time < TIMESTAMPTZ '2026-05-30 09:27:00+00' THEN 'bbox'
+                            ELSE 'mmsi_filter'
+                        END) STORED,
     cold_start      BOOLEAN          NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ      DEFAULT now(),
     CONSTRAINT valid_event_type CHECK (
@@ -190,7 +202,7 @@ CREATE TABLE signal_daily (
     signal_key   TEXT             NOT NULL,
     bucket_date  DATE             NOT NULL,
     zone_scope   TEXT             NOT NULL,
-    regime       TEXT             NOT NULL CHECK (regime IN ('bbox','mmsi_filter','all')),
+    regime       TEXT             NOT NULL CHECK (regime IN ('noaa','gfw','bbox','mmsi_filter','all')),
     value        DOUBLE PRECISION NOT NULL,
     n_legs       INTEGER,
     basis        TEXT             NOT NULL DEFAULT 'physical'
