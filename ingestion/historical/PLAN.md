@@ -210,7 +210,35 @@ This is the same logic already used by `port_events.py` for `laden_source =
 will all land in `regime = 'bbox'` (pre-2026-05-30). `signal.py` already handles
 the regime seam correctly (SIGNALS.md §0.5). No changes needed.
 
-### 3.5 Vessel registry matching
+`regime` captures the live-pipeline collection method (bbox throttling vs MMSI filter).
+It does NOT distinguish NOAA backfill from AISstream-bbox events, even though their
+coverage properties differ (NOAA: 100% Class A, no watchlist bias; AISstream-bbox:
+~10–40% per-vessel visibility due to throttling). Use `source` for that split in
+any model that needs to condition on data-collection quality within the bbox window.
+
+### 3.5 EU queue time is not a meaningful gap
+
+LNG carriers lose cargo continuously to boil-off (~0.1–0.15% per day at cryogenic
+temperature). A laden vessel waiting at anchorage off Rotterdam is literally burning
+product. Operators therefore pre-coordinate berthing windows with terminal schedulers
+and arrive as close to their slot as possible. EU import terminal queue times are
+structurally near-zero in normal market conditions — not a signal, a scheduling
+artefact.
+
+The US export side is the opposite: vessels arrive ballast (no cargo at risk) and
+queue at the sea buoy for loading arm slots. Sabine Pass, Freeport, and Calcasieu
+Pass each have single-lane approach channels and finite loading arm capacity. Berth
+queue depth at US export terminals IS a meaningful leading indicator: a stack of
+carriers waiting to load signals delayed departures and tightening in-transit supply
+~14–18 days later in Europe.
+
+Consequence: the `anchorage_entry → moored` queue-time signal (planned but deferred,
+#6/#12 in SIGNALS.md) matters primarily for US terminals and is fully derivable from
+NOAA historical data. Not having EU raw AIS historically is therefore barely a gap
+for queue-time analysis. Stress events (e.g. 2022 post-Ukraine EU congestion) show
+up better in ALSI inventory drawdown than in AIS queue depth anyway.
+
+### 3.6 Vessel registry matching
 
 NOAA fixes carry MMSI directly — no lookup needed. GFW events carry `ssvid` (=MMSI)
 and `vessel_id`. The loader must JOIN GFW events against `vessel_registry` on MMSI
