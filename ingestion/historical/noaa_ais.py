@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import ssl
 from contextlib import nullcontext
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -43,11 +44,12 @@ from rich.progress import (
     DownloadColumn,
     MofNCompleteColumn,
     Progress,
+    ProgressColumn,
     TextColumn,
     TimeElapsedColumn,
-    TimeRemainingColumn,
     TransferSpeedColumn,
 )
+from rich.text import Text
 
 import config
 
@@ -64,6 +66,12 @@ US_ZONES = ("usgulf", "usatlantic")
 # Fallback total for a download progress bar when the server omits Content-Length
 # (NOAA does send it; this only fires for the rare gap). A daily zip is ~270 MB.
 EXPECTED_ZIP_BYTES = 283_943_322
+
+# Over a multi-hour decade backfill, NOAA's CDN intermittently drops a TLS stream
+# mid-download (observed: `ssl.SSLError: record layer failure`) or returns a 5xx.
+# These are transient — retry the day with exponential backoff rather than let one
+# bad stream escape asyncio.gather and abort the whole run.
+DOWNLOAD_RETRIES = 5
 
 # Columns we parse from the daily CSV (the file has 17; we keep what the two tiers
 # need). VesselType filters tankers; IMO keys LNG resolution; Draft feeds laden.
@@ -106,22 +114,44 @@ async def _download(
     live per-file byte bar (Content-Length, or EXPECTED_ZIP_BYTES if absent)."""
     raw_dir.mkdir(parents=True, exist_ok=True)
     dest = raw_dir / f"AIS_{d.year}_{d.month:02d}_{d.day:02d}.zip"
-    async with client.stream("GET", day_url(d)) as r:
-        if r.status_code == 404:
-            raise FileNotFoundError(f"NOAA has no file for {d} ({day_url(d)})")
-        r.raise_for_status()
-        total = int(r.headers.get("content-length") or 0) or EXPECTED_ZIP_BYTES
-        task = dl_progress.add_task(d.isoformat(), total=total) if dl_progress else None
+    for attempt in range(1, DOWNLOAD_RETRIES + 1):
         try:
-            with dest.open("wb") as fh:
-                async for chunk in r.aiter_bytes(chunk_size=1 << 20):
-                    fh.write(chunk)
+            async with client.stream("GET", day_url(d)) as r:
+                if r.status_code == 404:
+                    raise FileNotFoundError(f"NOAA has no file for {d} ({day_url(d)})")
+                r.raise_for_status()
+                total = int(r.headers.get("content-length") or 0) or EXPECTED_ZIP_BYTES
+                task = dl_progress.add_task(d.isoformat(), total=total) if dl_progress else None
+                try:
+                    # Re-opened in "wb" each attempt — a partial stream is truncated,
+                    # so a retry restarts the day cleanly (no resume-within-file).
+                    with dest.open("wb") as fh:
+                        async for chunk in r.aiter_bytes(chunk_size=1 << 20):
+                            fh.write(chunk)
+                            if task is not None:
+                                dl_progress.update(task, advance=len(chunk))
+                finally:
                     if task is not None:
-                        dl_progress.update(task, advance=len(chunk))
-        finally:
-            if task is not None:
-                dl_progress.remove_task(task)
-    return dest
+                        dl_progress.remove_task(task)
+            return dest
+        except FileNotFoundError:
+            raise  # NOAA gap day — not transient; let the caller skip it
+        except (httpx.TransportError, ssl.SSLError, httpx.HTTPStatusError) as e:
+            # Retry transport/TLS drops and 5xx; surface a 4xx immediately.
+            transient = (
+                not isinstance(e, httpx.HTTPStatusError)
+                or e.response.status_code >= 500
+            )
+            if not transient or attempt == DOWNLOAD_RETRIES:
+                raise
+            backoff = min(2**attempt, 30)
+            logger.warning(
+                "download %s failed (attempt %d/%d): %r — retrying in %ds",
+                d, attempt, DOWNLOAD_RETRIES, e, backoff,
+            )
+            await asyncio.sleep(backoff)
+    # Unreachable: the loop either returns dest or raises on the final attempt.
+    raise RuntimeError(f"download {d}: exhausted retries without raising")
 
 
 def read_tankers(zip_path: Path) -> pd.DataFrame:
@@ -309,30 +339,89 @@ async def _process_one(
             finally:
                 if not keep_zip and zip_path.exists():
                     zip_path.unlink()
+    except Exception as e:
+        # One bad day (download retries exhausted, corrupt zip, DB blip) must not
+        # abort the gather. Leave it un-archived — the next run's arc.exists() skip
+        # resumes the range and retries exactly the days that didn't land.
+        _emit(console, f"{d}: FAILED — {e!r} (left un-archived; rerun to retry)")
     finally:
         if overall is not None:
             overall.advance(overall_task)
 
 
+def _fmt_duration(seconds: float) -> str:
+    """Compact human duration: '9h42m', '7m18s', '48s' — deliberately *not* the
+    H:MM:SS clock-time shape, so the ETA reads as 'time remaining', not 'time of day'."""
+    s = int(seconds)
+    if s >= 3600:
+        return f"{s // 3600}h{(s % 3600) // 60:02d}m"
+    if s >= 60:
+        return f"{s // 60}m{s % 60:02d}s"
+    return f"{s}s"
+
+
+class ETAColumn(ProgressColumn):
+    """ETA shown as both time-left and the projected wall-clock finish. Prefers
+    rich's recent-rate estimate (`task.speed`, the responsive EMA used by the old
+    TimeRemainingColumn — reflects NOAA's current throttled throughput), but falls
+    back to the overall average rate (elapsed ÷ fraction done) whenever that EMA
+    returns None — which is exactly when the old column blanked, as day completions
+    clump. So the number stays the familiar recent-rate one yet never goes blank,
+    and the wall-clock finish answers 'what time does it end?' directly."""
+
+    def render(self, task) -> Text:
+        if not task.total or not task.completed:
+            return Text("estimating…", style="cyan")
+        remaining_days = task.total - task.completed
+        if task.speed:  # recent-rate EMA (days/sec) — preferred when populated
+            remaining = remaining_days / task.speed
+        elif task.elapsed:  # fall back to average rate so the field never blanks
+            remaining = task.elapsed * remaining_days / task.completed
+        else:
+            return Text("estimating…", style="cyan")
+        now = datetime.now()
+        finish = now + timedelta(seconds=remaining)
+        clock = finish.strftime("%H:%M" if finish.date() == now.date() else "%a %H:%M")
+        return Text(f"{_fmt_duration(remaining)} left → finish {clock}", style="cyan")
+
+
+class AggregateSpeedColumn(ProgressColumn):
+    """Sum of transfer speed across the live per-download bars — the true aggregate
+    line throughput. The days bar moves no bytes of its own, so without this the only
+    speed shown is per-file; the parallel streams aggregate well above any single one."""
+
+    def __init__(self, downloads: Progress) -> None:
+        super().__init__()
+        self._downloads = downloads
+
+    def render(self, task) -> Text:
+        speed = sum(t.speed or 0.0 for t in self._downloads.tasks)
+        if speed <= 0:
+            return Text("— MB/s", style="dim")
+        return Text(f"{speed / 1e6:.1f} MB/s", style="bold green")
+
+
 def _build_progress() -> tuple[Console, Progress, Progress]:
-    """Overall days bar (rate-based ETA — the 'from expected time' estimate) above a
-    set of live per-download byte bars with transfer speed."""
+    """Overall days bar (average-rate ETA + aggregate throughput) above a set of live
+    per-download byte bars with per-file transfer speed."""
     console = Console()
-    overall = Progress(
-        TextColumn("[bold cyan]{task.description}"),
-        BarColumn(),
-        MofNCompleteColumn(),
-        TextColumn("days · {task.percentage:>3.0f}% · ETA"),
-        TimeRemainingColumn(),
-        TextColumn("· elapsed"),
-        TimeElapsedColumn(),
-        console=console,
-    )
     downloads = Progress(
         TextColumn("  [dim]↓ {task.description}"),
         BarColumn(bar_width=26),
         DownloadColumn(),
         TransferSpeedColumn(),
+        console=console,
+    )
+    overall = Progress(
+        TextColumn("[bold cyan]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TextColumn("days · {task.percentage:>3.0f}% ·"),
+        ETAColumn(),
+        TextColumn("·"),
+        AggregateSpeedColumn(downloads),
+        TextColumn("· elapsed"),
+        TimeElapsedColumn(),
         console=console,
     )
     return console, overall, downloads
