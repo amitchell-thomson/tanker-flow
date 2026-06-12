@@ -377,17 +377,25 @@ directly). Tankers are a minority of position rows and AIS compresses ~5–10× 
 columnar Parquet, so the decade archive is ~tens of GB (estimate — confirm with one
 sample file), not a TB. Not in TimescaleDB.
 
-**Tier 2 — pipeline (`ais_fixes`).** Only **LNG-carrier** fixes (registry-resolved
-by IMO, §3.6) **within ~50 km of a US `terminal_zones` polygon** (`ST_DWithin`) load
-into the hypertable for the state machine. Every signal the backfill feeds — leg
-endpoints, draught-at-departure, anchorage crossings, queue depth — lives within
-that buffer, and we are terrestrial-AIS-blind mid-ocean *by design* (SIGNALS.md §0),
-so the mid-Gulf transit fixes add nothing any signal consumes. This drops the
-hypertable row count by 1–2 orders of magnitude, keeps the state machine fast, and
-makes the `LAST_FIX_SQL` rework (open Q #5) unnecessary.
+**Tier 2 — pipeline (`ais_fixes`).** All **LNG-carrier** fixes (registry-resolved by
+IMO, §3.6), US-coastal, load into the hypertable. *Positions* are admitted without a
+spatial gate so the **density map shows the full US shipping lanes**, not just blobs
+at the terminals (the earlier 50 km gate was dropped on request — the lanes are the
+point of the density view). Mid-Gulf / approach fixes match no terminal polygon, so
+the state machine resolves them to open-ocean TRANSIT and they produce **no
+`port_events`** — they never touch the signal, they only cost rebuild time. *Draught*
+(`vessel_state`), by contrast, stays **within ~50 km of a terminal** — laden
+inference only happens at berths, so nationwide draught is pointless bloat.
 
-Re-filtering Tier 1 → Tier 2 (when a missed LNG hull surfaces) is a local Parquet
-scan + insert — no network, no full re-run.
+> *Cost & mitigation:* admitting all positions ~4×'s the historical `ais_fixes`
+> (decade ≈ 53M vs ~13M) and the hourly `port_events` rebuild scans them. If that
+> rebuild gets slow, add a near-terminal pre-filter to the state-machine query
+> (`pipeline/port_events.py` `SPATIAL_JOIN_SQL`) so the full set stays in `ais_fixes`
+> for density while the state machine only walks near-terminal fixes.
+
+Re-filtering Tier 1 → Tier 2 (a widened filter, or a missed LNG hull) is a local
+Parquet scan + insert — no network, no re-download: `make backfill-noaa-reload
+START=.. END=..` (`reload_archive` / `--reload`).
 
 ---
 

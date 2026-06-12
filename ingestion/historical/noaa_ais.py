@@ -155,7 +155,7 @@ def _read_and_archive(d: date, zip_path: Path, archive_dir: Path) -> pd.DataFram
 
 
 # ----------------------------------------------------------------------------- #
-# Tier 2: LNG-in-buffer -> ais_fixes + vessel_state
+# Tier 2: LNG-carrier fixes -> ais_fixes (+ near-terminal draught -> vessel_state)
 # ----------------------------------------------------------------------------- #
 STAGE_DDL = """
 CREATE TEMP TABLE noaa_stage (
@@ -164,21 +164,16 @@ CREATE TEMP TABLE noaa_stage (
 ) ON COMMIT DROP
 """
 
-# Insert only fixes within 50 km of a US export/import terminal polygon. The
-# candidate set is already LNG-only (filtered in Python by IMO), so this spatial
-# EXISTS runs over a handful of vessels.
+# ALL LNG-carrier fixes (US-coastal — the staged set is already LNG-only, filtered
+# in Python by IMO) go into ais_fixes, so the density map shows the full shipping
+# lanes, not just blobs at the terminals. Mid-Gulf / approach fixes match no
+# terminal polygon and produce NO port_events (the state machine resolves them to
+# open-ocean TRANSIT) — they cost rebuild time but never change the signal. (Draught
+# below stays near-terminal: it's only used for laden inference at berths.)
 INSERT_FIXES = f"""
 INSERT INTO ais_fixes (fix_ts, mmsi, lat, lon, sog, cog, nav_status, source)
 SELECT s.fix_ts, s.mmsi, s.lat, s.lon, s.sog, s.cog, s.nav_status, '{NOAA_SOURCE}'
 FROM noaa_stage s
-WHERE EXISTS (
-    SELECT 1 FROM terminal_zones tz
-    JOIN terminals t ON t.terminal_id = tz.terminal_id
-    WHERE t.zone = ANY($1::text[])
-      AND ST_DWithin(
-            ST_SetSRID(ST_Point(s.lon, s.lat), 4326)::geography,
-            tz.geom::geography, {TERMINAL_BUFFER_M})
-)
 ON CONFLICT (fix_ts, mmsi) DO NOTHING
 """
 
@@ -201,7 +196,8 @@ ON CONFLICT (state_ts, mmsi) DO NOTHING
 
 
 async def load_tier2(pool: asyncpg.Pool, df: pd.DataFrame) -> tuple[int, int]:
-    """Stage the day's LNG-carrier fixes and insert those near a US terminal."""
+    """Stage the day's LNG-carrier fixes -> all into ais_fixes (full lanes for the
+    density map), near-terminal draught -> vessel_state."""
     lng = df[df["imo_int"].notna()].copy()
     async with pool.acquire() as conn:
         lng_imos = {
@@ -229,8 +225,8 @@ async def load_tier2(pool: asyncpg.Pool, df: pd.DataFrame) -> tuple[int, int]:
         async with conn.transaction():
             await conn.execute(STAGE_DDL)
             await conn.copy_records_to_table("noaa_stage", records=records)
-            fixes = await conn.execute(INSERT_FIXES, list(US_ZONES))
-            state = await conn.execute(INSERT_STATE, list(US_ZONES))
+            fixes = await conn.execute(INSERT_FIXES)  # all LNG fixes (no zone filter)
+            state = await conn.execute(INSERT_STATE, list(US_ZONES))  # near-terminal draught
     # asyncpg returns e.g. "INSERT 0 4269" — pull the row count.
     return int(fixes.split()[-1]), int(state.split()[-1])
 
@@ -396,6 +392,24 @@ async def process_local(
     logger.info(await _archive_and_load(pool, d, local_path, archive_dir, asyncio.Semaphore(1)))
 
 
+async def reload_archive(
+    pool: asyncpg.Pool, start: date, end: date, archive_dir: Path = ARCHIVE_DIR
+) -> None:
+    """Re-run Tier-2 from the on-disk archive (no download) — for when the Tier-2
+    filter changes (e.g. widening ais_fixes to all LNG fixes). Idempotent: existing
+    rows are skipped (ON CONFLICT DO NOTHING), only the newly-admitted fixes land.
+    The two-tier design's payoff (PLAN.md §3.8): re-scope ais_fixes without a
+    1.1 TB re-download."""
+    for d in daterange(start, end):
+        arc = archive_path(d, archive_dir)
+        if not arc.exists():
+            continue
+        df = await asyncio.to_thread(pd.read_parquet, arc)
+        fixes, state = await load_tier2(pool, df)
+        logger.info("%s: reloaded from archive -> +%d ais_fixes, +%d vessel_state",
+                    d, fixes, state)
+
+
 def daterange(start: date, end: date):
     d = start
     while d <= end:
@@ -418,6 +432,9 @@ async def main() -> None:
     ap.add_argument("--keep-zip", action="store_true", help="don't delete the raw zip after processing")
     ap.add_argument("--force", action="store_true", help="re-archive even if the parquet exists")
     ap.add_argument("--no-db", action="store_true", help="Tier-1 archive only; skip ais_fixes load")
+    ap.add_argument("--reload", action="store_true",
+                    help="re-run Tier-2 from the on-disk archive over --start/--end "
+                         "(no download) — e.g. after the Tier-2 filter changed")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     # httpx/httpcore log a line per request at INFO — that's one per daily zip,
@@ -436,7 +453,11 @@ async def main() -> None:
         )
     )
     try:
-        if args.local:
+        if args.reload:
+            if not (args.start and args.end):
+                ap.error("--reload needs --start/--end")
+            await reload_archive(pool, _d(args.start), _d(args.end), archive_dir)
+        elif args.local:
             await process_local(pool, Path(args.local), archive_dir, force=args.force)
         elif args.date:
             d = _d(args.date)

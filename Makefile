@@ -1,4 +1,4 @@
-.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events backfill-noaa scoring signals vf-rescue vf-rescue-dry vf-status refresh-fleet discover discover-dry discover-berths discover-berths-dry backup eia eia-full capture-rate coverage
+.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events backfill-noaa backfill-noaa-reload scoring signals vf-rescue vf-rescue-dry vf-status refresh-fleet discover discover-dry discover-berths discover-berths-dry backup eia eia-full capture-rate coverage
 
 up:
 	docker compose up -d
@@ -56,6 +56,12 @@ port-events:
 # Usage: make backfill-noaa START=2022-01-01 END=2022-12-31 [N=6]
 backfill-noaa:
 	uv run python -m ingestion.historical.noaa_ais --start $(START) --end $(END) --concurrency $(or $(N),6)
+
+# Re-run Tier-2 from the on-disk archive (no download) — apply a changed Tier-2
+# filter (e.g. widened ais_fixes) to already-downloaded days. Idempotent.
+# Usage: make backfill-noaa-reload START=2022-01-01 END=2022-12-31
+backfill-noaa-reload:
+	uv run python -m ingestion.historical.noaa_ais --reload --start $(START) --end $(END)
 
 seed-unlocodes:
 	docker exec -i tanker_db psql -U tanker_user -d tanker_flow < db/seed/terminal_unlocodes.sql
