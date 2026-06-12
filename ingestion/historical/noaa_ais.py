@@ -132,7 +132,13 @@ def read_tankers(zip_path: Path) -> pd.DataFrame:
     df = pd.read_csv(zip_path, usecols=USECOLS, engine="pyarrow")
     df = df[df["VesselType"].between(80, 89)].copy()
     df["fix_ts"] = pd.to_datetime(df["BaseDateTime"], utc=True)
-    df["imo_int"] = df["IMO"].map(parse_imo)
+    # Vectorised IMO parse ('IMO9830305' -> 9830305). A per-row .map(parse_imo) over
+    # ~300k rows is a Python loop that HOLDS THE GIL in the reader thread, starving
+    # the async download loop (frozen bars). These str ops are C-level / GIL-light.
+    df["imo_int"] = pd.to_numeric(
+        df["IMO"].astype("string").str.replace("IMO", "", regex=False).str.strip(),
+        errors="coerce",
+    ).astype("Int64")
     # NOAA Draft of 0 means "unreported" (same sentinel rule as models.py).
     df.loc[df["Draft"] <= 0, "Draft"] = pd.NA
     return df
