@@ -26,11 +26,12 @@ pipeline.
 > MarineCadastre layout is **nationwide daily files**, not the old UTM-zone ×
 > month split (that was the 2009–2017 geodatabase era). So there is **no UTM-zone →
 > terminal mapping to build** — open Q#1 is moot. The trade-off is volume: each day
-> is one ~900 MB nationwide CSV of *all* vessel types, so 2016→now is ~1 TB of
-> downloads. We never *store* that — `noaa_ais.py` streams each daily CSV, filters
-> to tankers (`VesselType 80–89`) within the §3.8 terminal buffer, and discards the
-> rest — but we do have to *fetch and decompress* it. See §6 open Q#1 for the
-> where-to-run-it decision.
+> is one ~900 MB nationwide CSV of *all* vessel types, so 2016→now is ~1.1 TB of
+> *downloads* (transient — we fetch and decompress it but never store it whole).
+> `noaa_ais.py` streams each daily CSV into the **two-tier load of §3.8**: all
+> tankers (`VesselType 80–89`) to a compressed Parquet archive on disk (~tens of GB,
+> the density source + "download once" insurance), and only the LNG-in-terminal-
+> buffer slice into `ais_fixes`. See §6 open Q#1 for the where-to-run-it decision.
 
 **Role in pipeline:** Primary backfill path for the US supply side. Raw fixes go into
 `ais_fixes` (source = `'noaa-ais'`), the existing state machine runs over them, and
@@ -360,22 +361,33 @@ This reconciliation is the leg-level reason the headline `gas_in_transit_volume`
 gets clean pre-2026 history (NOAA departure ⋈ GFW arrival = a fully-observed leg),
 *provided* the dedup runs. Without it, the same history is inflated 2×.
 
-### 3.8 Spatially pre-filter NOAA before it reaches `ais_fixes`
+### 3.8 Two-tier load — full tanker archive on disk, lean LNG slice into `ais_fixes`
 
-Open question #5 worries about `LAST_FIX_SQL` full-scanning a 100M-row hypertable.
-The cheaper fix is upstream: **don't load mid-ocean NOAA fixes at all.** Every
-signal the backfill feeds — leg endpoints, draught-at-departure, anchorage
-crossings, queue depth — lives within ~50 km of a terminal, and we are
-terrestrial-AIS-blind mid-ocean *by design* (SIGNALS.md §0). So:
+The download is ~1.1 TB regardless (NOAA serves whole daily files, no server-side
+filter — §1.1), so the only choice is what we *keep*. We keep **all of it that is a
+tanker**, in two tiers with different purposes:
 
-- `noaa_ais.py` pre-filters each fix to `ST_DWithin(terminal_zones polygon, 50 km)`
-  (US terminals + a Gulf approach buffer) **before** insert. This drops the row
-  count by 1–2 orders of magnitude, keeps `ais_fixes` lean, and the state machine
-  stays fast — the `LAST_FIX_SQL` rework (open Q #5) becomes unnecessary.
+**Tier 1 — archive (Parquet on disk, all tankers nationwide).** `noaa_ais.py`
+streams each daily CSV, keeps every `VesselType 80–89` (tanker) fix nationwide, and
+writes it to a compressed Parquet archive (partitioned by year/month). This is the
+**"download once" insurance** (a later-discovered or misclassified LNG hull is
+re-filtered from disk, never re-downloaded) and the **density-plot source** (a
+historical US tanker-density raster — `density.js` / `/api/fix-density` reads it
+directly). Tankers are a minority of position rows and AIS compresses ~5–10× as
+columnar Parquet, so the decade archive is ~tens of GB (estimate — confirm with one
+sample file), not a TB. Not in TimescaleDB.
 
-The leg endpoints we keep (departure terminal, arrival terminal) plus the
-near-terminal draught and anchorage crossings are *all* within the buffer; the
-mid-Gulf transit fixes we drop add nothing any signal consumes.
+**Tier 2 — pipeline (`ais_fixes`).** Only **LNG-carrier** fixes (registry-resolved
+by IMO, §3.6) **within ~50 km of a US `terminal_zones` polygon** (`ST_DWithin`) load
+into the hypertable for the state machine. Every signal the backfill feeds — leg
+endpoints, draught-at-departure, anchorage crossings, queue depth — lives within
+that buffer, and we are terrestrial-AIS-blind mid-ocean *by design* (SIGNALS.md §0),
+so the mid-Gulf transit fixes add nothing any signal consumes. This drops the
+hypertable row count by 1–2 orders of magnitude, keeps the state machine fast, and
+makes the `LAST_FIX_SQL` rework (open Q #5) unnecessary.
+
+Re-filtering Tier 1 → Tier 2 (when a missed LNG hull surfaces) is a local Parquet
+scan + insert — no network, no full re-run.
 
 ---
 
