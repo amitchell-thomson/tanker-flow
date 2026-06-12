@@ -114,6 +114,34 @@ def test_regime_tag_is_source_aware():
     assert legs[7].regime == "bbox"  # live source → time split unchanged
 
 
+def test_arrival_beyond_cap_treated_as_open():
+    # A zone_entry > MAX_LEG_PAIR_DAYS after departure can't be this leg's arrival
+    # (the disconnected-data phantom) -> open, not a multi-month closed leg.
+    dep = REGIME_CUTOVER - timedelta(days=400)
+    arr = dep + timedelta(days=120)  # 120d > 90d cap
+    now = arr + timedelta(days=10)
+    legs = pair_legs(
+        [ev(9, "departed", dep, "usgulf", 1, laden=True),
+         ev(9, "zone_entry", arr, "nweurope", 2)],
+        now,
+    )
+    assert len(legs) == 1
+    assert legs[0].arrived_ts is None
+    assert legs[0].status != "closed"
+
+
+def test_arrival_within_cap_still_pairs_closed():
+    dep = REGIME_CUTOVER - timedelta(days=400)
+    arr = dep + timedelta(days=18)  # a normal US->EU voyage
+    legs = pair_legs(
+        [ev(9, "departed", dep, "usgulf", 1, laden=True),
+         ev(9, "zone_entry", arr, "nweurope", 2)],
+        arr + timedelta(days=5),
+    )
+    assert legs[0].status == "closed"
+    assert legs[0].arrived_ts == arr
+
+
 def test_weights_attached():
     events = [ev(7, "departed", at(0), "usgulf", 1, laden=True)]
     legs = pair_legs(events, NOW, weights={7: (90000, 170000)})

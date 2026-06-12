@@ -54,6 +54,16 @@ from .geo import haversine_nm
 # censors a genuine long haul it can't attribute.
 CENSOR_OPEN_DAYS = 30
 
+# A `departed` only pairs with a `zone_entry` arrival within this many days — beyond
+# it the "arrival" cannot belong to this departure and the leg is treated as open
+# (then classified by the usual window/last-fix logic). Catches the disconnected-
+# data phantom where a historical departure (e.g. NOAA 2022) pairs with a live
+# arrival years later (SIGNALS.md §0.5: never pair across the data seam). Set well
+# above any real laden voyage (incl. slow-steam / floating storage, ~ up to ~2mo)
+# so a legitimate boundary-spanning voyage — a NOAA departure days before live
+# coverage landing at a live arrival — is kept.
+MAX_LEG_PAIR_DAYS = 90
+
 # Per-destination-region expected laden-voyage windows (days). Beyond this, an
 # open leg to that region is no longer "in transit" and gets reclassified by
 # last-fix evidence. Only import regions appear — a laden leg's destination is
@@ -166,6 +176,7 @@ def pair_legs(
     now: datetime,
     *,
     censor_days: int = CENSOR_OPEN_DAYS,
+    max_leg_days: int = MAX_LEG_PAIR_DAYS,
     weights: dict[int, tuple[int | None, int | None]] | None = None,
     dest_regions: dict[int, str] | None = None,
     last_fixes: dict[int, tuple[datetime | None, float | None, float | None]]
@@ -207,6 +218,13 @@ def pair_legs(
             arrival = next(
                 (z for z in evs[i + 1 :] if z.event_type == "zone_entry"), None
             )
+            # Reject an implausibly-distant "arrival" — it belongs to a later voyage
+            # (or the live block after a historical-data gap), not this departure.
+            # Drop to the open-leg branch, which classifies it by window/last-fix.
+            if arrival is not None and (
+                arrival.event_time - d.event_time > timedelta(days=max_leg_days)
+            ):
+                arrival = None
             regime = regime_of(d.event_time, d.source)
             common = dict(
                 mmsi=mmsi,

@@ -22,11 +22,19 @@ signal layer runs it through the panel end.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import asyncpg
 
 from config import regime_of
+
+# A `moored` only pairs with a `departed` within this many days — beyond it the
+# berth visit is a missed departure (the vessel left unobserved), so it's treated
+# as still open (capped downstream at signal.OPEN_VISIT_CEILING_DAYS). Guards the
+# disconnected-data phantom where a historical mooring (e.g. NOAA 2022) pairs with
+# a live departure years later (SIGNALS.md §0.5). Real berth occupancy is hours to
+# a few days; this is well above even heavy congestion queueing.
+MAX_VISIT_PAIR_DAYS = 30
 
 
 @dataclass(frozen=True)
@@ -61,6 +69,7 @@ class Visit:
 def pair_visits(
     events: list[VisitEvent],
     *,
+    max_visit_days: int = MAX_VISIT_PAIR_DAYS,
     weights: dict[int, tuple[int | None, int | None]] | None = None,
     flow_directions: dict[int, str] | None = None,
 ) -> list[Visit]:
@@ -88,6 +97,13 @@ def pair_visits(
             departed = next(
                 (d for d in evs[i + 1 :] if d.event_type == "departed"), None
             )
+            # An implausibly-distant "departure" belongs to a later visit (or the
+            # live block after a historical-data gap), not this mooring — leave the
+            # visit open (capped downstream) rather than spanning the gap.
+            if departed is not None and (
+                departed.event_time - m.event_time > timedelta(days=max_visit_days)
+            ):
+                departed = None
             visits.append(
                 Visit(
                     mmsi=mmsi,

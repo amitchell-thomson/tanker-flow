@@ -105,6 +105,27 @@ def test_regime_tag_is_source_aware():
     assert visits[7].regime == "bbox"
 
 
+def test_departed_beyond_cap_leaves_visit_open():
+    # A departed > MAX_VISIT_PAIR_DAYS after mooring is a missed departure (or the
+    # live block after a data gap) -> open visit, not a multi-week berth occupancy.
+    moor = REGIME_CUTOVER - timedelta(days=400)
+    dep = moor + timedelta(days=45)  # 45d > 30d cap
+    visits = pair_visits(
+        [ev(5, "moored", moor, "usgulf", 1), ev(5, "departed", dep, "usgulf", 1)]
+    )
+    assert len(visits) == 1
+    assert visits[0].departed_ts is None
+
+
+def test_departed_within_cap_pairs_closed():
+    moor = REGIME_CUTOVER - timedelta(days=400)
+    dep = moor + timedelta(days=2)
+    visits = pair_visits(
+        [ev(5, "moored", moor, "usgulf", 1), ev(5, "departed", dep, "usgulf", 1)]
+    )
+    assert visits[0].departed_ts == dep
+
+
 def test_cold_start_visit_kept():
     # A vessel first seen already alongside still occupies the berth — kept.
     events = [
