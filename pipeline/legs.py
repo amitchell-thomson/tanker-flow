@@ -130,6 +130,7 @@ class LegEvent:
     lat: float | None
     lon: float | None
     laden_flag: bool | None
+    source: str = "state_machine"  # origin tag for regime_of (noaa-ais / gfw_* / live)
 
 
 @dataclass(frozen=True)
@@ -206,7 +207,7 @@ def pair_legs(
             arrival = next(
                 (z for z in evs[i + 1 :] if z.event_type == "zone_entry"), None
             )
-            regime = regime_of(d.event_time)
+            regime = regime_of(d.event_time, d.source)
             common = dict(
                 mmsi=mmsi,
                 origin_terminal_id=d.terminal_id,
@@ -270,7 +271,7 @@ def pair_legs(
 # ----------------------------------------------------------------------
 
 LEG_EVENTS_SQL = """
-SELECT mmsi, event_type, event_time, zone, terminal_id, lat, lon, laden_flag
+SELECT mmsi, event_type, event_time, zone, terminal_id, lat, lon, laden_flag, source
 FROM port_events
 WHERE event_type IN ('departed', 'zone_entry')
 ORDER BY mmsi, event_time
@@ -345,6 +346,7 @@ async def compute_legs(
             lat=r["lat"],
             lon=r["lon"],
             laden_flag=r["laden_flag"],
+            source=r["source"],
         )
         for r in ev_rows
     ]

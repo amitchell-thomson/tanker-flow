@@ -40,6 +40,7 @@ class VisitEvent:
     terminal_id: int | None
     laden_flag: bool | None
     cold_start: bool = False
+    source: str = "state_machine"  # origin tag for regime_of (noaa-ais / gfw_* / live)
 
 
 @dataclass(frozen=True)
@@ -96,7 +97,7 @@ def pair_visits(
                     moored_ts=m.event_time,
                     departed_ts=departed.event_time if departed else None,
                     laden=m.laden_flag,
-                    regime=regime_of(m.event_time),
+                    regime=regime_of(m.event_time, m.source),
                     cold_start=m.cold_start,
                     dwt=dwt,
                     gas_capacity_m3=gas,
@@ -112,7 +113,7 @@ def pair_visits(
 # ----------------------------------------------------------------------
 
 VISIT_EVENTS_SQL = """
-SELECT mmsi, event_type, event_time, zone, terminal_id, laden_flag, cold_start
+SELECT mmsi, event_type, event_time, zone, terminal_id, laden_flag, cold_start, source
 FROM port_events
 WHERE event_type IN ('moored', 'departed')
 ORDER BY mmsi, event_time
@@ -153,6 +154,7 @@ async def compute_visits(
             terminal_id=r["terminal_id"],
             laden_flag=r["laden_flag"],
             cold_start=r["cold_start"],
+            source=r["source"],
         )
         for r in ev_rows
     ]

@@ -1,8 +1,9 @@
 """Port-events state machine runner.
 
 Recomputes the `port_events` table from `ais_fixes` + `terminal_zones`. Idempotent:
-TRUNCATEs the table and rebuilds from row 1. Streaming spatial join keeps memory
-bounded over the full hypertable.
+clears the state-machine-derived rows (preserving directly-written GFW historical
+rows, PLAN.md §3.1) and rebuilds. Streaming spatial join keeps memory bounded over
+the full hypertable.
 
 Usage: `uv run python -m pipeline.port_events` (or `make port-events`).
 """
@@ -42,7 +43,12 @@ logger = logging.getLogger(__name__)
 # SQL
 # ----------------------------------------------------------------------
 
-TRUNCATE_SQL = "TRUNCATE port_events RESTART IDENTITY"
+# Rebuild deletes only state-machine-derived events (any fix source: live
+# aisstream/vesselfinder + NOAA backfill), preserving directly-written historical
+# rows (GFW voyages/events) across `make port-events`. See PLAN.md §2.1 / §3.1.
+CLEAR_SQL = (
+    "DELETE FROM port_events WHERE source NOT IN ('gfw_voyages', 'gfw_events')"
+)
 
 # In-scope vessels: LNG carriers + FSRUs (the VesselFinder taxonomy classifies
 # FSRUs as 'Offshore Support Vessel', so is_lng_carrier=FALSE for them — they
@@ -128,9 +134,15 @@ ORDER BY f.mmsi, f.fix_ts
 INSERT_SQL = """
 INSERT INTO port_events
     (mmsi, event_type, zone, terminal_id, event_time, lat, lon,
-     laden_flag, laden_source, cold_start)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+     laden_flag, laden_source, cold_start, source)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 """
+
+# Source written for every state-machine event today. The NOAA backfill
+# (PLAN.md §3.4) will instead carry the triggering fix's source ('noaa-ais') so
+# its regime tags as 'noaa'; until that plumbing lands, all live events are
+# 'state_machine' → time-based bbox/mmsi_filter regime.
+EVENT_SOURCE = "state_machine"
 
 
 # ----------------------------------------------------------------------
@@ -258,15 +270,15 @@ async def run(pool: asyncpg.Pool, now: datetime | None = None) -> None:
 
     # ----- Atomic staging swap -----
     # All new events were built above without touching the live table. Replace
-    # its contents in ONE short transaction: the TRUNCATE and the bulk INSERT
-    # commit together, so a concurrent reader sees either the entire previous
-    # snapshot or the entire new one — never the empty/half-filled table that
-    # the old TRUNCATE-then-stream-inserts approach exposed for the whole walk.
+    # its contents in ONE short transaction: the state-machine-row DELETE and the
+    # bulk INSERT commit together, so a concurrent reader sees either the entire
+    # previous snapshot or the entire new one — never the empty/half-filled table
+    # that the old clear-then-stream-inserts approach exposed for the whole walk.
     # The ACCESS EXCLUSIVE lock is held only for the bulk insert (sub-second),
     # not the multi-second walk.
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await conn.execute(TRUNCATE_SQL)
+            await conn.execute(CLEAR_SQL)
             if event_rows:
                 await conn.executemany(INSERT_SQL, event_rows)
 
@@ -429,6 +441,7 @@ def _process_vessel(
                 laden,
                 laden_source,
                 ev.cold_start,
+                EVENT_SOURCE,
             )
         )
         summary["events_by_kind"][(zone, ev.event_type)] += 1
@@ -506,6 +519,7 @@ async def _emit_fsru_moored(
                     None,  # FSRUs: laden_flag NULL (they don't ballast in/out)
                     None,  # laden_source NULL (no inference attempted)
                     True,  # cold_start = TRUE — they've been moored since before data
+                    EVENT_SOURCE,
                 )
             )
     return rows
@@ -536,7 +550,7 @@ def _log_summary(summary: dict[str, Any], wall_seconds: float) -> None:
 
 async def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Recompute port_events from ais_fixes (TRUNCATE + rebuild)."
+        description="Recompute port_events from ais_fixes (clear state-machine rows + rebuild)."
     )
     parser.add_argument(
         "--as-of",

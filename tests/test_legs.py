@@ -20,7 +20,8 @@ ROTTERDAM = (52.00, 4.00)  # nweurope
 ZEEBRUGGE = (51.33, 3.20)  # nweurope
 
 
-def ev(mmsi, etype, t, zone, terminal_id, laden=None, lat=0.0, lon=0.0):
+def ev(mmsi, etype, t, zone, terminal_id, laden=None, lat=0.0, lon=0.0,
+       source="state_machine"):
     return LegEvent(
         mmsi=mmsi,
         event_type=etype,
@@ -30,6 +31,7 @@ def ev(mmsi, etype, t, zone, terminal_id, laden=None, lat=0.0, lon=0.0):
         lat=lat,
         lon=lon,
         laden_flag=laden,
+        source=source,
     )
 
 
@@ -93,6 +95,23 @@ def test_regime_tag_from_departed_time():
     legs = {lg.mmsi: lg for lg in pair_legs(events, NOW)}
     assert legs[5].regime == "bbox"
     assert legs[6].regime == "mmsi_filter"
+
+
+def test_regime_tag_is_source_aware():
+    # A pre-cutover NOAA backfill event tags 'noaa', not 'bbox' (its time would
+    # otherwise put it in the throttled live block) — PLAN.md §3.4 / SIGNALS §0.5.
+    events = [
+        ev(5, "departed", REGIME_CUTOVER - timedelta(days=1), "usgulf", 1,
+           laden=True, source="noaa-ais"),
+        ev(6, "departed", REGIME_CUTOVER - timedelta(days=1), "usgulf", 1,
+           laden=True, source="gfw_voyages"),
+        ev(7, "departed", REGIME_CUTOVER - timedelta(days=1), "usgulf", 1,
+           laden=True, source="state_machine"),
+    ]
+    legs = {lg.mmsi: lg for lg in pair_legs(events, NOW)}
+    assert legs[5].regime == "noaa"
+    assert legs[6].regime == "gfw"
+    assert legs[7].regime == "bbox"  # live source → time split unchanged
 
 
 def test_weights_attached():

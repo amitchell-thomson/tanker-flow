@@ -14,7 +14,8 @@ from pipeline.visits import VisitEvent, pair_visits
 NOW = REGIME_CUTOVER + timedelta(days=40)
 
 
-def ev(mmsi, etype, t, zone, terminal_id, laden=None, cold_start=False):
+def ev(mmsi, etype, t, zone, terminal_id, laden=None, cold_start=False,
+       source="state_machine"):
     return VisitEvent(
         mmsi=mmsi,
         event_type=etype,
@@ -23,6 +24,7 @@ def ev(mmsi, etype, t, zone, terminal_id, laden=None, cold_start=False):
         terminal_id=terminal_id,
         laden_flag=laden,
         cold_start=cold_start,
+        source=source,
     )
 
 
@@ -85,6 +87,22 @@ def test_regime_tag_from_moored_time():
     visits = {v.mmsi: v for v in pair_visits(events)}
     assert visits[5].regime == "bbox"
     assert visits[6].regime == "mmsi_filter"
+
+
+def test_regime_tag_is_source_aware():
+    # NOAA/GFW backfill visits tag by fidelity, not by their pre-cutover time.
+    events = [
+        ev(5, "moored", REGIME_CUTOVER - timedelta(days=1), "usgulf", 1,
+           source="noaa-ais"),
+        ev(6, "moored", REGIME_CUTOVER - timedelta(days=1), "usgulf", 1,
+           source="gfw_events"),
+        ev(7, "moored", REGIME_CUTOVER - timedelta(days=1), "usgulf", 1,
+           source="state_machine"),
+    ]
+    visits = {v.mmsi: v for v in pair_visits(events)}
+    assert visits[5].regime == "noaa"
+    assert visits[6].regime == "gfw"
+    assert visits[7].regime == "bbox"
 
 
 def test_cold_start_visit_kept():
