@@ -420,6 +420,10 @@ async def main() -> None:
     ap.add_argument("--no-db", action="store_true", help="Tier-1 archive only; skip ais_fixes load")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    # httpx/httpcore log a line per request at INFO — that's one per daily zip,
+    # which clobbers the live progress bars. Quiet them to WARNING.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
     archive_dir, raw_dir = Path(args.archive_dir), Path(args.raw_dir)
     pool = (
