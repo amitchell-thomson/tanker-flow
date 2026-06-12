@@ -431,6 +431,53 @@ def assign_tier(
     return (5, "never-seen", last_fix_ts.timestamp() if last_fix_ts else 0.0)
 
 
+# --- Manual tier overrides (operator escape hatch) ---
+#
+# Maps MMSI -> forced tier. A vessel listed here is assigned that tier on every
+# scoring pass, overriding both the computed position/ETA logic AND the FSRU
+# short-circuit. This is the durable equivalent of hand-editing priority_watchlist
+# (which the next scoring pass — hourly, and before every reconnect — would
+# otherwise clobber within the hour). Use sparingly: it's a deliberate "I need
+# eyes on this hull regardless of what the heuristics say" lever, not a tuning
+# knob. Editing this dict requires a scoring run (`make scoring`) or an ingester
+# restart to take effect.
+#
+# CAVEAT: forcing a vessel into the persistent band (tiers 1-3) only re-acquires
+# it if it is actually transmitting AIS — a persistent slot cannot raise a
+# long-silent vessel from the dead. For a vessel gone dark near a terminal, the
+# tool is `vf_rescue.py --mmsi <mmsi>` (fetches a live position from VesselFinder).
+MANUAL_TIER_OVERRIDES: dict[int, int] = {
+    636023760: 1,  # ORION HUGO — operator pin (2026-06-11)
+}
+
+# An override's score is pinned to "now + this" so it sorts to the top of its
+# tier and reliably holds a persistent slot (the ingester takes the top 100 by
+# tier ASC, score DESC — a low natural score from a stale last fix would
+# otherwise be culled at the 100-boundary). One day clears the in-tier-1 zone-type
+# bonus (_ZONE_TYPE_BONUS_S, ≤3h) so the override out-sorts every genuine fix.
+_OVERRIDE_SCORE_BONUS_S = 86400
+
+
+def apply_manual_override(
+    mmsi: int,
+    tier: int,
+    reason: str,
+    score: float,
+    now: datetime,
+) -> tuple[int, str, float]:
+    """Apply MANUAL_TIER_OVERRIDES to a computed (tier, reason, score).
+
+    Pure: returns the inputs unchanged when the MMSI has no override. When it
+    does, forces the configured tier, marks the reason, and pins the score high
+    so the vessel holds its slot regardless of fix recency (see
+    _OVERRIDE_SCORE_BONUS_S).
+    """
+    forced = MANUAL_TIER_OVERRIDES.get(mmsi)
+    if forced is None:
+        return tier, reason, score
+    return (forced, f"manual-override:t{forced}", now.timestamp() + _OVERRIDE_SCORE_BONUS_S)
+
+
 # Open-leg pin: a vessel with an open leg (a `departed` with no later
 # `zone_entry`) is mid-voyage and will re-enter terrestrial AIS range on its
 # approach to the next terminal. We can't *hear* it mid-ocean, so a persistent
@@ -659,6 +706,9 @@ async def compute_and_upsert(pool: asyncpg.Pool) -> dict[int, int]:
                     bearing_deg=r["bearing_deg"],
                     last_cog=r["last_cog"],
                     now=now,
+                )
+                tier, reason, score = apply_manual_override(
+                    r["mmsi"], tier, reason, score, now
                 )
                 tier_counts[tier] += 1
 

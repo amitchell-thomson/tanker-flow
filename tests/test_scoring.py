@@ -15,10 +15,12 @@ from pipeline.scoring import (
     ETA_IMMINENT_HOURS,
     ETA_PAST_GRACE_HOURS,
     FSRU_TIER,
+    MANUAL_TIER_OVERRIDES,
     PIN_MAX,
     PIN_POST_WINDOW_DAYS,
     PIN_PRE_WINDOW_DAYS,
     _select_open_leg_pins,
+    apply_manual_override,
     assign_tier,
 )
 
@@ -66,6 +68,28 @@ def test_non_fsru_at_berth_still_scores_tier_1():
         False, last_berth_fix_ts=berth_fix, last_polygon_fix_ts=berth_fix
     )
     assert tier == 1
+
+
+def test_manual_override_forces_tier_and_pins_score():
+    # An MMSI in the override map gets its forced tier with a score pinned above
+    # any genuine fix in that tier, regardless of the computed (tier, score).
+    mmsi, forced = next(iter(MANUAL_TIER_OVERRIDES.items()))
+    tier, reason, score = apply_manual_override(
+        mmsi, tier=5, reason="stale @ 2026-05-20", score=1.0, now=NOW
+    )
+    assert tier == forced
+    assert "manual-override" in reason
+    assert score > NOW.timestamp()  # out-sorts every real fix in the tier
+
+
+def test_manual_override_is_a_noop_for_unlisted_mmsi():
+    # A vessel not in the map passes through untouched.
+    unlisted = -1  # never a real MMSI
+    assert unlisted not in MANUAL_TIER_OVERRIDES
+    result = apply_manual_override(
+        unlisted, tier=3, reason="in-zone:bbox @ 2026-05-30", score=42.0, now=NOW
+    )
+    assert result == (3, "in-zone:bbox @ 2026-05-30", 42.0)
 
 
 def test_imminent_eta_without_dest_promotes_to_tier_2():
