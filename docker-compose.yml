@@ -24,6 +24,7 @@ services:
         -c work_mem=64MB
         -c maintenance_work_mem=512MB
         -c max_connections=40
+        -c max_locks_per_transaction=2048
         -c wal_compression=on
         -c timescaledb.telemetry_level=off
 
