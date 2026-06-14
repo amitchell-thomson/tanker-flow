@@ -1,4 +1,4 @@
-.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events backfill-noaa backfill-noaa-reload backfill-gfw backfill-gfw-dry reconcile reconcile-dry scoring signals vf-rescue vf-rescue-dry vf-status refresh-fleet discover discover-dry discover-berths discover-berths-dry backup eia eia-full capture-rate coverage
+.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events backfill-noaa backfill-noaa-reload backfill-gfw backfill-gfw-dry reconcile reconcile-dry scoring signals vf-rescue vf-rescue-dry vf-status refresh-fleet discover discover-dry discover-berths discover-berths-dry complete-registry complete-registry-dry complete-registry-sample retire-stale retire-stale-dry backup eia eia-full capture-rate coverage
 
 up:
 	docker compose up -d
@@ -162,3 +162,25 @@ discover-berths:
 
 discover-berths-dry:
 	uv run python scripts/discover_berth_tankers.py --dry-run
+
+# §3.6.1 one-time registry completion: sweep the NOAA archive for LNG hulls that
+# berthed in the US but were never registered, VF-resolve them (source-identity
+# fallback for scrapped hulls), and flag is_lng_carrier. complete-registry-dry
+# previews the gap + cost with no spend. After a real run, reload Tier-2 from the
+# archive and rebuild downstream (or pass --reload to chain the reload inline).
+complete-registry:
+	uv run python -m scripts.complete_registry_from_archive
+
+complete-registry-dry:
+	uv run python -m scripts.complete_registry_from_archive --dry-run
+
+complete-registry-sample:
+	uv run python -m scripts.complete_registry_from_archive --dry-run --sample-monthly
+
+# Record retired hulls — registry rows silent in ais_fixes past the threshold
+# (reversible; cleared when a fix resurfaces). retire-stale-dry previews counts.
+retire-stale:
+	uv run python -m pipeline.retirement
+
+retire-stale-dry:
+	uv run python -m pipeline.retirement --dry-run

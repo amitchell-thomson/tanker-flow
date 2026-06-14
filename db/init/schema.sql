@@ -69,6 +69,10 @@ CREATE TABLE vessel_registry (
     -- Enrichment tracking
     enriched_at         TIMESTAMPTZ,
     vf_enrichment_status TEXT,           -- 'ok'|'not_found'|'error'|'pending'
+    -- Retirement (pipeline/retirement.py): set when a hull has been silent in
+    -- ais_fixes past the threshold; reversible (cleared when a fix resurfaces).
+    retired_at          TIMESTAMPTZ,     -- NULL = active
+    retirement_basis    TEXT,            -- 'silence'|'manual'|'igu_dropout'
     updated_at          TIMESTAMPTZ      DEFAULT now()
 );
 

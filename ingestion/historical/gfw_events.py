@@ -103,9 +103,11 @@ TERMINAL_BUFFER_M = 25_000
 VISIT_CONFIDENCE = 4
 
 # Batch sizes. Rate limits are generous (50k req/day, measured), so these are for
-# throughput, not throttling. The events endpoint accepts many vessels per call
-# and attributes each event back via event.vessel.id.
-VESSELS_PER_EVENTS_CALL = 50
+# throughput, not throttling. The events endpoint attributes each event back via
+# event.vessel.id, so we pass many vessels per call — but GFW's gateway caps the
+# `vessels[]` query-array: ≥25 ids returns a misleading 422 ("vessels must be an
+# array"). Verified by bisection 2026-06-14 (20 ok, 25 fails); 20 leaves margin.
+VESSELS_PER_EVENTS_CALL = 20
 EVENTS_PAGE = 200
 SEARCH_CONCURRENCY = 8
 
@@ -259,18 +261,24 @@ MATCH_SQL = """
 WITH stage(idx, lat, lon) AS (
     SELECT * FROM unnest($1::int[], $2::float8[], $3::float8[])
 )
-SELECT s.idx, m.terminal_id, t.zone, t.flow_direction
+SELECT s.idx, m.terminal_id, m.zone, m.flow_direction
 FROM stage s
 CROSS JOIN LATERAL (
-    SELECT tz.terminal_id,
+    SELECT tz.terminal_id, t.zone, t.flow_direction,
            ST_Distance(
                ST_SetSRID(ST_MakePoint(s.lon, s.lat), 4326)::geography,
                tz.geom::geography) AS dist
     FROM terminal_zones tz
+    JOIN terminals t ON t.terminal_id = tz.terminal_id
+    -- Only our in-scope (zoned) signal terminals. Foreign export terminals
+    -- (Arzew, Nigeria, Trinidad …) live in `terminals` with zone=NULL for
+    -- origin-labelling; a GFW visit there must NOT emit a port_event (zone is
+    -- NOT NULL downstream, and they're outside the 7-zone signal). Filtering
+    -- inside the lateral picks the nearest *in-scope* polygon, not nearest-overall.
+    WHERE t.zone IS NOT NULL
     ORDER BY ST_SetSRID(ST_MakePoint(s.lon, s.lat), 4326) <-> tz.geom
     LIMIT 1
 ) m
-JOIN terminals t ON t.terminal_id = m.terminal_id
 WHERE m.dist < $4
 """
 
