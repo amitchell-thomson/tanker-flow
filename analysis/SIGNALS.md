@@ -157,6 +157,104 @@ hole in the spread thesis.
 
 ---
 
+## 0·7 · Two bases: `physical` vs `knowable` (point-in-time)
+
+Every series in `signal_daily` carries a `basis` dimension. It is **not** a variant
+of the signal — it is *which information set* was allowed to compute each day's
+value. Same vessels, same events; different clock. This is as foundational as the
+regime seam (§0·5): get it wrong and the whole spread thesis is invalidated by
+lookahead.
+
+| | `basis='physical'` (built) | `basis='knowable'` (deferred — this section) |
+|---|---|---|
+| Definition | "what was actually on the water on day `d`", computed with **everything we know today** | the value the pipeline **would have printed live on day `d`**, using only what was knowable by `d` |
+| Mechanism | one `compute_legs(now=today)` | an as-of replay clocked to the *live* pipeline's knowability |
+| Uses | physical validation — capture-rate (#13), "what was out there", the Part II nowcasts that validate in weeks | **the only leakage-safe input for the spread model** (Part III / `MODELS.md`) |
+| Safe to train on? | **No** — embeds the future | Yes |
+
+**Why `physical` leaks.** It silently uses hindsight in four ways, each a future
+fact relative to day `d`: (1) **leg classification by final outcome** — a leg is
+`closed` / `open_censored` (phantom, dropped) / `open_floating` *today*, but on `d`
+you didn't know which; (2) **the arrival endpoint** — `gas_in_transit_volume` runs
+over `[departed, arrived)` and `arrived` is in `d`'s future; (3) **NOAA-overwrites-live**
+(`RESEARCH_PLAN.md` §3.2) — NOAA republishes the same dates 1–3 months later with
+fuller data, so a "historical" value improves with information `d` never had; (4)
+**late destination declarations** re-band a leg after departure. Backtest the spread
+model on `physical` and you get the textbook leak (`MODELS.md` Part IV) — a beautiful
+backtest that dies live.
+
+> **The clock rule (the one thing to get right).** `knowable` is point-in-time
+> with respect to the **live ingestion pipeline's** knowability, **not** the
+> backfill source's publication schedule. In production the live signal is read
+> from **aisstream in near-real-time** (US *and* EU watchlist vessels, minutes of
+> latency, + the vf_rescue backstop). NOAA (1–3 mo) and GFW (days) are *historical
+> proxies* for that real-time feed. So:
+> - **Do NOT bake in the NOAA/GFW publication lag.** Live you won't have it;
+>   adding it would model a slower world than you deploy into (train/serve skew).
+> - **Do replicate the signal's *intrinsic* confirmation delays**, which are present
+>   both live and in history: the 30-min `moored` dwell + back-dated event
+>   timestamps, "a leg is not `closed` until its arrival is observed" (no future
+>   endpoint), the open-leg voyage-window censoring (#17/#20), open-visit dwell
+>   estimation, and **no future fixes** in the `d` value.
+> - **The publication lag is a leakage *guard*, not a feature delay** — its only job
+>   is to keep NOAA from crossing into the live hold-out window (§3.2) so a
+>   "historical" value can't improve with data the live system didn't have.
+
+### 0·7·1 · What `knowable` requires to implement
+
+1. **As-of contribution intervals.** `signal.py` already takes `--as-of` and
+   `compute_legs(now=as_of)` already classifies *relative to* `as_of` (an open leg
+   at `as_of` stays `open_in_transit`, not retro-`closed`). Build `knowable` by
+   computing each item's contribution with as-of semantics across the panel —
+   arrival endpoint capped at `min(observed_arrival, as_of)`, legs never
+   retro-closed, phantoms never retro-excluded — and writing parallel
+   `basis='knowable'` rows (the schema dimension already exists). The naïve form is
+   a daily sweep of `as_of` (O(days × items)); the efficient form advances `as_of`
+   incrementally, since an item only changes state on a handful of days.
+2. **Vintage filtering by *availability*, not event time.** As-of on the event
+   timestamp isn't enough — the tables today hold fixes that became *available*
+   after `d` (NOAA/GFW backfill, late vf_rescue). Filter each source by when we'd
+   have had it:
+   - **live (`mmsi_filter`):** `ais_fixes.server_ts` / `vessel_state.server_ts` is
+     the receipt time → keep `server_ts <= as_of`.
+   - **backfill (`noaa`/`gfw`):** no true ingestion stamp (loaded now). For
+     *pre-live* history they're legitimately knowable (long since published by any
+     later vantage); the only hard rule is **NOAA/GFW barred from the live
+     forward-test window** (§3.2). The residual is a modeled publication lag — the
+     one unavoidable approximation, and it only bites near the live seam.
+3. **Leakage guard at the seam.** Enforce, in the loader, that no `noaa`/`gfw` row
+   contributes to a `bucket_date` inside the live hold-out window, regardless of
+   when it was loaded.
+4. **Free self-validation.** The live tail (since the `mmsi_filter` cutover,
+   2026-05-30) is exactly what the system emitted in real time. `knowable[d]`
+   recomputed for those days **must match** the value actually printed live on `d`;
+   a mismatch means the as-of/vintage logic still leaks. This is the acceptance test.
+
+### 0·7·2 · The residual that timing cannot fix (read before modelling)
+
+Even a perfect point-in-time replay leaves **sensor skew**: the historical proxies
+and the live feed are *different instruments* — NOAA terrestrial (~77% US capture),
+GFW fused terr+sat (EU), live aisstream (watchlist-limited by the 3-conn/scan cap);
+and laden inference differs (NOAA real **draught** vs GFW **flow_direction** vs live
+draught — §0·6·1). This is domain shift, not a timing bug, and it is where
+train→live transfer is actually won or lost. The mitigation is already doctrine:
+build the deployable model only from **arc-derivable features present in both
+corpora** (`RESEARCH_PLAN.md` §3.3), keep EU-queue #12–16 as a live-only enrichment
+layer, and fit measurement-error-aware across the rich-US/coarse-EU asymmetry.
+
+### 0·7·3 · Convention for every signal below (and for new ones)
+
+To stay model-ready, each signal in §1–§9 should declare two things in its row:
+its **physical contribution interval** (already implicit in the definitions) and its
+**knowable contribution interval** (when each day's value becomes computable under
+the clock rule above). For stocks this is the live interval `[start, min(end,
+as_of))`; for the amortized berth flows it is the cumulative-deposit-to-`as_of`
+(never the final total until departure is observed). New signals are not "done"
+until both are specified — `physical` for validation, `knowable` for training.
+`MODELS.md` consumes **`knowable` only**; `physical` never crosses into a model fit.
+
+---
+
 ## 1 · Flow signals — the headline market signal
 
 | # | Signal | Feasible? | Lead | Type |
