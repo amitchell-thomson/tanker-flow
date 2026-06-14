@@ -58,6 +58,12 @@ export function tierRadius(tier) { return TIER_RADIUS[tier] || 6; }
 // detected at sog<1), so the map's "moving vs not" agrees with port_events.
 export const SOG_UNDERWAY_KN = 1.0;
 
+// Trailing window for vessel playback + track display. The trail, the visible
+// per-fix markers, the visible track line, and the initial map fit are all
+// scoped to the last this-many ms behind the slider — so selecting a vessel
+// shows its recent track tightly instead of zooming out to its whole history.
+export const PLAYBACK_WINDOW_MS = 72 * 3600 * 1000;  // 72 h
+
 // Initial great-circle bearing from (lat1,lon1) to (lat2,lon2), in degrees
 // clockwise from north (0–360). Used as the triangle heading when COG is
 // unavailable: the direction implied by the step from the previous fix to the

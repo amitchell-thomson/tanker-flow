@@ -80,6 +80,8 @@ const SEAM_MS = new Date(REGIME_CUTOVER).getTime();
 const DAY_MS = 86400000;
 
 let charts = [];
+let rendered = [];   // [{key, spec, card, chart}] — handles for in-place refresh
+let renderedSig = null;  // structure signature of what's currently on screen
 let lastRows = null;
 let lastOverview = null;
 let panelStartMs = null;
@@ -244,21 +246,19 @@ function buildStackedArea(canvas, key, spec, byScope, regime, openFor) {
     const pt = chosen.data[idx];
     if (pt) openFor(key, { day: toISODate(pt.x), zone_scope: chosen._band, regime }, pt.y);
   };
-  charts.push(new Chart(canvas, {
+  const chart = new Chart(canvas, {
     type: 'line', data: { datasets }, options: stackedOptions(spec, onClick),
-  }));
+  });
+  charts.push(chart);
+  return chart;
 }
 
 // ── card ──
 function fallbackSpec(key) {
   return { label: key, unit: 'm³', sig: '', cat: 'other', bandType: 'zone', what: '', mech: '' };
 }
-function renderCard(parent, key, spec, byScope, regime, openFor) {
-  const { cur, prev } = totalsLatest(byScope, regime);
-  const delta = deltaTag(cur, prev);
-  const nBands = Object.keys(byScope).length;
-
-  // anomaly flag: how much of the at-sea stock is heading to an unknown dest.
+// anomaly flag: how much of the at-sea stock is heading to an unknown dest.
+function computeFlags(key, byScope, regime, cur) {
   const flags = [];
   if (key === 'gas_in_transit_volume') {
     const u = byScope.unknown ? (byScope.unknown[regime] || []) : [];
@@ -268,6 +268,14 @@ function renderCard(parent, key, spec, byScope, regime, openFor) {
       flags.push(`<span class="flag flag-warn" title="Share of at-sea gas whose destination was never broadcast — soft on the destination split.">⚑ ${share}% unknown dest</span>`);
     }
   }
+  return flags;
+}
+
+function renderCard(parent, key, spec, byScope, regime, openFor) {
+  const { cur, prev } = totalsLatest(byScope, regime);
+  const delta = deltaTag(cur, prev);
+  const nBands = Object.keys(byScope).length;
+  const flags = computeFlags(key, byScope, regime, cur);
 
   const card = document.createElement('div');
   card.className = 'signal-card';
@@ -292,7 +300,24 @@ function renderCard(parent, key, spec, byScope, regime, openFor) {
     <div class="signal-chart-wrap"><canvas></canvas></div>
   `;
   parent.appendChild(card);
-  buildStackedArea(card.querySelector('canvas'), key, spec, byScope, regime, openFor);
+  const chart = buildStackedArea(card.querySelector('canvas'), key, spec, byScope, regime, openFor);
+  return { card, chart };
+}
+
+// Refresh an already-rendered card's headline + chart in place (no DOM rebuild,
+// no chart re-create) — used by the 60 s poll when the structure is unchanged so
+// the page never flickers or replays its entry animation.
+function updateCard(entry, byScope, regime) {
+  const { key, spec, card, chart } = entry;
+  const { cur, prev } = totalsLatest(byScope, regime);
+  const delta = deltaTag(cur, prev);
+  card.querySelector('.signal-value').textContent = fmtCompact(cur);
+  const dEl = card.querySelector('.signal-delta');
+  dEl.className = 'signal-delta ' + delta.cls;
+  dEl.textContent = delta.text;
+  card.querySelector('.signal-flags').innerHTML = computeFlags(key, byScope, regime, cur).join('');
+  for (const ds of chart.data.datasets) ds.data = fillDaily(byScope[ds._band]?.[regime] || []);
+  chart.update('none');  // no animation → silent refresh
 }
 
 // ── status strip ──
@@ -411,13 +436,9 @@ async function openFor(key, sel, bandValue) {
 }
 
 // ── render + load ──
-function render(rows) {
-  charts.forEach((c) => c.destroy());
-  charts = [];
-  const root = document.getElementById('signal-sections');
-  root.innerHTML = '';
-  if (!rows.length) { root.innerHTML = '<div class="empty">No signals yet — run <code>make signals</code>.</div>'; return; }
-
+// Shape the rows into {grouped, ordered, regime} and set the panel x-range as a
+// side effect. Shared by the full render and the in-place refresh.
+function prepare(rows) {
   const times = rows.map((r) => new Date(r.bucket_date + 'T00:00:00Z').getTime());
   const grouped = groupRows(rows);
 
@@ -440,11 +461,43 @@ function render(rows) {
   // unknown keys appended.
   const ordered = ORDER.filter((k) => grouped[k]);
   for (const k of Object.keys(grouped).sort()) if (!ordered.includes(k)) ordered.push(k);
+  return { grouped, ordered, regime };
+}
+
+// A signature of the on-screen structure: if it's unchanged between refreshes we
+// can update charts in place rather than rebuild the DOM + charts.
+function signatureOf(grouped, ordered, regime) {
+  return JSON.stringify({
+    regime, ps: panelStartMs, pe: panelEndMs,
+    keys: ordered.map((k) => [k, Object.keys(grouped[k]).sort()]),
+  });
+}
+
+function render(rows) {
+  charts.forEach((c) => c.destroy());
+  charts = []; rendered = []; renderedSig = null;
+  const root = document.getElementById('signal-sections');
+  root.innerHTML = '';
+  if (!rows.length) { root.innerHTML = '<div class="empty">No signals yet — run <code>make signals</code>.</div>'; return; }
+
+  const { grouped, ordered, regime } = prepare(rows);
   root.style.gridTemplateColumns = 'repeat(2, 1fr)';
   root.style.setProperty('--rows', Math.max(1, Math.ceil(ordered.length / 2)));
   for (const k of ordered) {
-    renderCard(root, k, META[k] || fallbackSpec(k), grouped[k], regime, openFor);
+    const spec = META[k] || fallbackSpec(k);
+    const { card, chart } = renderCard(root, k, spec, grouped[k], regime, openFor);
+    rendered.push({ key: k, spec, card, chart });
   }
+  renderedSig = signatureOf(grouped, ordered, regime);
+}
+
+// Refresh entry point for the poll: update in place when the structure matches
+// what's on screen, else fall back to a full render.
+function refresh(rows) {
+  if (!rows.length) { render(rows); return; }
+  const { grouped, ordered, regime } = prepare(rows);
+  if (signatureOf(grouped, ordered, regime) !== renderedSig) { render(rows); return; }
+  for (const entry of rendered) updateCard(entry, grouped[entry.key], regime);
 }
 
 async function loadAll() {
@@ -459,7 +512,7 @@ async function loadAll() {
     for (const t of terms) TERMINALS[String(t.terminal_id)] = t;
     lastRows = rows; lastOverview = overview;
     if (overview) renderOverview(overview);
-    render(rows);
+    refresh(rows);
     status.textContent = `${new Set(rows.map((r) => r.signal_key)).size} signals · updated ${new Date().toUTCString().replace(' GMT', ' UTC')}`;
   } catch (_) {
     status.textContent = 'Failed to load signals.';

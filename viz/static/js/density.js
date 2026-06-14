@@ -21,9 +21,10 @@ async function loadDensity() {
   if (densityLayer) { map.removeLayer(densityLayer); densityLayer = null; }
   setStatus('Rendering shipping lanes — first tiles take a few seconds, cached after…');
   const b = await fetch('/api/density-bounds').then(r => r.json());
-  // Per-zoom tiles → lanes stay crisp at any zoom. ?v= busts the browser cache
-  // when the underlying data is refreshed.
-  densityLayer = L.tileLayer(`/api/density-tiles/{z}/{x}/{y}.png?v=${Date.now()}`, {
+  // Per-zoom tiles → lanes stay crisp at any zoom. ?v=<data-version> is stable
+  // within a data version so the browser caches tiles across toggles/pans (1h),
+  // and only changes when the source rebuilds — then it busts the cache cleanly.
+  densityLayer = L.tileLayer(`/api/density-tiles/{z}/{x}/{y}.webp?v=${b.version}`, {
     opacity: 0.9,
     bounds: [[b.south, b.west], [b.north, b.east]],
     minZoom: 2,

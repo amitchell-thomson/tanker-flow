@@ -43,11 +43,55 @@ let trackLayer = null;
 let eventMarkersLayer = null;
 let arcLayer = null;
 
+// Per-fix markers (arrows + gap flags + latest dot), each tagged with its fix
+// time and sorted, so playback can show only the ones inside its trailing window
+// — keeping the visible fixes in sync with the receding trail. `winLo`/`winHi`
+// are the currently-shown half-open index range (shown set == [winLo, winHi)).
+let trackPoints = [];
+let winLo = 0, winHi = 0;
+
 export function hasTrack() { return trackLayer !== null || eventMarkersLayer !== null || arcLayer !== null; }
 
 export function clearTrackAndEvents() {
   if (trackLayer)        { map.removeLayer(trackLayer);        trackLayer = null; }
   if (eventMarkersLayer) { map.removeLayer(eventMarkersLayer); eventMarkersLayer = null; }
+  trackPoints = []; winLo = winHi = 0;
+}
+
+// Show only the per-fix markers whose timestamp falls in [tStart, tEnd] — driven
+// by playback so the visible fixes match the receding trail. Pass tStart=null to
+// reveal the whole track again (e.g. when the playback bar is closed). Reconciles
+// the shown range incrementally, so an advancing playback only toggles the few
+// markers crossing the window edge each frame, not all of them.
+export function setTrackWindow(tStart, tEnd) {
+  if (!trackLayer || !trackPoints.length) return;
+  const N = trackPoints.length;
+  let newLo, newHi;
+  if (tStart == null) {
+    newLo = 0; newHi = N;
+  } else {
+    let lo = 0, hi = N;  // newHi = first index with ts > tEnd
+    while (lo < hi) { const m = (lo + hi) >> 1; if (trackPoints[m].ts <= tEnd) lo = m + 1; else hi = m; }
+    newHi = lo;
+    lo = 0; hi = N;      // newLo = first index with ts >= tStart
+    while (lo < hi) { const m = (lo + hi) >> 1; if (trackPoints[m].ts < tStart) lo = m + 1; else hi = m; }
+    newLo = lo;
+  }
+  if (newHi <= winLo || newLo >= winHi) {
+    // Disjoint from what's shown (a big scrub jump, or the first call from an
+    // empty layer): clear the shown range, add the target wholesale. This is what
+    // keeps the initial windowed draw from adding the whole voyage then removing
+    // most of it.
+    for (let i = winLo; i < winHi; i++) trackLayer.removeLayer(trackPoints[i].marker);
+    for (let i = newLo; i < newHi; i++) trackPoints[i].marker.addTo(trackLayer);
+  } else {
+    // Overlapping: toggle only the markers crossing each edge.
+    while (winHi < newHi) { trackPoints[winHi].marker.addTo(trackLayer); winHi++; }
+    while (winHi > newHi) { winHi--; trackLayer.removeLayer(trackPoints[winHi].marker); }
+    while (winLo > newLo) { winLo--; trackPoints[winLo].marker.addTo(trackLayer); }
+    while (winLo < newLo) { trackLayer.removeLayer(trackPoints[winLo].marker); winLo++; }
+  }
+  winLo = newLo; winHi = newHi;
 }
 
 export function clearSignalArcs() {
@@ -86,13 +130,18 @@ export function drawSignalArcs(legs, { color = '#89b4fa' } = {}) {
   return bounds;
 }
 
-export function drawTrack(fixes) {
+export function drawTrack(fixes, { windowMs = null } = {}) {
   // /api/vessel/{mmsi}/history returns newest-first; sort to chronological,
   // then strip teleport spikes so the drawn track follows the real vessel.
+  // `windowMs` (when set) renders only the last that-many ms of the track
+  // initially; the rest stay created-but-detached and attach on demand as
+  // playback scrubs into them. Geometry is collected into trackPoints and added
+  // via setTrackWindow rather than inline, so the line is windowed like the
+  // markers.
   const s = dropTeleports(fixes.slice().sort((a, b) => new Date(a.fix_ts) - new Date(b.fix_ts)));
   trackLayer = L.layerGroup();
+  trackPoints = []; winLo = winHi = 0;
   if (!s.length) { trackLayer.addTo(map); return []; }
-  const renderer = L.canvas({ padding: 0.5 });  // fast for long tracks
   const n = s.length;
 
   // Time-coloured segments (dim→bright = old→new). A long gap between fixes is
@@ -102,15 +151,17 @@ export function drawTrack(fixes) {
     const t = (i - 1) / Math.max(1, n - 1);
     const dtH = (new Date(b.fix_ts) - new Date(a.fix_ts)) / 3.6e6;
     const gap = dtH > GAP_HOURS;
-    L.polyline([[a.lat, a.lon], [b.lat, b.lon]], {
-      renderer, color: lerpHex(TRACK_OLD, TRACK_NEW, t), weight: 2.5,
+    const seg = L.polyline([[a.lat, a.lon], [b.lat, b.lon]], {
+      color: lerpHex(TRACK_OLD, TRACK_NEW, t), weight: 2.5,
       opacity: gap ? 0.5 : 0.9, dashArray: gap ? '3 7' : null, bubblingMouseEvents: false,
-    }).addTo(trackLayer);
+    });
+    trackPoints.push({ ts: new Date(b.fix_ts).getTime(), marker: seg });
     if (gap) {
-      L.circleMarker([(a.lat + b.lat) / 2, (a.lon + b.lon) / 2], {
-        renderer, radius: 4, color: '#f9e2af', fillColor: '#11111b',
+      const gm = L.circleMarker([(a.lat + b.lat) / 2, (a.lon + b.lon) / 2], {
+        radius: 4, color: '#f9e2af', fillColor: '#11111b',
         fillOpacity: 1, weight: 1.5, bubblingMouseEvents: false,
-      }).bindTooltip(`⚠ AIS gap · dark ${gapLabel(dtH)}`, { sticky: true }).addTo(trackLayer);
+      }).bindTooltip(`⚠ AIS gap · dark ${gapLabel(dtH)}`, { sticky: true });
+      trackPoints.push({ ts: new Date(b.fix_ts).getTime(), marker: gm });
     }
   }
 
@@ -127,10 +178,11 @@ export function drawTrack(fixes) {
     const tip = `${fmtTimeShort(f.fix_ts)} · ${sog} · ${srcLabel(f.source)}${rescue ? ' ⛑' : ''}${newest ? ' · latest' : ''}`;
 
     if (newest) {
-      L.circleMarker([f.lat, f.lon], {
-        renderer, radius: 5, color: '#a6e3a1', weight: 0,
+      const nd = L.circleMarker([f.lat, f.lon], {
+        radius: 5, color: '#a6e3a1', weight: 0,
         fillColor: '#a6e3a1', fillOpacity: 0.95, bubblingMouseEvents: false,
-      }).bindTooltip(tip, { sticky: true }).addTo(trackLayer);
+      }).bindTooltip(tip, { sticky: true });
+      trackPoints.push({ ts: new Date(f.fix_ts).getTime(), marker: nd });
       return;
     }
 
@@ -143,8 +195,22 @@ export function drawTrack(fixes) {
         + `<path d="M7 1 L11 12 L7 9 L3 12 Z" fill="${fill}"${rescue ? ' stroke="#11111b" stroke-width="1"' : ''}/></svg>`,
       iconSize: [sz, sz], iconAnchor: [sz / 2, sz / 2],
     });
-    L.marker([f.lat, f.lon], { icon }).bindTooltip(tip, { sticky: true }).addTo(trackLayer);
+    const m = L.marker([f.lat, f.lon], { icon }).bindTooltip(tip, { sticky: true });
+    trackPoints.push({ ts: new Date(f.fix_ts).getTime(), marker: m });
   });
+
+  // Sort all geometry by time (segments + gap flags + arrows were collected in
+  // separate passes) so the window reconcile sees a monotonic list.
+  trackPoints.sort((a, b) => a.ts - b.ts);
+
+  // Add only the initial window (or everything, when no window is requested —
+  // e.g. the event-viewer's small ±6 h track). The rest attach on demand.
+  if (windowMs != null) {
+    const tEnd = trackPoints[trackPoints.length - 1].ts;
+    setTrackWindow(tEnd - windowMs, tEnd);
+  } else {
+    setTrackWindow(null);
+  }
 
   trackLayer.addTo(map);
   return s;  // cleaned, chronological fixes — for fit-to-bounds + playback

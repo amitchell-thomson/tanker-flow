@@ -4,7 +4,8 @@
 // (play/pause · scrub · speed · time). Self-contained: owns its Leaflet layer and
 // wires the static #playback-bar markup in index.html.
 import { map } from './map.js';
-import { fmtTimeShort } from './config.js';
+import { fmtTimeShort, PLAYBACK_WINDOW_MS } from './config.js';
+import { setTrackWindow } from './track.js';
 
 const BASE_DURATION_MS = 88000;        // wall-clock ms to play the whole track at 1×
                                        // (4× now matches the old 1× feel)
@@ -30,6 +31,7 @@ export function stopPlayback() {
   fixes = []; times = []; latlngs = [];
   if (keyHandler) { document.removeEventListener('keydown', keyHandler); keyHandler = null; }
   if (bar) bar.hidden = true;
+  setTrackWindow(null);  // closing playback reveals the whole track again (no-op if it's been cleared)
 }
 
 // `cleanFixes` = chronological fixes with {fix_ts, lat, lon, sog}. < 2 fixes ⇒
@@ -42,13 +44,16 @@ export function startPlayback(cleanFixes) {
   latlngs = fixes.map(f => [f.lat, f.lon]);
   t0 = times[0]; t1 = times[times.length - 1];
   if (!(t1 > t0)) return;
-  cur = t0; playing = false; speedIdx = 1;
+  // Start at the most recent fix (paused) so the default view + windowed trail
+  // show where the vessel is now, not the start of its history.
+  cur = t1; playing = false; speedIdx = 1;
 
-  const renderer = L.canvas({ padding: 0.5 });
+  // Use the map's shared canvas renderer — never mint one per playback, or it
+  // leaks an orphaned <canvas> on the map each time (see map.js).
   layer = L.layerGroup().addTo(map);
-  trail = L.polyline([], { renderer, color: '#89b4fa', weight: 3, opacity: 0.9, bubblingMouseEvents: false }).addTo(layer);
-  halo = L.circleMarker(latlngs[0], { renderer, radius: 12, color: '#89b4fa', weight: 0, fillColor: '#89b4fa', fillOpacity: 0.22, bubblingMouseEvents: false }).addTo(layer);
-  dot = L.circleMarker(latlngs[0], { renderer, radius: 6, color: '#11111b', weight: 2, fillColor: '#89b4fa', fillOpacity: 1, bubblingMouseEvents: false }).addTo(layer);
+  trail = L.polyline([], { color: '#89b4fa', weight: 3, opacity: 0.9, bubblingMouseEvents: false }).addTo(layer);
+  halo = L.circleMarker(latlngs[0], { radius: 12, color: '#89b4fa', weight: 0, fillColor: '#89b4fa', fillOpacity: 0.22, bubblingMouseEvents: false }).addTo(layer);
+  dot = L.circleMarker(latlngs[0], { radius: 6, color: '#11111b', weight: 2, fillColor: '#89b4fa', fillOpacity: 1, bubblingMouseEvents: false }).addTo(layer);
 
   ensureBar();
   bar.hidden = false;
@@ -79,7 +84,18 @@ function renderAt(t) {
   const p = sampleAt(t);
   dot.setLatLng([p.lat, p.lon]);
   halo.setLatLng([p.lat, p.lon]);
-  trail.setLatLngs(latlngs.slice(0, p.i + 1).concat([[p.lat, p.lon]]));
+  // Trail = only the path within the last TRAIL_WINDOW_MS behind t (a receding
+  // tail), not the whole voyage from the start. The tail's far end is
+  // interpolated at exactly t − window so it recedes smoothly instead of snapping
+  // fix-to-fix; clamped to the track start when the window reaches past it.
+  const wStart = Math.max(t0, t - PLAYBACK_WINDOW_MS);
+  const s = sampleAt(wStart);
+  const tail = [[s.lat, s.lon]];
+  for (let i = s.i + 1; i <= p.i; i++) tail.push(latlngs[i]);
+  tail.push([p.lat, p.lon]);
+  trail.setLatLngs(tail);
+  // Keep the visible per-fix markers in sync with the trail window.
+  setTrackWindow(wStart, t);
   slider.value = String(Math.round(((t - t0) / (t1 - t0)) * 1000));
   const sog = fixes[p.i].sog != null ? `${fixes[p.i].sog.toFixed(1)} kn` : '? kn';
   timeLabel.textContent = `${fmtTimeShort(t)} · ${sog}`;
@@ -98,7 +114,12 @@ function tick(ts) {
 
 function play() {
   if (playing) return;
-  if (cur >= t1) cur = t0;          // replay from the start
+  if (cur >= t1) {                  // fresh playthrough from the start
+    cur = t0;
+    // Selection fits tight on the recent window; a full replay needs the whole
+    // voyage in view, so fit to it here (an explicit, opt-in zoom-out).
+    if (latlngs.length) map.fitBounds(L.latLngBounds(latlngs).pad(0.2));
+  }
   playing = true; lastFrameTs = null;
   playBtn.textContent = '⏸';
   rafId = requestAnimationFrame(tick);

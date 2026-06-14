@@ -11,3 +11,5 @@ logs/
 data/noaa_raw/
 data/noaa_archive/
 *.aiscatcher_page.html
+# Regenerable on-disk render cache (density shipping-lane tiles)
+.cache/

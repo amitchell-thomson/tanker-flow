@@ -2,6 +2,7 @@ import asyncio
 import io
 import json
 import math
+import shutil
 import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -58,16 +59,25 @@ async def lifespan(app: FastAPI):
         settings.database_url, min_size=2, max_size=10
     )
 
-    # Warm the density source in the background so the first user to toggle the
-    # layer hits a ready cache instead of waiting on the ~2s build.
+    # Warm the heavy caches in the background so the first user to hit them lands
+    # on a ready cache instead of waiting on the cold build: the density source
+    # (~2s) and the signal context (~15s leg/visit recompute).
     async def _warm_density() -> None:
         try:
-            await _density_source(app.state.pool)
+            # Warms the source AND pre-renders the low-zoom footprint tiles.
+            await _warm_density_tiles(app.state.pool)
         except Exception:
             pass  # best-effort; a real request will retry the build
 
-    # Keep a reference so the task isn't garbage-collected before it runs.
+    async def _warm_signal_ctx() -> None:
+        try:
+            await _signal_context(app.state.pool)
+        except Exception:
+            pass  # best-effort; a real request will retry the build
+
+    # Keep references so the tasks aren't garbage-collected before they run.
     app.state.warm_task = asyncio.create_task(_warm_density())
+    app.state.warm_signal_task = asyncio.create_task(_warm_signal_ctx())
     yield
     await app.state.pool.close()
 
@@ -103,6 +113,13 @@ async def signals_page():
     return FileResponse(STATIC_DIR / "index.html")
 
 
+_vessels_cache: dict = {}
+# The map polls this every 30 s; a short server cache lets concurrent tabs /
+# reloads share one query and smooths bursts. Kept well under the poll interval
+# so marker positions stay essentially live.
+_VESSELS_TTL = 10.0
+
+
 @app.get("/api/vessels")
 async def vessels(pool: asyncpg.Pool = Depends(get_pool)):
     # LNG-centric: only LNG carriers and FSRUs reach the map. Under server-side
@@ -115,6 +132,9 @@ async def vessels(pool: asyncpg.Pool = Depends(get_pool)):
     # indexes this is ~780 index seeks (LIMIT 1 each) instead of scanning +
     # disk-sorting all 22M fixes / 3M states — the old DISTINCT ON form spilled
     # 130 MB to disk and took seconds, starving the connection pool at page load.
+    cached = _vessels_cache.get("v")
+    if cached and time.time() - cached["ts"] < _VESSELS_TTL:
+        return cached["data"]
     rows = await pool.fetch(
         """
         SELECT
@@ -155,7 +175,9 @@ async def vessels(pool: asyncpg.Pool = Depends(get_pool)):
         WHERE v.is_lng_carrier = TRUE OR v.is_fsru = TRUE
         """
     )
-    return [dict(r) for r in rows]
+    data = [dict(r) for r in rows]
+    _vessels_cache["v"] = {"data": data, "ts": time.time()}
+    return data
 
 
 @app.get("/api/recent-fixes")
@@ -434,8 +456,9 @@ _TRACK_GAP = timedelta(hours=3)
 # absorbs timestamp jitter on closely-spaced fixes.
 _MAX_KNOTS = 40.0
 
-# Render only the ingestion footprint — the union of the AIS bounding boxes —
-# rather than the whole globe, so every output pixel lands where the data is.
+# Fallback footprint (union of the AIS bounding boxes) used only when there is no
+# data at all. The real footprint is derived per-build from the actual data
+# extent (see _build_density_source), since LNG fixes are now global.
 _DENS_S = min(sw[0] for sw, _ in AIS_BOUNDING_BOXES)
 _DENS_W = min(sw[1] for sw, _ in AIS_BOUNDING_BOXES)
 _DENS_N = max(ne[0] for _, ne in AIS_BOUNDING_BOXES)
@@ -451,6 +474,11 @@ def _merc_y(lat: float) -> float:
 def _to_mercator(lat: float, lon: float) -> tuple[float, float]:
     """lat/lon° → Web Mercator x,y (radians)."""
     return math.radians(lon), _merc_y(lat)
+
+
+def _inv_merc_y(y: float) -> float:
+    """Web Mercator y (radians) → latitude°. Inverse of _merc_y."""
+    return math.degrees(2 * math.atan(math.exp(y)) - math.pi / 2)
 
 
 def _haversine_nm(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -510,7 +538,11 @@ def _kick_density_refresh(pool: asyncpg.Pool) -> None:
     async def _refresh() -> None:
         try:
             async with _density_lock:
-                _density_source_cache["v"] = await _build_density_source(pool)
+                src = await _build_density_source(pool)
+                _density_source_cache["v"] = src
+                # New data-version → evict the old version's tiles from both
+                # caches (defined later in the module; resolved at call time).
+                _evict_old_density_versions(int(src["ts"]))
         except Exception:
             pass  # keep serving the stale frame; a later request retries
 
@@ -565,26 +597,77 @@ async def _build_density_source(pool: asyncpg.Pool) -> dict:
                 ys.append(y)
                 prev_mmsi, prev_ts, prev_lat, prev_lon = mmsi, ts, lat, lon
 
-    df = pd.DataFrame({"x": xs, "y": ys}) if xs else None
+    xa = np.asarray(xs, dtype=np.float32)
+    ya = np.asarray(ys, dtype=np.float32)
+
+    # Footprint = the actual data extent (Mercator bbox), NOT the live-ingestion
+    # box: the historical backfill admits LNG fixes globally, so the lanes span
+    # far beyond US+EU and must be rendered/served everywhere there is data
+    # (otherwise tiles above ~56°N etc. fall outside the box and come back empty).
+    finite = np.isfinite(xa)
+    if finite.any():
+        xf, yf = xa[finite], ya[finite]
+        x_min, x_max = float(xf.min()), float(xf.max())
+        y_min, y_max = float(yf.min()), float(yf.max())
+    else:
+        x_min, x_max = math.radians(_DENS_W), math.radians(_DENS_E)
+        y_min, y_max = _merc_y(_DENS_S), _merc_y(_DENS_N)
+
+    # Coarse grid index over the footprint so a tile renders only the segments
+    # near it instead of rescanning all ~11M points. A segment is filed under the
+    # cell of its first endpoint; segments are short (consecutive fixes, capped at
+    # the 3 h / 40 kn break gates), so a small query margin catches any straddling
+    # a cell edge. starts is sorted by cell; offsets[k]..offsets[k+1] is cell k.
+    G = 256
+    cw = (x_max - x_min) / G or 1.0
+    ch = (y_max - y_min) / G or 1.0
+    valid = (
+        np.isfinite(xa[:-1]) & np.isfinite(xa[1:]) if xa.size > 1 else np.zeros(0, bool)
+    )
+    seg = np.nonzero(valid)[0].astype(np.int32)
+    if seg.size:
+        cx = np.clip(((xa[seg] - x_min) / cw).astype(np.int64), 0, G - 1)
+        cy = np.clip(((ya[seg] - y_min) / ch).astype(np.int64), 0, G - 1)
+        cell = cy * G + cx
+        starts = seg[np.argsort(cell, kind="stable")]
+        offsets = np.zeros(G * G + 1, dtype=np.int64)
+        offsets[1:] = np.cumsum(np.bincount(cell, minlength=G * G))
+    else:
+        starts = np.zeros(0, dtype=np.int32)
+        offsets = np.zeros(G * G + 1, dtype=np.int64)
 
     # Reference normalisation: aggregate the whole footprint once and take the
     # p99 of the log-counts. Every tile reuses this scalar so brightness is
     # consistent no matter which window is rendered.
     def _ref_p99() -> float:
-        if df is None:
+        if not xa.size:
             return 1.0
-        cvs = ds.Canvas(
-            2048,
-            2048,
-            x_range=(math.radians(_DENS_W), math.radians(_DENS_E)),
-            y_range=(_merc_y(_DENS_S), _merc_y(_DENS_N)),
+        cvs = ds.Canvas(2048, 2048, x_range=(x_min, x_max), y_range=(y_min, y_max))
+        agg = cvs.line(
+            pd.DataFrame({"x": xa, "y": ya}), x="x", y="y", agg=ds.count(), line_width=1
         )
-        agg = cvs.line(df, x="x", y="y", agg=ds.count(), line_width=1)
         log_vals = np.log1p(np.nan_to_num(agg.values))
         nz = log_vals[log_vals > 0]
         return float(np.percentile(nz, 99)) if nz.size else 1.0
 
-    return {"df": df, "p99": await run_in_threadpool(_ref_p99), "ts": time.time()}
+    return {
+        "xa": xa,
+        "ya": ya,
+        "p99": await run_in_threadpool(_ref_p99),
+        "ts": time.time(),
+        "fp": {
+            "south": _inv_merc_y(y_min),
+            "west": math.degrees(x_min),
+            "north": _inv_merc_y(y_max),
+            "east": math.degrees(x_max),
+        },
+        "fp_merc": (x_min, x_max, y_min, y_max),
+        "G": G,
+        "cw": cw,
+        "ch": ch,
+        "offsets": offsets,
+        "starts": starts,
+    }
 
 
 def _tile_line_width(z: int) -> float:
@@ -641,7 +724,10 @@ def _render_density(
     rgba[:, :, 3] = alpha
     img = Image.fromarray((rgba * 255).astype(np.uint8), "RGBA")
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
+    # Lossless WebP: pixel-identical to the old PNG (no artefacts on the alpha
+    # edges) but markedly smaller on the wire — a sparse translucent line raster
+    # compresses very well. method=4 balances encode time vs size.
+    img.save(buf, format="WEBP", lossless=True, method=4)
     return buf.getvalue()
 
 
@@ -654,31 +740,31 @@ async def density_image(pool: asyncpg.Pool = Depends(get_pool)):
     if cached and time.time() - cached["ts"] < 3600:
         return Response(
             content=cached["data"],
-            media_type="image/png",
-            headers={"Cache-Control": "no-store"},
+            media_type="image/webp",
+            headers=_TILE_CACHE_HEADERS,
         )
 
+    src = await _density_source(pool)
     # Size the raster so the longest edge is _DENSITY_MAXPX and pixels stay
-    # square in Mercator.
-    x_w, x_e = math.radians(_DENS_W), math.radians(_DENS_E)
-    y_s, y_n = _merc_y(_DENS_S), _merc_y(_DENS_N)
+    # square in Mercator, over the data footprint.
+    x_w, x_e, y_s, y_n = src["fp_merc"]
     x_span, y_span = x_e - x_w, y_n - y_s
     if x_span >= y_span:
         w_px, h_px = _DENSITY_MAXPX, max(1, round(_DENSITY_MAXPX * y_span / x_span))
     else:
         w_px, h_px = max(1, round(_DENSITY_MAXPX * x_span / y_span)), _DENSITY_MAXPX
 
-    src = await _density_source(pool)
+    df = pd.DataFrame({"x": src["xa"], "y": src["ya"]}) if src["xa"].size else None
     png = await run_in_threadpool(
-        _render_density, src["df"], w_px, h_px, (x_w, x_e), (y_s, y_n), src["p99"]
+        _render_density, df, w_px, h_px, (x_w, x_e), (y_s, y_n), src["p99"]
     )
     _density_cache[cache_key] = {"data": png, "ts": time.time()}
     return Response(
-        content=png, media_type="image/png", headers={"Cache-Control": "no-store"}
+        content=png, media_type="image/webp", headers=_TILE_CACHE_HEADERS
     )
 
 
-# Fully transparent 256×256 PNG for tiles outside the footprint — lets us skip
+# Fully transparent 256×256 WebP for tiles outside the footprint — lets us skip
 # a datashader pass over open ocean.
 _EMPTY_TILE: bytes | None = None
 
@@ -687,70 +773,229 @@ def _empty_tile() -> bytes:
     global _EMPTY_TILE
     if _EMPTY_TILE is None:
         buf = io.BytesIO()
-        Image.new("RGBA", (256, 256), (0, 0, 0, 0)).save(buf, format="PNG")
+        Image.new("RGBA", (256, 256), (0, 0, 0, 0)).save(
+            buf, format="WEBP", lossless=True, method=4
+        )
         _EMPTY_TILE = buf.getvalue()
     return _EMPTY_TILE
+
+
+# An hour of browser caching (matches the source-rebuild TTL). The tile URL
+# carries a ?v=<data-version> cache-buster (see /api/density-bounds), so a data
+# refresh yields new URLs rather than serving these cached frames stale.
+_TILE_CACHE_HEADERS = {"Cache-Control": "public, max-age=3600"}
+
+# On-disk tile cache so a server restart (or uvicorn --reload during dev) doesn't
+# cold-render every tile again. Keyed by data-version so a refreshed source can't
+# serve a stale tile; old versions are pruned on warm-up. Lives outside the repo
+# tree (gitignored .cache/) — it's a regenerable artefact, not source.
+_DENSITY_DISK_DIR = Path(__file__).parent / ".cache" / "density"
+
+
+def _tile_disk_path(version: int, z: int, x: int, y: int) -> Path:
+    return _DENSITY_DISK_DIR / str(version) / str(z) / str(x) / f"{y}.webp"
+
+
+def _read_tile_disk(version: int, z: int, x: int, y: int) -> bytes | None:
+    try:
+        return _tile_disk_path(version, z, x, y).read_bytes()
+    except OSError:
+        return None  # miss (or unreadable) — caller renders
+
+
+def _write_tile_disk(version: int, z: int, x: int, y: int, data: bytes) -> None:
+    p = _tile_disk_path(version, z, x, y)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+    except OSError:
+        pass  # best-effort cache; render path still serves the bytes
+
+
+def _prune_density_disk(keep_version: int) -> None:
+    """Drop on-disk tiles from every data-version except the current one."""
+    try:
+        for child in _DENSITY_DISK_DIR.iterdir():
+            if child.is_dir() and child.name != str(keep_version):
+                shutil.rmtree(child, ignore_errors=True)
+    except OSError:
+        pass
 
 
 _tile_cache: dict = {}
 
 
-@app.get("/api/density-tiles/{z}/{x}/{y}.png")
-async def density_tile(z: int, x: int, y: int, pool: asyncpg.Pool = Depends(get_pool)):
-    """XYZ slippy tile of the shipping-lane raster, rendered at the requested
-    zoom so lanes stay crisp at every zoom level (vs. upscaling a single
-    fixed-resolution overlay). Cached per (z,x,y) for an hour."""
-    key = (z, x, y)
-    cached = _tile_cache.get(key)
-    if cached and time.time() - cached["ts"] < 3600:
-        return Response(
-            content=cached["png"],
-            media_type="image/png",
-            headers={"Cache-Control": "no-store"},
-        )
-
-    # Tile bounds in our Mercator-radian coordinates. Web Mercator maps the
-    # world to a square, so tile edges are linear: at zoom z there are n=2^z
-    # tiles spanning [-π, π] on each axis (tile y increases southward).
+def _tile_bounds(z: int, x: int, y: int) -> tuple[float, float, float, float]:
+    """XYZ tile → (x_w, x_e, y_s, y_n) in our Mercator-radian coordinates. Web
+    Mercator maps the world to a square, so tile edges are linear: at zoom z there
+    are n=2^z tiles spanning [-π, π] on each axis (tile y increases southward)."""
     n = 2**z
     x_w = math.pi * (2 * x / n - 1)
     x_e = math.pi * (2 * (x + 1) / n - 1)
     y_n = math.pi * (1 - 2 * y / n)
     y_s = math.pi * (1 - 2 * (y + 1) / n)
+    return x_w, x_e, y_s, y_n
 
-    # Short-circuit tiles that don't intersect the ingestion footprint.
-    f_x_w, f_x_e = math.radians(_DENS_W), math.radians(_DENS_E)
-    f_y_s, f_y_n = _merc_y(_DENS_S), _merc_y(_DENS_N)
-    if x_e <= f_x_w or x_w >= f_x_e or y_n <= f_y_s or y_s >= f_y_n:
-        return Response(
-            content=_empty_tile(),
-            media_type="image/png",
-            headers={"Cache-Control": "no-store"},
-        )
 
-    src = await _density_source(pool)
-    png = await run_in_threadpool(
-        _render_density,
-        src["df"],
-        256,
-        256,
-        (x_w, x_e),
-        (y_s, y_n),
-        src["p99"],
+def _tile_in_footprint(fp_merc, x_w: float, x_e: float, y_s: float, y_n: float) -> bool:
+    f_x_w, f_x_e, f_y_s, f_y_n = fp_merc
+    return not (x_e <= f_x_w or x_w >= f_x_e or y_n <= f_y_s or y_s >= f_y_n)
+
+
+# Query margin (coarse cells) when gathering a tile's segments — covers segments
+# whose first endpoint sits in a neighbouring cell. 2 cells comfortably exceeds
+# the longest possible segment (the 3 h / 40 kn break gates cap it at ~1.4 cells).
+_SEG_MARGIN = 2
+
+
+def _tile_segments(src: dict, x_w: float, x_e: float, y_s: float, y_n: float):
+    """Segment-start indices whose segment actually intersects the tile. Two
+    stages: gather candidates from the coarse grid cells overlapping the tile
+    (+margin), then precisely keep only those whose bounding box intersects the
+    tile — so a coarse cell's many candidates collapse to the few touching this
+    tile (the difference between a fast high-zoom render and rescanning a whole
+    dense region)."""
+    G, cw, ch = src["G"], src["cw"], src["ch"]
+    x0, _, y0, _ = src["fp_merc"]
+    offsets, starts, xa, ya = src["offsets"], src["starts"], src["xa"], src["ya"]
+    cxa = max(0, int((x_w - x0) / cw) - _SEG_MARGIN)
+    cxb = min(G - 1, int((x_e - x0) / cw) + _SEG_MARGIN)
+    cya = max(0, int((y_s - y0) / ch) - _SEG_MARGIN)
+    cyb = min(G - 1, int((y_n - y0) / ch) + _SEG_MARGIN)
+    if cxa > cxb or cya > cyb:
+        return np.zeros(0, dtype=np.int32)
+    chunks = []
+    for cy in range(cya, cyb + 1):
+        base = cy * G
+        lo, hi = offsets[base + cxa], offsets[base + cxb + 1]
+        if hi > lo:
+            chunks.append(starts[lo:hi])
+    if not chunks:
+        return np.zeros(0, dtype=np.int32)
+    seg = np.concatenate(chunks)
+    a, b = seg, seg + 1
+    keep = (
+        (np.maximum(xa[a], xa[b]) >= x_w)
+        & (np.minimum(xa[a], xa[b]) <= x_e)
+        & (np.maximum(ya[a], ya[b]) >= y_s)
+        & (np.minimum(ya[a], ya[b]) <= y_n)
+    )
+    return seg[keep]
+
+
+def _render_tile(src: dict, z: int, x: int, y: int) -> bytes:
+    x_w, x_e, y_s, y_n = _tile_bounds(z, x, y)
+    seg = _tile_segments(src, x_w, x_e, y_s, y_n)
+    if seg.size == 0:
+        return _empty_tile()  # in footprint but no tracks here → transparent
+    # Build a small DataFrame of just these segments (each as two points + a NaN
+    # break) so datashader rasterises only what's near the tile.
+    xa, ya = src["xa"], src["ya"]
+    sx = np.empty(seg.size * 3, dtype=np.float32)
+    sy = np.empty(seg.size * 3, dtype=np.float32)
+    sx[0::3], sx[1::3], sx[2::3] = xa[seg], xa[seg + 1], np.nan
+    sy[0::3], sy[1::3], sy[2::3] = ya[seg], ya[seg + 1], np.nan
+    df = pd.DataFrame({"x": sx, "y": sy})
+    return _render_density(
+        df, 256, 256, (x_w, x_e), (y_s, y_n), src["p99"],
         _tile_line_width(z),
         2,  # 2× supersample → silky lines, never grainy
     )
-    _tile_cache[key] = {"png": png, "ts": time.time()}
+
+
+def _footprint_tiles(src: dict, z: int):
+    """XYZ tile coords at zoom z whose extent intersects the data footprint
+    (the inverse of _tile_bounds: x = (xr/π + 1)/2·n, y = (1 − yr/π)/2·n)."""
+    n = 2**z
+    f_x_w, f_x_e, f_y_s, f_y_n = src["fp_merc"]
+    x0 = max(0, int((f_x_w / math.pi + 1) / 2 * n))
+    x1 = min(n - 1, int((f_x_e / math.pi + 1) / 2 * n))
+    y0 = max(0, int((1 - f_y_n / math.pi) / 2 * n))  # north edge → smaller tile y
+    y1 = min(n - 1, int((1 - f_y_s / math.pi) / 2 * n))
+    for x in range(x0, x1 + 1):
+        for y in range(y0, y1 + 1):
+            yield x, y
+
+
+def _evict_old_density_versions(keep_version: int) -> None:
+    """Drop tiles from superseded data-versions out of both caches so a
+    long-running (live) server, whose source rebuilds hourly, doesn't accumulate
+    stale-version tiles in memory or on disk without bound."""
+    _prune_density_disk(keep_version)
+    for k in [k for k in _tile_cache if k[0] != keep_version]:
+        _tile_cache.pop(k, None)
+
+
+async def _warm_density_tiles(pool: asyncpg.Pool) -> None:
+    """Warm the source, then pre-render + cache the low-zoom footprint tiles so
+    the first density toggle paints immediately instead of rendering ~a screenful
+    on demand. Higher zooms stay on-demand (then cached). Best-effort background
+    work; also prunes tiles from superseded data-versions."""
+    src = await _density_source(pool)
+    version = int(src["ts"])
+    _evict_old_density_versions(version)
+    for z in range(2, 5):  # z2–z4 covers the initial view (zoom 3) + a step each way
+        for x, y in _footprint_tiles(src, z):
+            key = (version, z, x, y)
+            if key in _tile_cache:
+                continue
+            disk = _read_tile_disk(version, z, x, y)
+            if disk is not None:
+                _tile_cache[key] = {"png": disk}
+                continue
+            png = await run_in_threadpool(_render_tile, src, z, x, y)
+            _tile_cache[key] = {"png": png}
+            _write_tile_disk(version, z, x, y, png)
+
+
+@app.get("/api/density-tiles/{z}/{x}/{y}.webp")
+async def density_tile(z: int, x: int, y: int, pool: asyncpg.Pool = Depends(get_pool)):
+    """XYZ slippy tile of the shipping-lane raster, rendered at the requested
+    zoom so lanes stay crisp at every zoom level (vs. upscaling a single
+    fixed-resolution overlay). Three cache tiers: browser (1h via the headers +
+    the ?v=<version> URL), in-process memory, and on-disk — so a re-toggle, a pan
+    back, or even a server restart serves instantly instead of re-rendering."""
+    src = await _density_source(pool)
+    # Short-circuit tiles that don't intersect the data footprint.
+    x_w, x_e, y_s, y_n = _tile_bounds(z, x, y)
+    if not _tile_in_footprint(src["fp_merc"], x_w, x_e, y_s, y_n):
+        return Response(
+            content=_empty_tile(), media_type="image/webp", headers=_TILE_CACHE_HEADERS
+        )
+
+    version = int(src["ts"])
+    key = (version, z, x, y)
+
+    cached = _tile_cache.get(key)
+    if cached:
+        return Response(
+            content=cached["png"], media_type="image/webp", headers=_TILE_CACHE_HEADERS
+        )
+
+    disk = _read_tile_disk(version, z, x, y)
+    if disk is not None:
+        _tile_cache[key] = {"png": disk}
+        return Response(
+            content=disk, media_type="image/webp", headers=_TILE_CACHE_HEADERS
+        )
+
+    png = await run_in_threadpool(_render_tile, src, z, x, y)
+    _tile_cache[key] = {"png": png}
+    _write_tile_disk(version, z, x, y, png)
     return Response(
-        content=png, media_type="image/png", headers={"Cache-Control": "no-store"}
+        content=png, media_type="image/webp", headers=_TILE_CACHE_HEADERS
     )
 
 
 @app.get("/api/density-bounds")
-async def density_bounds():
-    """Lat/lon corners the density PNG is rendered to, so the frontend can
-    place the image overlay exactly on the ingestion footprint."""
-    return {"south": _DENS_S, "west": _DENS_W, "north": _DENS_N, "east": _DENS_E}
+async def density_bounds(pool: asyncpg.Pool = Depends(get_pool)):
+    """Lat/lon corners the density raster is rendered to (so the frontend can
+    place tiles exactly on the ingestion footprint) plus the current data
+    `version` — the source's rebuild timestamp. The client stamps tile URLs with
+    ?v=<version>, so a data refresh produces fresh URLs (cache-busting the
+    browser) while every URL within a version caches for an hour."""
+    src = await _density_source(pool)
+    return {**src["fp"], "version": int(src["ts"])}
 
 
 @app.get("/api/port-events")
@@ -849,10 +1094,23 @@ _LEG_SIGNALS = {"gas_in_transit_volume": "transit", "gas_ballast_to_us": "ballas
 _VISIT_SIGNALS = {"gas_discharging_eu": "discharging", "gas_loading_us": "loading"}
 
 
-async def _signal_context(pool: asyncpg.Pool):
-    """Shared setup for the contributor/membership endpoints: recompute the
-    classified legs + visits + the lane filter + terminal and vessel name maps."""
-    now = datetime.now(timezone.utc)
+# The leg/visit pairing + name/lane maps are ~11 queries plus an in-memory pair
+# pass — measured at ~15 s — and they only change when port_events is rebuilt
+# (make port-events). overview polls every 60 s and contributors/vessel-signals
+# fire on every interaction, so recomputing per request dominated the signals
+# view. Cache the heavy part, keyed on the latest port_events build stamp (one
+# cheap query) with a TTL ceiling, and serve it stale-while-revalidate (the same
+# pattern as the density layer): a stale frame is returned immediately while a
+# single background task rebuilds, so only the very first cold build can ever
+# block a request — and that one is pre-warmed at startup. `now` is recomputed
+# fresh per call (free) so "today"/age logic stays live over a stale frame.
+_signal_ctx_cache: dict = {}
+_signal_ctx_lock = asyncio.Lock()
+_signal_ctx_refresh_task: asyncio.Task | None = None
+_SIGNAL_CTX_TTL = 90.0
+
+
+async def _build_signal_context(pool: asyncpg.Pool, now: datetime):
     legs = await compute_legs(pool, now)
     visits = await compute_visits(pool, now)
     async with pool.acquire() as conn:
@@ -864,7 +1122,63 @@ async def _signal_context(pool: asyncpg.Pool):
     lane = build_lane_filter(term_rows)
     names = {r["mmsi"]: r["vessel_name"] for r in name_rows}
     tnames = {r["terminal_id"]: r["terminal_name"] for r in tname_rows}
-    return now, legs, visits, lane, names, tnames
+    return legs, visits, lane, names, tnames
+
+
+def _signal_ctx_fresh(cached: dict | None, stamp) -> bool:
+    return bool(
+        cached
+        and cached["stamp"] == stamp
+        and time.time() - cached["ts"] < _SIGNAL_CTX_TTL
+    )
+
+
+def _kick_signal_ctx_refresh(pool: asyncpg.Pool) -> None:
+    """Rebuild the signal context in the background unless one is already
+    running (single-flight). Tags the cache with the stamp read at build time."""
+    global _signal_ctx_refresh_task
+    if _signal_ctx_refresh_task and not _signal_ctx_refresh_task.done():
+        return
+
+    async def _refresh() -> None:
+        try:
+            async with _signal_ctx_lock:
+                now = datetime.now(timezone.utc)
+                stamp = await pool.fetchval("SELECT max(created_at) FROM port_events")
+                data = await _build_signal_context(pool, now)
+                _signal_ctx_cache["v"] = {
+                    "data": data,
+                    "stamp": stamp,
+                    "ts": time.time(),
+                }
+        except Exception:
+            pass  # keep serving the stale frame; a later request retries
+
+    _signal_ctx_refresh_task = asyncio.create_task(_refresh())
+
+
+async def _signal_context(pool: asyncpg.Pool):
+    """Shared setup for the contributor/membership endpoints: the classified
+    legs + visits + the lane filter + terminal and vessel name maps. Cached and
+    shared across concurrent callers (stale-while-revalidate); only `now` is
+    per-call. The cached lists are consumed read-only downstream, so sharing them
+    is safe."""
+    now = datetime.now(timezone.utc)
+    stamp = await pool.fetchval("SELECT max(created_at) FROM port_events")
+    cached = _signal_ctx_cache.get("v")
+    if _signal_ctx_fresh(cached, stamp):
+        return (now, *cached["data"])
+    if cached:
+        _kick_signal_ctx_refresh(pool)  # stale: refresh in the background…
+        return (now, *cached["data"])  # …and serve the stale frame now (no stall)
+    # Cold cache: build once under the lock; concurrent callers await the result.
+    async with _signal_ctx_lock:
+        cached = _signal_ctx_cache.get("v")
+        if cached:
+            return (now, *cached["data"])
+        data = await _build_signal_context(pool, now)
+        _signal_ctx_cache["v"] = {"data": data, "stamp": stamp, "ts": time.time()}
+        return (now, *data)
 
 
 @app.get("/api/terminals")
