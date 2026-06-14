@@ -45,7 +45,10 @@ enrich:
 	uv run python -m ingestion.vesselfinder --terminal-only
 
 viz:
-	uv run uvicorn viz.app:app --host 127.0.0.1 --port 8000 --reload
+	# Bind all interfaces so the viz is reachable over the tailnet (one URL for
+	# every device: http://compute-node:8000) as well as localhost. Traffic to
+	# other devices rides the encrypted tailnet; keep this host behind a firewall.
+	uv run uvicorn viz.app:app --host 0.0.0.0 --port 8000 --reload
 
 port-events:
 	uv run python -m pipeline.port_events
@@ -53,9 +56,12 @@ port-events:
 # Historical NOAA US AIS backfill (two-tier: tanker Parquet archive + LNG-in-buffer
 # into ais_fixes). Bounded-concurrent download, one-at-a-time on disk. RUN NATIVELY
 # (not via the agent sandbox, which throttles + breaks parallel TLS).
-# Usage: make backfill-noaa START=2022-01-01 END=2022-12-31 [N=6]
+# Usage: make backfill-noaa START=2022-01-01 END=2022-12-31 [N=6] [FORCE=1]
+# FORCE=1 re-downloads + re-archives even if the day's parquet exists — needed to
+# re-pull years archived under the old (type-only) filter so the IMO-union picks up
+# untyped early-AIS LNG hulls.
 backfill-noaa:
-	uv run python -m ingestion.historical.noaa_ais --start $(START) --end $(END) --concurrency $(or $(N),6)
+	uv run python -m ingestion.historical.noaa_ais --start $(START) --end $(END) --concurrency $(or $(N),6) $(if $(FORCE),--force)
 
 # Re-run Tier-2 from the on-disk archive (no download) — apply a changed Tier-2
 # filter (e.g. widened ais_fixes) to already-downloaded days. Idempotent.

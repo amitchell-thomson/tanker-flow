@@ -26,6 +26,7 @@ dependencies = [
     "datashader>=0.19.1",
     "pypdf>=6.12.2",
     "pyarrow>=24.0.0",
+    "zstandard>=0.25.0",
 ]
 
 [dependency-groups]

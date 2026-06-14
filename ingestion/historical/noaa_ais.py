@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import re
 import ssl
 from contextlib import nullcontext
 from datetime import date, datetime, timedelta
@@ -55,8 +56,11 @@ import config
 
 logger = logging.getLogger("noaa_ais")
 
+# NOAA migrated the daily AIS off coast.noaa.gov (legacy `AIS_YYYY_MM_DD.zip`) to
+# this Azure blob (`csv2` tree, zstd-compressed CSV, lowercase schema), which also
+# carries the newest year the old host never published. Verified 2026-06.
 URL_TEMPLATE = (
-    "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/{y}/AIS_{y}_{m:02d}_{d:02d}.zip"
+    "https://noaaocm.blob.core.windows.net/ais/csv2/csv{y}/ais-{y}-{m:02d}-{d:02d}.csv.zst"
 )
 RAW_DIR = Path("data/noaa_raw")
 ARCHIVE_DIR = Path("data/noaa_archive")
@@ -64,21 +68,26 @@ NOAA_SOURCE = "noaa-ais"
 TERMINAL_BUFFER_M = 50_000  # 50 km — PLAN.md §3.8
 US_ZONES = ("usgulf", "usatlantic")
 # Fallback total for a download progress bar when the server omits Content-Length
-# (NOAA does send it; this only fires for the rare gap). A daily zip is ~270 MB.
-EXPECTED_ZIP_BYTES = 283_943_322
+# (Azure sends it; this only fires for the rare gap). A daily .csv.zst is ~150-300 MB.
+EXPECTED_ZIP_BYTES = 220_000_000
 
-# Over a multi-hour decade backfill, NOAA's CDN intermittently drops a TLS stream
+# Over a multi-hour decade backfill, the CDN intermittently drops a TLS stream
 # mid-download (observed: `ssl.SSLError: record layer failure`) or returns a 5xx.
 # These are transient — retry the day with exponential backoff rather than let one
 # bad stream escape asyncio.gather and abort the whole run.
 DOWNLOAD_RETRIES = 5
 
-# Columns we parse from the daily CSV (the file has 17; we keep what the two tiers
-# need). VesselType filters tankers; IMO keys LNG resolution; Draft feeds laden.
+# csv2 daily-CSV columns (lowercase, snake_case) → our internal names. We read this
+# subset and rename so the rest of the loader (archive + Tier-2) is schema-agnostic.
 USECOLS = [
-    "MMSI", "BaseDateTime", "LAT", "LON", "SOG", "COG",
-    "VesselName", "IMO", "VesselType", "Status", "Draft",
+    "mmsi", "base_date_time", "latitude", "longitude", "sog", "cog",
+    "vessel_name", "imo", "vessel_type", "status", "draft",
 ]
+RENAME = {
+    "mmsi": "MMSI", "base_date_time": "BaseDateTime", "latitude": "LAT",
+    "longitude": "LON", "sog": "SOG", "cog": "COG", "vessel_name": "VesselName",
+    "imo": "IMO", "vessel_type": "VesselType", "status": "Status", "draft": "Draft",
+}
 
 
 def day_url(d: date) -> str:
@@ -113,7 +122,7 @@ async def _download(
     a NOAA gap day so the caller can skip it. When `dl_progress` is given, drives a
     live per-file byte bar (Content-Length, or EXPECTED_ZIP_BYTES if absent)."""
     raw_dir.mkdir(parents=True, exist_ok=True)
-    dest = raw_dir / f"AIS_{d.year}_{d.month:02d}_{d.day:02d}.zip"
+    dest = raw_dir / f"ais-{d.year}-{d.month:02d}-{d.day:02d}.csv.zst"
     for attempt in range(1, DOWNLOAD_RETRIES + 1):
         try:
             async with client.stream("GET", day_url(d)) as r:
@@ -154,13 +163,22 @@ async def _download(
     raise RuntimeError(f"download {d}: exhausted retries without raising")
 
 
-def read_tankers(zip_path: Path) -> pd.DataFrame:
-    """Read the daily CSV (pandas auto-decompresses the single-member zip), keep
-    tankers, normalise the fields the loader needs."""
-    # engine='pyarrow' is multithreaded — ~3x faster than the default C parser on
-    # these 7M-row daily files (profiled 9.0s -> 2.7s), same result.
-    df = pd.read_csv(zip_path, usecols=USECOLS, engine="pyarrow")
-    df = df[df["VesselType"].between(80, 89)].copy()
+def read_tankers(path: Path, lng_imos: frozenset[int]) -> pd.DataFrame:
+    """Read one daily csv2 file (zstd-compressed CSV), rename to our internal
+    schema, and keep the **union** of (a) all typed tankers and (b) any known LNG
+    carrier by IMO regardless of vessel_type.
+
+    The union matters because early AIS (2016–2017) under-reports `vessel_type`:
+    on a 2016 day ~46% of fixes carry no type at all and the registered LNG fleet
+    is **100% untyped** (verified), so a `VesselType 80-89` filter alone drops the
+    entire Sabine-era LNG signal. Matching the known fleet by IMO recovers it; the
+    typed-tanker arm still feeds the density map + the future berth-sweep. Unknown
+    LNG hulls (not yet in the registry) are still missed in untyped years — they
+    get filled later by registry completion (PLAN §3.6.1)."""
+    # engine='pyarrow' is multithreaded + releases the GIL during the read, so it
+    # never stalls concurrent downloads (~3x faster than the C parser, same result).
+    df = pd.read_csv(path, usecols=USECOLS, engine="pyarrow", compression="zstd")
+    df = df.rename(columns=RENAME)
     df["fix_ts"] = pd.to_datetime(df["BaseDateTime"], utc=True)
     # Vectorised IMO parse ('IMO9830305' -> 9830305). A per-row .map(parse_imo) over
     # ~300k rows is a Python loop that HOLDS THE GIL in the reader thread, starving
@@ -169,7 +187,10 @@ def read_tankers(zip_path: Path) -> pd.DataFrame:
         df["IMO"].astype("string").str.replace("IMO", "", regex=False).str.strip(),
         errors="coerce",
     ).astype("Int64")
-    # NOAA Draft of 0 means "unreported" (same sentinel rule as models.py).
+    is_tanker = df["VesselType"].between(80, 89)
+    is_known_lng = df["imo_int"].isin(lng_imos)
+    df = df[is_tanker | is_known_lng].copy()
+    # Draft of 0 means "unreported" (same sentinel rule as models.py).
     df.loc[df["Draft"] <= 0, "Draft"] = pd.NA
     return df
 
@@ -181,11 +202,13 @@ def write_archive(df: pd.DataFrame, path: Path) -> None:
     df[cols].to_parquet(path, compression="zstd", index=False)
 
 
-def _read_and_archive(d: date, zip_path: Path, archive_dir: Path) -> pd.DataFrame:
+def _read_and_archive(
+    d: date, zip_path: Path, archive_dir: Path, lng_imos: frozenset[int]
+) -> pd.DataFrame:
     """The CPU-bound half (decompress + parse + parquet write). Run in a worker
     thread so it never stalls concurrent downloads on the event loop; pyarrow's
     reader releases the GIL, so several of these genuinely run in parallel."""
-    df = read_tankers(zip_path)
+    df = read_tankers(zip_path, lng_imos)
     write_archive(df, archive_path(d, archive_dir))
     return df
 
@@ -231,20 +254,28 @@ ON CONFLICT (state_ts, mmsi) DO NOTHING
 """
 
 
-async def load_tier2(pool: asyncpg.Pool, df: pd.DataFrame) -> tuple[int, int]:
-    """Stage the day's LNG-carrier fixes -> all into ais_fixes (full lanes for the
-    density map), near-terminal draught -> vessel_state."""
-    lng = df[df["imo_int"].notna()].copy()
+LNG_IMOS_SQL = (
+    "SELECT imo FROM vessel_registry WHERE is_lng_carrier AND imo IS NOT NULL"
+)
+
+
+async def fetch_lng_imos(pool: asyncpg.Pool) -> frozenset[int]:
+    """The registered LNG-carrier IMO set — the identity key for both the archive
+    union (read_tankers) and the Tier-2 ais_fixes selection. Fetched once per run."""
     async with pool.acquire() as conn:
-        lng_imos = {
-            r["imo"]
-            for r in await conn.fetch(
-                "SELECT imo FROM vessel_registry WHERE is_lng_carrier AND imo IS NOT NULL"
-            )
-        }
-        cand = lng[lng["imo_int"].isin(lng_imos)]
-        if cand.empty:
-            return 0, 0
+        return frozenset(r["imo"] for r in await conn.fetch(LNG_IMOS_SQL))
+
+
+async def load_tier2(
+    pool: asyncpg.Pool, df: pd.DataFrame, lng_imos: frozenset[int]
+) -> tuple[int, int]:
+    """Stage the day's LNG-carrier fixes -> all into ais_fixes (full lanes for the
+    density map), near-terminal draught -> vessel_state. Selected by registry IMO
+    regardless of vessel_type (so untyped early-AIS LNG hulls are kept)."""
+    cand = df[df["imo_int"].isin(lng_imos)]
+    if cand.empty:
+        return 0, 0
+    async with pool.acquire() as conn:
         records = [
             (
                 row.fix_ts.to_pydatetime(),
@@ -291,14 +322,15 @@ async def _archive_and_load(
     zip_path: Path,
     archive_dir: Path,
     read_sem: asyncio.Semaphore,
+    lng_imos: frozenset[int],
 ) -> str:
     """Tier-1 archive (in a thread, memory-bounded by read_sem) + Tier-2 DB load.
     Returns the one-line summary for the caller to emit."""
     async with read_sem:
-        df = await asyncio.to_thread(_read_and_archive, d, zip_path, archive_dir)
+        df = await asyncio.to_thread(_read_and_archive, d, zip_path, archive_dir, lng_imos)
     msg = f"{d}: archived {len(df):,} tanker fixes"
     if pool is not None:
-        fixes, state = await load_tier2(pool, df)
+        fixes, state = await load_tier2(pool, df, lng_imos)
         msg += f" | tier-2: {fixes:,} ais_fixes + {state:,} vessel_state (LNG near US terminals)"
     return msg
 
@@ -314,6 +346,7 @@ async def _process_one(
     archive_dir: Path,
     keep_zip: bool,
     force: bool,
+    lng_imos: frozenset[int],
     overall: Progress | None = None,
     overall_task=None,
     downloads: Progress | None = None,
@@ -335,7 +368,8 @@ async def _process_one(
                 _emit(console, str(e))  # NOAA gap day — skip, keep going
                 return
             try:
-                _emit(console, await _archive_and_load(pool, d, zip_path, archive_dir, read_sem))
+                _emit(console, await _archive_and_load(
+                    pool, d, zip_path, archive_dir, read_sem, lng_imos))
             finally:
                 if not keep_zip and zip_path.exists():
                     zip_path.unlink()
@@ -439,6 +473,10 @@ async def run_range(
     force: bool = False,
 ) -> None:
     days = list(daterange(start, end))
+    # Fetch the registered LNG IMO set once (the archive union + Tier-2 key). With
+    # --no-db (pool=None) there's no registry to read, so the archive falls back to
+    # typed-tankers-only — untyped LNG hulls need a DB to be recognised.
+    lng_imos = await fetch_lng_imos(pool) if pool is not None else frozenset()
     sem = asyncio.Semaphore(concurrency)
     read_sem = asyncio.Semaphore(min(concurrency, MAX_CONCURRENT_READS))
     limits = httpx.Limits(
@@ -466,7 +504,7 @@ async def run_range(
                     _process_one(
                         sem, read_sem, client, pool, d,
                         raw_dir=raw_dir, archive_dir=archive_dir,
-                        keep_zip=keep_zip, force=force,
+                        keep_zip=keep_zip, force=force, lng_imos=lng_imos,
                         overall=overall, overall_task=overall_task,
                         downloads=downloads, console=console,
                     )
@@ -484,7 +522,10 @@ async def process_local(
     if arc.exists() and not force:
         logger.info("%s already archived — skipping", d)
         return
-    logger.info(await _archive_and_load(pool, d, local_path, archive_dir, asyncio.Semaphore(1)))
+    lng_imos = await fetch_lng_imos(pool) if pool is not None else frozenset()
+    logger.info(
+        await _archive_and_load(pool, d, local_path, archive_dir, asyncio.Semaphore(1), lng_imos)
+    )
 
 
 async def reload_archive(
@@ -495,12 +536,13 @@ async def reload_archive(
     rows are skipped (ON CONFLICT DO NOTHING), only the newly-admitted fixes land.
     The two-tier design's payoff (PLAN.md §3.8): re-scope ais_fixes without a
     1.1 TB re-download."""
+    lng_imos = await fetch_lng_imos(pool)
     for d in daterange(start, end):
         arc = archive_path(d, archive_dir)
         if not arc.exists():
             continue
         df = await asyncio.to_thread(pd.read_parquet, arc)
-        fixes, state = await load_tier2(pool, df)
+        fixes, state = await load_tier2(pool, df, lng_imos)
         logger.info("%s: reloaded from archive -> +%d ais_fixes, +%d vessel_state",
                     d, fixes, state)
 
@@ -574,9 +616,11 @@ def _d(s: str) -> date:
 
 
 def _date_from_name(name: str) -> date:
-    # AIS_2022_01_01.zip -> date(2022,1,1)
-    parts = name.replace(".zip", "").split("_")
-    return date(int(parts[1]), int(parts[2]), int(parts[3]))
+    # ais-2022-01-01.csv.zst (or legacy AIS_2022_01_01.zip) -> date(2022,1,1)
+    m = re.search(r"(\d{4})[-_](\d{2})[-_](\d{2})", name)
+    if not m:
+        raise ValueError(f"cannot parse a date from {name!r}")
+    return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
 
 
 if __name__ == "__main__":
