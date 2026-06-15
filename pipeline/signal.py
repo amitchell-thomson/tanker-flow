@@ -65,7 +65,13 @@ from rich.logging import RichHandler
 
 from config import settings
 
-from .legs import Leg, compute_legs
+from .legs import (
+    CENSOR_OPEN_DAYS,
+    FALLBACK_DEST_REGION,
+    OD_WINDOW_DAYS,
+    Leg,
+    compute_legs,
+)
 from .utils import parse_as_of
 from .visits import Visit, compute_visits
 
@@ -74,7 +80,16 @@ logging.basicConfig(level=logging.INFO, format="%(message)s", handlers=[RichHand
 logger = logging.getLogger(__name__)
 
 
-BASIS_PHYSICAL = "physical"
+BASIS_PHYSICAL = "physical"  # hindsight-clean reconstruction (validation use)
+BASIS_KNOWABLE = "knowable"  # point-in-time: the value the live pipeline would
+#                              have printed on each day d (the model-safe input).
+#                              See SIGNALS.md §0·7 for the design + the clock rule.
+ALL_BASES = (BASIS_PHYSICAL, BASIS_KNOWABLE)
+
+# Open-leg statuses that `physical` excludes (resolved as phantom/floating/gap with
+# hindsight) but `knowable` must INCLUDE over their pre-recognition window: on the
+# days before the leg aged out, a live observer saw a laden vessel still in transit.
+OPEN_OVERDUE_STATUSES = ("open_censored", "open_floating", "open_arrival_gap")
 
 # Max berth dwell for an *open* visit (a `moored` with no observed `departed`).
 # Beyond this the visit is treated as a missed-departure phantom — the vessel
@@ -179,6 +194,32 @@ def leg_interval(leg: Leg, panel_end: date) -> tuple[date, date]:
     return start, end_excl
 
 
+def _leg_window_days(leg: Leg) -> int:
+    """Expected-voyage days for a leg, matching legs.py's open-leg classifier
+    exactly (single source of truth): the declared destination region's window,
+    else the NW-Europe fallback window, else the no-region censor floor."""
+    region = leg.dest_region if leg.dest_region is not None else FALLBACK_DEST_REGION
+    return OD_WINDOW_DAYS.get(region, CENSOR_OPEN_DAYS)
+
+
+def knowable_leg_interval(leg: Leg, panel_end: date) -> tuple[date, date]:
+    """Dates a leg was *knowably* in transit — the point-in-time view (SIGNALS.md
+    §0·7). A leg is visible as in-transit from departure until either its arrival
+    is *observed* (closed/same_zone → real event, knowable when it happened) or,
+    if no arrival is ever seen, the day the live pipeline would have aged it out of
+    the in-transit pool (departed + the O-D voyage window — the SAME horizon
+    legs.py uses to flip open_in_transit → overdue). This is what makes `knowable`
+    differ from `physical`: an eventually-phantom/floating/gap leg still
+    contributed on the pre-recognition days, exactly as a live observer saw it."""
+    start = leg.departed_ts.date()
+    if leg.arrived_ts is not None:
+        end_excl = leg.arrived_ts.date()  # observed arrival — knowable in real time
+    else:
+        horizon = start + timedelta(days=_leg_window_days(leg))
+        end_excl = min(horizon, panel_end + timedelta(days=1))
+    return start, end_excl
+
+
 def visit_interval(visit: Visit, panel_end: date) -> tuple[date, date]:
     """Dates a vessel is in berth. The mooring day always counts (floor of one
     day, so a same-day load/discharge isn't silently dropped); the departure day
@@ -242,10 +283,15 @@ def items_live_on(items, target: date, interval_of) -> list:
 # ----------------------------------------------------------------------
 
 
-def lane_legs(legs: list[Leg], lane: LaneFilter) -> list[Leg]:
+def lane_legs(
+    legs: list[Leg], lane: LaneFilter, *, include_overdue: bool = False
+) -> list[Leg]:
     """In-transit base for #2: laden closed (export→import) + laden
-    open_in_transit (export-origin). Excludes same_zone / open_censored /
-    open_arrival_gap / open_floating."""
+    open_in_transit (export-origin). Excludes same_zone.
+
+    `include_overdue` (knowable basis): also keep export-origin laden legs that
+    resolved to phantom/floating/gap — `knowable_leg_interval` counts them only
+    over their pre-recognition window. `physical` leaves them out (hindsight)."""
     out: list[Leg] = []
     for leg in legs:
         if leg.laden is not True or not lane.is_export(leg.origin_zone):
@@ -254,14 +300,19 @@ def lane_legs(legs: list[Leg], lane: LaneFilter) -> list[Leg]:
             out.append(leg)
         elif leg.status == "open_in_transit":
             out.append(leg)
+        elif include_overdue and leg.status in OPEN_OVERDUE_STATUSES:
+            out.append(leg)
     return out
 
 
-def ballast_to_us_legs(legs: list[Leg], lane: LaneFilter) -> list[Leg]:
+def ballast_to_us_legs(
+    legs: list[Leg], lane: LaneFilter, *, include_overdue: bool = False
+) -> list[Leg]:
     """Return base for #4: ballast (empty) legs that left an EU import zone and
     are heading back to the US — closed legs arriving at a US export zone, plus
     open_in_transit ballast legs (destination assumed US; banded 'unknown' when
-    undeclared)."""
+    undeclared). `include_overdue` (knowable): also the pre-recognition window of
+    overdue ballast legs (see lane_legs)."""
     out: list[Leg] = []
     for leg in legs:
         if leg.laden is not False or not lane.is_import(leg.origin_zone):
@@ -269,6 +320,8 @@ def ballast_to_us_legs(legs: list[Leg], lane: LaneFilter) -> list[Leg]:
         if leg.status == "closed" and lane.is_export(leg.dest_zone):
             out.append(leg)
         elif leg.status == "open_in_transit":
+            out.append(leg)
+        elif include_overdue and leg.status in OPEN_OVERDUE_STATUSES:
             out.append(leg)
     return out
 
@@ -393,6 +446,50 @@ def amortized_cargo_contribution(
     return contribution
 
 
+def amortized_cargo_knowable(
+    dwell_means: dict[int, float], global_mean: float
+) -> Callable[[Visit, date], float | None]:
+    """Knowable (point-in-time) berth flow (SIGNALS.md §0·7). Where the physical
+    version amortizes a *closed* visit over its **observed** dwell (hindsight —
+    integrates to exactly one cargo), the knowable version uses the **estimated**
+    dwell (terminal mean) for the whole visit, because while a vessel is alongside
+    the live system does not yet know the final dwell — it can only estimate the
+    loading *rate*. Deposits stop at the observed departure (truncate, never
+    retro-true-up). So a visit that loads faster than the mean deposits <1 cargo in
+    `knowable` and a slower one plateaus at the one-cargo cap — that asymmetry is
+    the genuine real-time signal, not a bug. Same single rate per visit, so the
+    per-day deposits stay self-consistent."""
+
+    def contribution(visit: Visit, d: date) -> float | None:
+        cap = visit.gas_capacity_m3
+        if cap is None:
+            return None
+        t0 = visit.moored_ts
+        est = dwell_means.get(visit.terminal_id, global_mean)
+        total_h = est if est > 0 else DEFAULT_BERTH_HOURS
+        rate = cap / total_h
+        # End at the estimated dwell end, truncated by the observed departure once
+        # it is seen, and never past the open-visit phantom ceiling.
+        t_end = t0 + timedelta(hours=total_h)
+        if visit.departed_ts is not None:
+            t_end = min(t_end, visit.departed_ts)
+        t_end = min(t_end, t0 + timedelta(days=OPEN_VISIT_CEILING_DAYS))
+
+        def deposited_by(t: datetime) -> float:
+            h = (t - t0).total_seconds() / 3600.0
+            return min(float(cap), rate * h) if h > 0 else 0.0
+
+        day_start = datetime(d.year, d.month, d.day, tzinfo=UTC)
+        lo = max(day_start, t0)
+        hi = min(day_start + timedelta(days=1), t_end)
+        if hi <= lo:
+            return None
+        c = deposited_by(hi) - deposited_by(lo)
+        return c if c > 1e-9 else None
+
+    return contribution
+
+
 def accumulate_daily(
     items: list,
     days: list[date],
@@ -453,75 +550,107 @@ async def build_signals(
 
     lane = build_lane_filter(term_rows)
 
-    transit = lane_legs(legs, lane)
-    ballast = ballast_to_us_legs(legs, lane)
+    # Visit bases are basis-independent (same berth occupancy); only the per-day
+    # contribution differs by basis. Leg bases differ by basis: knowable also
+    # admits the overdue open legs over their pre-recognition window.
     discharging = discharging_eu_visits(visits)
     loading = loading_us_visits(visits)
+    transit_phys = lane_legs(legs, lane)
+    ballast_phys = ballast_to_us_legs(legs, lane)
+    transit_know = lane_legs(legs, lane, include_overdue=True)
+    ballast_know = ballast_to_us_legs(legs, lane, include_overdue=True)
 
     panel_end = now.date()
     if panel_start is None:
-        starts = (
-            [lg.departed_ts.date() for lg in transit + ballast]
-            + [v.moored_ts.date() for v in discharging + loading]
-        )
+        starts = [lg.departed_ts.date() for lg in transit_know + ballast_know] + [
+            v.moored_ts.date() for v in discharging + loading
+        ]
         panel_start = min(starts) if starts else panel_end
     days = daily_buckets(panel_start, panel_end)
 
-    # Berth signals amortize each cargo across the visit's berth hours (flow);
-    # open visits estimate total dwell from the terminal's closed-visit mean.
     load_means, load_global = terminal_dwell_hours(loading)
     disch_means, disch_global = terminal_dwell_hours(discharging)
 
+    # Per-basis aggregator wiring. physical: hindsight intervals + observed-dwell
+    # amortization. knowable: point-in-time leg intervals (overdue legs counted
+    # pre-recognition) + estimated-dwell amortization. See SIGNALS.md §0·7.
+    plans = {
+        BASIS_PHYSICAL: dict(
+            transit=transit_phys,
+            ballast=ballast_phys,
+            leg_interval=leg_interval,
+            load_contrib=amortized_cargo_contribution(load_means, load_global, now),
+            disch_contrib=amortized_cargo_contribution(disch_means, disch_global, now),
+        ),
+        BASIS_KNOWABLE: dict(
+            transit=transit_know,
+            ballast=ballast_know,
+            leg_interval=knowable_leg_interval,
+            load_contrib=amortized_cargo_knowable(load_means, load_global),
+            disch_contrib=amortized_cargo_knowable(disch_means, disch_global),
+        ),
+    }
+
     rows: list[SignalRow] = []
-    rows += accumulate_daily(
-        loading,
-        days,
-        signal_key="gas_loading_us",
-        interval_of=visit_berth_interval,
-        band_of=visit_terminal_band,
-        contribution=amortized_cargo_contribution(load_means, load_global, now),
-    )
-    rows += accumulate_daily(
-        discharging,
-        days,
-        signal_key="gas_discharging_eu",
-        interval_of=visit_berth_interval,
-        band_of=visit_terminal_band,
-        contribution=amortized_cargo_contribution(disch_means, disch_global, now),
-    )
-    rows += accumulate_daily(
-        transit,
-        days,
-        signal_key="gas_in_transit_volume",
-        interval_of=leg_interval,
-        band_of=lambda lg: transit_dest_band(lg, lane),
-    )
-    rows += accumulate_daily(
-        ballast,
-        days,
-        signal_key="gas_ballast_to_us",
-        interval_of=leg_interval,
-        band_of=lambda lg: ballast_dest_band(lg, lane),
-    )
+    for basis, p in plans.items():
+        rows += accumulate_daily(
+            loading,
+            days,
+            signal_key="gas_loading_us",
+            interval_of=visit_berth_interval,
+            band_of=visit_terminal_band,
+            contribution=p["load_contrib"],
+            basis=basis,
+        )
+        rows += accumulate_daily(
+            discharging,
+            days,
+            signal_key="gas_discharging_eu",
+            interval_of=visit_berth_interval,
+            band_of=visit_terminal_band,
+            contribution=p["disch_contrib"],
+            basis=basis,
+        )
+        rows += accumulate_daily(
+            p["transit"],
+            days,
+            signal_key="gas_in_transit_volume",
+            interval_of=p["leg_interval"],
+            band_of=lambda lg: transit_dest_band(lg, lane),
+            basis=basis,
+        )
+        rows += accumulate_daily(
+            p["ballast"],
+            days,
+            signal_key="gas_ballast_to_us",
+            interval_of=p["leg_interval"],
+            band_of=lambda lg: ballast_dest_band(lg, lane),
+            basis=basis,
+        )
 
     summary = {
         "total_rows": len(rows),
         "by_key": Counter(r.signal_key for r in rows),
         "by_regime": Counter(r.regime for r in rows),
+        "by_basis": Counter(r.basis for r in rows),
         "panel_start": panel_start,
         "panel_end": panel_end,
-        "transit_legs": len(transit),
-        "transit_open": sum(1 for lg in transit if lg.status == "open_in_transit"),
-        "transit_unknown_band": sum(
-            1 for lg in transit if transit_dest_band(lg, lane) == UNKNOWN_BAND
+        "transit_legs": len(transit_phys),
+        "transit_legs_knowable": len(transit_know),
+        "transit_open": sum(1 for lg in transit_phys if lg.status == "open_in_transit"),
+        "transit_overdue_knowable": sum(
+            1 for lg in transit_know if lg.status in OPEN_OVERDUE_STATUSES
         ),
-        "ballast_legs": len(ballast),
+        "transit_unknown_band": sum(
+            1 for lg in transit_phys if transit_dest_band(lg, lane) == UNKNOWN_BAND
+        ),
+        "ballast_legs": len(ballast_phys),
         "discharging_visits": len(discharging),
         "discharging_open": len(items_live_on(discharging, panel_end, visit_interval)),
         "loading_visits": len(loading),
         "loading_open": len(items_live_on(loading, panel_end, visit_interval)),
         "null_gas_legs": sum(
-            1 for lg in transit + ballast if lg.gas_capacity_m3 is None
+            1 for lg in transit_know + ballast_know if lg.gas_capacity_m3 is None
         ),
         "null_gas_visits": sum(
             1 for v in discharging + loading if v.gas_capacity_m3 is None
@@ -574,10 +703,17 @@ def _log_summary(summary: dict, wall_seconds: float) -> None:
     )
     logger.info("  panel: %s → %s", summary["panel_start"], summary["panel_end"])
     logger.info(
-        "  in-transit legs: %d  (open: %d, unknown-dest band: %d)",
+        "  basis rows: %s",
+        ", ".join(f"{b}={n}" for b, n in sorted(summary["by_basis"].items())),
+    )
+    logger.info(
+        "  in-transit legs: %d physical (open: %d, unknown-dest: %d) | "
+        "%d knowable (+%d overdue counted pre-recognition)",
         summary["transit_legs"],
         summary["transit_open"],
         summary["transit_unknown_band"],
+        summary["transit_legs_knowable"],
+        summary["transit_overdue_knowable"],
     )
     logger.info("  ballast→US legs: %d", summary["ballast_legs"])
     logger.info(

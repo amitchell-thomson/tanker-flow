@@ -11,16 +11,19 @@ import pytest
 
 from config import REGIME_CUTOVER
 from pipeline.legs import Leg
+from pipeline.legs import FALLBACK_DEST_REGION, OD_WINDOW_DAYS
 from pipeline.signal import (
     UNKNOWN_BAND,
     LaneFilter,
     accumulate_daily,
     amortized_cargo_contribution,
+    amortized_cargo_knowable,
     ballast_dest_band,
     ballast_to_us_legs,
     daily_buckets,
     discharging_eu_visits,
     items_live_on,
+    knowable_leg_interval,
     lane_legs,
     leg_interval,
     loading_us_visits,
@@ -127,7 +130,9 @@ def test_lane_legs_in_transit_base():
 def test_ballast_to_us_legs():
     legs = [
         # EU → US, empty, arrived: kept
-        mk_leg(status="closed", origin_zone="nweurope", dest_zone="usgulf", laden=False),
+        mk_leg(
+            status="closed", origin_zone="nweurope", dest_zone="usgulf", laden=False
+        ),
         # EU departed, still at sea, empty: kept
         mk_leg(status="open_in_transit", origin_zone="nweurope", laden=False),
         # laden EU→US (would be odd) excluded — only ballast returns
@@ -135,7 +140,9 @@ def test_ballast_to_us_legs():
         # US→EU laden (the in-transit base, not ballast) excluded
         mk_leg(status="closed", origin_zone="usgulf", dest_zone="nweurope"),
         # EU→EU empty hop excluded (dest not an export zone)
-        mk_leg(status="closed", origin_zone="nweurope", dest_zone="baltic", laden=False),
+        mk_leg(
+            status="closed", origin_zone="nweurope", dest_zone="baltic", laden=False
+        ),
     ]
     base = ballast_to_us_legs(legs, LANE)
     assert len(base) == 2
@@ -205,7 +212,9 @@ def test_visit_terminal_band():
 
 
 def test_leg_interval_half_open_on_arrival():
-    leg = mk_leg(status="closed", departed_ts=at(0), arrived_ts=at(3), dest_zone="nweurope")
+    leg = mk_leg(
+        status="closed", departed_ts=at(0), arrived_ts=at(3), dest_zone="nweurope"
+    )
     start, end_excl = leg_interval(leg, at(10).date())
     assert (start, end_excl) == (at(0).date(), at(3).date())  # not live on arrival day
 
@@ -214,6 +223,72 @@ def test_leg_interval_open_runs_to_panel_end():
     leg = mk_leg(status="open_in_transit", departed_ts=at(0))
     _, end_excl = leg_interval(leg, at(5).date())
     assert end_excl == at(5).date() + timedelta(days=1)
+
+
+# --- knowable basis (SIGNALS.md §0·7) -----------------------------------------
+
+
+def test_lane_legs_excludes_overdue_by_default_includes_with_flag():
+    # physical drops phantom/floating/gap; knowable keeps them (pre-recognition).
+    legs = [
+        mk_leg(status="closed", dest_zone="nweurope", arrived_ts=at(3)),
+        mk_leg(status="open_in_transit"),
+        mk_leg(status="open_censored"),
+        mk_leg(status="open_floating"),
+        mk_leg(status="open_arrival_gap"),
+    ]
+    assert len(lane_legs(legs, LANE)) == 2  # closed + open_in_transit only
+    assert len(lane_legs(legs, LANE, include_overdue=True)) == 5  # + 3 overdue
+
+
+def test_ballast_legs_overdue_flag():
+    legs = [
+        mk_leg(status="open_censored", origin_zone="nweurope", laden=False),
+    ]
+    assert len(ballast_to_us_legs(legs, LANE)) == 0
+    assert len(ballast_to_us_legs(legs, LANE, include_overdue=True)) == 1
+
+
+def test_knowable_interval_closed_matches_physical():
+    # An observed arrival is knowable in real time → same interval as physical.
+    leg = mk_leg(
+        status="closed", departed_ts=at(0), arrived_ts=at(3), dest_zone="nweurope"
+    )
+    assert knowable_leg_interval(leg, at(40).date()) == leg_interval(leg, at(40).date())
+
+
+def test_knowable_interval_overdue_ends_at_window_horizon():
+    # A censored leg (no arrival ever observed) was live-visible only until the
+    # O-D voyage window aged it out: departed + nweurope-fallback window.
+    leg = mk_leg(status="open_censored", departed_ts=at(0), dest_region=None)
+    window = OD_WINDOW_DAYS[FALLBACK_DEST_REGION]
+    start, end_excl = knowable_leg_interval(leg, at(40).date())
+    assert start == at(0).date()
+    assert end_excl == at(0).date() + timedelta(days=window)  # not run to panel end
+
+
+def test_knowable_interval_overdue_capped_at_panel_end():
+    leg = mk_leg(status="open_censored", departed_ts=at(0), dest_region=None)
+    _, end_excl = knowable_leg_interval(leg, at(5).date())  # panel ends before horizon
+    assert end_excl == at(5).date() + timedelta(days=1)
+
+
+def test_knowable_berth_uses_estimate_not_observed_dwell():
+    # A visit that loads FASTER than the terminal mean deposits <1 cargo in
+    # knowable (real-time rate view), vs ~1 cargo in physical (hindsight).
+    cap = 170_000
+    fast = mk_visit(
+        moored_ts=at(0), departed_ts=at(0) + timedelta(hours=6), gas_capacity_m3=cap
+    )
+    means, glob = {10: 24.0}, 24.0  # terminal mean dwell 24h, observed only 6h
+    days = daily_buckets(*[d for d in (at(0).date(), at(2).date())])
+    phys_fn = amortized_cargo_contribution(means, glob, NOW)
+    know_fn = amortized_cargo_knowable(means, glob)
+    phys_total = sum(phys_fn(fast, d) or 0 for d in days)
+    know_total = sum(know_fn(fast, d) or 0 for d in days)
+    assert phys_total == pytest.approx(cap, rel=1e-6)  # integrates to one cargo
+    assert know_total == pytest.approx(cap * 6 / 24, rel=1e-6)  # rate × observed hours
+    assert know_total < phys_total
 
 
 def test_visit_interval_floors_to_mooring_day():
@@ -242,7 +317,9 @@ def test_visit_interval_open_capped_at_ceiling():
 
 def test_items_live_on():
     legs = [
-        mk_leg(status="closed", departed_ts=at(0), arrived_ts=at(3), dest_zone="nweurope"),
+        mk_leg(
+            status="closed", departed_ts=at(0), arrived_ts=at(3), dest_zone="nweurope"
+        ),
         mk_leg(status="open_in_transit", departed_ts=at(1)),
     ]
     live = items_live_on(legs, at(2).date(), leg_interval)
@@ -258,13 +335,27 @@ def test_items_live_on():
 def test_accumulate_daily_stacks_by_band():
     # Two open in-transit legs to different zones → two stacked bands.
     legs = [
-        mk_leg(status="open_in_transit", departed_ts=at(0), dest_region="nweurope", gas_capacity_m3=170_000),
-        mk_leg(status="open_in_transit", departed_ts=at(0), dest_region="wmed", gas_capacity_m3=140_000, mmsi=2),
+        mk_leg(
+            status="open_in_transit",
+            departed_ts=at(0),
+            dest_region="nweurope",
+            gas_capacity_m3=170_000,
+        ),
+        mk_leg(
+            status="open_in_transit",
+            departed_ts=at(0),
+            dest_region="wmed",
+            gas_capacity_m3=140_000,
+            mmsi=2,
+        ),
     ]
     days = daily_buckets(at(0).date(), at(2).date())
     rows = accumulate_daily(
-        legs, days, signal_key="gas_in_transit_volume",
-        interval_of=leg_interval, band_of=lambda lg: transit_dest_band(lg, LANE),
+        legs,
+        days,
+        signal_key="gas_in_transit_volume",
+        interval_of=leg_interval,
+        band_of=lambda lg: transit_dest_band(lg, LANE),
     )
     by = index(rows)
     d = at(2).date()
@@ -273,10 +364,20 @@ def test_accumulate_daily_stacks_by_band():
 
 
 def test_accumulate_daily_closed_leg_stops_at_arrival():
-    leg = mk_leg(status="closed", departed_ts=at(0), arrived_ts=at(2), dest_zone="nweurope", gas_capacity_m3=170_000)
+    leg = mk_leg(
+        status="closed",
+        departed_ts=at(0),
+        arrived_ts=at(2),
+        dest_zone="nweurope",
+        gas_capacity_m3=170_000,
+    )
     days = daily_buckets(at(0).date(), at(3).date())
     rows = accumulate_daily(
-        [leg], days, signal_key="g", interval_of=leg_interval, band_of=lambda lg: transit_dest_band(lg, LANE),
+        [leg],
+        days,
+        signal_key="g",
+        interval_of=leg_interval,
+        band_of=lambda lg: transit_dest_band(lg, LANE),
     )
     by = index(rows)
     assert by[("g", at(0).date(), "nweurope", "all")] == 170_000
@@ -286,11 +387,16 @@ def test_accumulate_daily_closed_leg_stops_at_arrival():
 
 def test_accumulate_daily_visit_in_berth_stock():
     # An open visit (in berth) contributes its gas to its terminal band every day.
-    v = mk_visit(moored_ts=at(0), departed_ts=None, terminal_id=10, gas_capacity_m3=160_000)
+    v = mk_visit(
+        moored_ts=at(0), departed_ts=None, terminal_id=10, gas_capacity_m3=160_000
+    )
     days = daily_buckets(at(0).date(), at(2).date())
     rows = accumulate_daily(
-        [v], days, signal_key="gas_discharging_eu",
-        interval_of=visit_interval, band_of=visit_terminal_band,
+        [v],
+        days,
+        signal_key="gas_discharging_eu",
+        interval_of=visit_interval,
+        band_of=visit_terminal_band,
     )
     by = index(rows)
     for d in days:
@@ -300,8 +406,11 @@ def test_accumulate_daily_visit_in_berth_stock():
 def test_accumulate_daily_null_gas_skipped():
     leg = mk_leg(status="open_in_transit", departed_ts=at(0), gas_capacity_m3=None)
     rows = accumulate_daily(
-        [leg], daily_buckets(at(0).date(), at(2).date()),
-        signal_key="g", interval_of=leg_interval, band_of=lambda lg: transit_dest_band(lg, LANE),
+        [leg],
+        daily_buckets(at(0).date(), at(2).date()),
+        signal_key="g",
+        interval_of=leg_interval,
+        band_of=lambda lg: transit_dest_band(lg, LANE),
     )
     assert rows == []
 
@@ -320,7 +429,11 @@ def test_accumulate_daily_regime_split_at_seam():
         (REGIME_CUTOVER + timedelta(days=3)).date(),
     )
     rows = accumulate_daily(
-        [leg], days, signal_key="g", interval_of=leg_interval, band_of=lambda lg: transit_dest_band(lg, LANE),
+        [leg],
+        days,
+        signal_key="g",
+        interval_of=leg_interval,
+        band_of=lambda lg: transit_dest_band(lg, LANE),
     )
     assert {r.regime for r in rows} == {"bbox", "all"}
     by = index(rows)
@@ -342,23 +455,28 @@ def test_visit_berth_interval_includes_departure_day():
 
 def test_terminal_dwell_hours_mean_and_fallback():
     visits = [
-        mk_visit(terminal_id=10, moored_ts=at(0), departed_ts=at(1)),    # 24h
+        mk_visit(terminal_id=10, moored_ts=at(0), departed_ts=at(1)),  # 24h
         mk_visit(terminal_id=10, moored_ts=at(2), departed_ts=at(2.5)),  # 12h
-        mk_visit(terminal_id=11, moored_ts=at(0), departed_ts=None),     # open → ignored
+        mk_visit(terminal_id=11, moored_ts=at(0), departed_ts=None),  # open → ignored
     ]
     means, global_mean = terminal_dwell_hours(visits)
     assert means[10] == pytest.approx(18.0)  # (24 + 12) / 2
-    assert 11 not in means                   # only-open terminal has no observed mean
+    assert 11 not in means  # only-open terminal has no observed mean
     assert global_mean == pytest.approx(18.0)
 
 
 def test_amortized_closed_visit_integrates_to_one_cargo():
     # A closed visit spanning several days deposits its cargo exactly once.
-    v = mk_visit(terminal_id=10, moored_ts=at(0), departed_ts=at(2), gas_capacity_m3=170_000)
+    v = mk_visit(
+        terminal_id=10, moored_ts=at(0), departed_ts=at(2), gas_capacity_m3=170_000
+    )
     days = daily_buckets(at(0).date(), at(10).date())
     rows = accumulate_daily(
-        [v], days, signal_key="gas_loading_us",
-        interval_of=visit_berth_interval, band_of=visit_terminal_band,
+        [v],
+        days,
+        signal_key="gas_loading_us",
+        interval_of=visit_berth_interval,
+        band_of=visit_terminal_band,
         contribution=amortized_cargo_contribution({}, 24.0, NOW),
     )
     total = sum(r.value for r in rows if r.regime == "all")
@@ -370,11 +488,16 @@ def test_amortized_midnight_straddle_splits_not_doubles():
     # than registering full capacity on both (the old in-berth stock bug).
     moored = datetime(2026, 6, 1, 23, 0, tzinfo=timezone.utc)
     departed = datetime(2026, 6, 2, 1, 0, tzinfo=timezone.utc)
-    v = mk_visit(terminal_id=10, moored_ts=moored, departed_ts=departed, gas_capacity_m3=170_000)
+    v = mk_visit(
+        terminal_id=10, moored_ts=moored, departed_ts=departed, gas_capacity_m3=170_000
+    )
     days = daily_buckets(moored.date(), departed.date() + timedelta(days=2))
     rows = accumulate_daily(
-        [v], days, signal_key="gas_loading_us",
-        interval_of=visit_berth_interval, band_of=visit_terminal_band,
+        [v],
+        days,
+        signal_key="gas_loading_us",
+        interval_of=visit_berth_interval,
+        band_of=visit_terminal_band,
         contribution=amortized_cargo_contribution({}, 24.0, NOW),
     )
     by = index(rows)
@@ -386,11 +509,16 @@ def test_amortized_open_visit_estimates_dwell_and_caps_at_one_cargo():
     # An open visit estimates total dwell from the terminal mean and never
     # deposits more than one cargo, even after lingering past the estimate.
     moored = NOW - timedelta(days=3)
-    v = mk_visit(terminal_id=10, moored_ts=moored, departed_ts=None, gas_capacity_m3=170_000)
+    v = mk_visit(
+        terminal_id=10, moored_ts=moored, departed_ts=None, gas_capacity_m3=170_000
+    )
     days = daily_buckets(moored.date(), NOW.date())
     rows = accumulate_daily(
-        [v], days, signal_key="gas_loading_us",
-        interval_of=visit_berth_interval, band_of=visit_terminal_band,
+        [v],
+        days,
+        signal_key="gas_loading_us",
+        interval_of=visit_berth_interval,
+        band_of=visit_terminal_band,
         contribution=amortized_cargo_contribution({10: 24.0}, 24.0, NOW),
     )
     total = sum(r.value for r in rows if r.regime == "all")
