@@ -34,9 +34,13 @@ Design decisions:
     capped at one cargo, so an open visit lingering past its estimated dwell
     plateaus instead of over-counting). This de-biases the old in-berth stock,
     where a visit straddling midnight registered its full cargo on both days.
-  - basis='physical' only: one compute_legs(now=as_of) call; an item is live on
-    day d iff its interval covers d, using today's classification (hindsight-
-    clean, not leakage-free). The 'knowable' point-in-time series is deferred.
+  - Two bases (SIGNALS.md §0·7), both built per rebuild. `physical` = hindsight-
+    clean reconstruction (an item is live on day d iff its interval covers d under
+    today's classification) — validation only. `knowable` = the point-in-time
+    value the live pipeline would have printed on day d (overdue legs counted over
+    their pre-recognition window via `knowable_leg_interval`; berth flow amortized
+    over the *estimated* dwell via `amortized_cargo_knowable`) — the model-safe
+    input. `MODELS.md` consumes `knowable` only.
   - In-transit stock = laden closed legs (export→import, over [departed, arrived))
     + laden open_in_transit legs (export-origin, to as_of). Unlike the old
     ton-mile build, an open leg with no declared destination is shown as its own
