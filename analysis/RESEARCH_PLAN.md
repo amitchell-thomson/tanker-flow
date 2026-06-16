@@ -1,14 +1,25 @@
 # Research plan — train on history, forward-test on live
 
 Execution companion to [`SIGNALS.md`](SIGNALS.md) (*what* can be measured),
-[`MODELS.md`](MODELS.md) (*how* to model it), and
+[`MODELS.md`](MODELS.md) (*how* to model it), [`VALIDATION.md`](VALIDATION.md) (the
+*signal-integrity gate*), and
 [`ingestion/historical/PLAN.md`](../ingestion/historical/PLAN.md) (*how* the
 historical corpus is built). This doc covers the **experimental design**: given a
 deep historical corpus *and* a thin-but-growing live feed, how do we actually do
 the research without fooling ourselves.
 
-Read it after the other three — it depends on the fidelity/regime vocabulary they
+> **Two senses of "validation" — keep them straight.** `VALIDATION.md` validates the
+> **signals** (are the model *inputs* correctly built and model-ready — a one-time
+> gate + CI regression, already green). This doc validates the **models** (the
+> train/test protocol so a fit isn't fooling us). Different jobs; complementary.
+
+Read it after the other docs — it depends on the fidelity/regime vocabulary they
 establish.
+
+> **Status (2026-06-16):** the corpus, the 34-signal panel, and the signal-integrity
+> gate are **built** — backfill complete, signals extracted dual-basis, `make
+> validate-signals` green. So §5 steps 1–2 below are largely *done*; the live work
+> ahead is the control set + the model fits + the forward test.
 
 ---
 
@@ -105,6 +116,14 @@ window **leaks the future**. Mitigation: the forward-test period is defined by
 calendar date and **NOAA data is barred from crossing into it**, no matter when it
 is downloaded. The live test window stays a pure hold-out.
 
+> **Now enforced in the data, not just the protocol.** Every signal is built in a
+> `basis='knowable'` (leakage-free point-in-time) series — the only one a model
+> trains on — alongside the hindsight `physical` series (`SIGNALS.md` §2.2). And
+> `signal_daily_live_vintage` logs what the pipeline *printed live* each day, so the
+> acceptance test is mechanical: `knowable[d]` recomputed must equal the as-printed
+> value (`VALIDATION.md` Tier 4). This is the structural backstop behind the
+> calendar-date rule above.
+
 ### 3.3 · Keep EU queue features out of the transferable model
 
 Build the deployable spread model only from features present in **both** corpora
@@ -143,19 +162,20 @@ finding.
 
 ## 5 · Build order
 
-1. **Assemble the historical panel.** Execute `PLAN.md` Phases 1–4 (NOAA US,
-   GFW voyages+events, ALSI/ENTSO-G), plus the control set (EIA, GIE AGSI,
-   degree-days) on a common daily grid; define the spread target unit-consistently
-   (`MODELS.md` V.3).
-2. **Validate signal logic on history.** Confirm event detection, leg geometry,
-   queue/berth realism reproduce known episodes (Freeport-2022, the 2022 EU surge)
-   before trusting any aggregate.
-3. **Train Part II physical nowcasts on the decade**, walk-forward CV, hierarchical
-   pooling across terminals (`MODELS.md` Part IV.2). These graduate from "confirm
-   edge" to genuinely fitted models.
-4. **Fit the Part III spread model on the ~3,000-row panel** — regularised /
-   Bayesian, uncertainty-first, FWL control-partialling (V.2), EU fidelity step as
-   a regime indicator.
+1. ✅ **Historical corpus assembled.** `PLAN.md` Phases 1–4 done (NOAA US 2016+,
+   GFW voyages+events, reconciled); the 34-signal panel is extracted dual-basis. **Still
+   to do:** the control set (EIA Phase 2, GIE AGSI, degree-days) on the common daily
+   grid + the unit-consistent spread target (`MODELS.md` §2) — the gating dependency.
+2. ✅ **Signal logic validated on history.** `make validate-signals` is green
+   (`VALIDATION.md`): structural/coverage/range/leakage/confidence all pass, and the
+   Freeport-2022 outage + seasonality reproduce (Tier 6). Two bugs were caught and
+   fixed in the process.
+3. **Train Part A physical nowcasts on the decade**, walk-forward CV, hierarchical
+   pooling across terminals (`MODELS.md` Part C.2). These graduate from "confirm
+   edge" to genuinely fitted models. ← **next**
+4. **Fit the Part B spread model on the ~3,000-row panel** — regularised / Bayesian,
+   uncertainty-first, confidence-weighted (`MODELS.md` §1), FWL control-partialling,
+   EU fidelity step as a regime indicator.
 5. **Freeze every model**, then **begin the live forward test** (§3): physics
    confirmed in weeks, spread accumulating over months.
 6. **Run the capture-rate self-audit (§4) continuously** to separate data drift

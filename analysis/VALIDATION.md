@@ -1,5 +1,10 @@
 # Validation sweep — are the 34 signals model-ready?
 
+> **Scope:** this validates the **signals** (are the model *inputs* correctly built
+> and model-ready). It does **not** validate the models — the train/test protocol that
+> keeps a fit honest lives in [`RESEARCH_PLAN.md`](RESEARCH_PLAN.md). Signal-integrity
+> gate vs model-honesty protocol: complementary, not overlapping.
+
 The gate between signal *extraction* (done) and *modelling* (`MODELS.md`). The harness
 `analysis/validate_signals.py` (`make validate-signals`) runs the tiers below over
 `signal_daily` (+ cross-refs to `port_events`, `eia_series`, `signal_daily_live_vintage`)
