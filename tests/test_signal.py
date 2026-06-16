@@ -13,25 +13,39 @@ from config import REGIME_CUTOVER
 from pipeline.legs import Leg
 from pipeline.legs import FALLBACK_DEST_REGION, OD_WINDOW_DAYS
 from pipeline.signal import (
+    BASIS_KNOWABLE,
+    BASIS_PHYSICAL,
+    SLOW_STEAM_KN,
     UNKNOWN_BAND,
     LaneFilter,
+    _median_mad,
     accumulate_daily,
+    accumulate_events,
     amortized_cargo_contribution,
     amortized_cargo_knowable,
     ballast_dest_band,
     ballast_to_us_legs,
+    berth_turn_hours,
+    closed_lane_legs,
+    closed_visits,
     daily_buckets,
     discharging_eu_visits,
+    fleet_daily,
     items_live_on,
     knowable_leg_interval,
     lane_legs,
     leg_interval,
+    leg_speed_kn,
     loading_us_visits,
+    od_lane_band,
+    round_trips,
     terminal_dwell_hours,
     transit_dest_band,
+    typical_od_duration_h,
     visit_berth_interval,
     visit_interval,
     visit_terminal_band,
+    voyage_age_days,
 )
 from pipeline.visits import Visit
 
@@ -525,3 +539,144 @@ def test_amortized_open_visit_estimates_dwell_and_caps_at_one_cargo():
     assert total == pytest.approx(170_000)  # capped at exactly one cargo
     active_days = sum(1 for r in rows if r.regime == "all" and r.value > 1e-6)
     assert active_days <= 2  # ~24h of estimated dwell spans at most 2 calendar days
+
+
+# --- Phase 1: event/measurement signals + confidence components ---------------
+
+
+def mk_closed_leg(*, mmsi=1, regime="mmsi_filter", origin="usgulf", dest="nweurope",
+                  distance_nm=4800.0, duration_h=384.0, departed_ts=at(0),
+                  arrived_ts=None, laden=True):
+    arrived_ts = arrived_ts or (departed_ts + timedelta(hours=duration_h))
+    return mk_leg(
+        status="closed", mmsi=mmsi, regime=regime, origin_zone=origin, dest_zone=dest,
+        laden=laden, departed_ts=departed_ts, arrived_ts=arrived_ts,
+        distance_nm=distance_nm, duration_h=duration_h,
+    )
+
+
+def test_median_mad():
+    assert _median_mad([5.0]) == (5.0, None)
+    med, mad = _median_mad([1.0, 2.0, 3.0, 100.0])
+    assert med == pytest.approx(2.5)
+    assert mad is not None  # robust spread defined for n>=2
+
+
+def test_accumulate_events_median_emits_mad_and_both_bases():
+    legs = [mk_closed_leg(duration_h=384.0, arrived_ts=at(16)),
+            mk_closed_leg(duration_h=400.0, mmsi=2, arrived_ts=at(16))]
+    days = daily_buckets(at(0).date(), NOW.date())
+    rows = accumulate_events(
+        legs, days, signal_key="voyage_speed_kn",
+        measure_of=lambda lg: leg_speed_kn(lg, {}),
+        date_of=lambda lg: lg.arrived_ts.date(), band_of=od_lane_band, stat="median",
+    )
+    bases = {r.basis for r in rows}
+    assert bases == {BASIS_PHYSICAL, BASIS_KNOWABLE}  # closed ⇒ identical both bases
+    one = next(r for r in rows if r.regime == "all" and r.basis == BASIS_PHYSICAL)
+    assert one.zone_scope == "usgulf->nweurope"
+    assert one.n_legs == 2
+    assert one.value_dispersion is not None  # MAD populated for n>=2
+    assert one.value == pytest.approx(leg_speed_kn(legs[0], {}), rel=0.05)
+
+
+def test_accumulate_events_count_and_fraction():
+    legs = [mk_closed_leg(duration_h=300.0, arrived_ts=at(16)),  # ~16kn, not slow
+            mk_closed_leg(duration_h=900.0, mmsi=2, arrived_ts=at(16))]  # ~5kn, slow
+    days = daily_buckets(at(0).date(), NOW.date())
+    cnt = accumulate_events(
+        legs, days, signal_key="c", measure_of=lambda lg: 1.0,
+        date_of=lambda lg: lg.arrived_ts.date(), band_of=od_lane_band, stat="count",
+    )
+    # both legs share an O-D and arrive same day → count 2 in 'all'
+    assert max(r.value for r in cnt if r.regime == "all") == 2.0
+    frac = accumulate_events(
+        legs, days, signal_key="slow", band_of=od_lane_band, stat="fraction",
+        measure_of=lambda lg: 1.0 if leg_speed_kn(lg, {}) < SLOW_STEAM_KN else 0.0,
+        date_of=lambda lg: lg.arrived_ts.date(),
+    )
+    # leg 2 (900h over 4800nm ≈ 5.3kn) is slow, leg 1 (~12.5kn) is not → 0.5
+    assert next(r.value for r in frac if r.regime == "all") == pytest.approx(0.5)
+
+
+def test_berth_turn_and_closed_visits():
+    closed = mk_visit(departed_ts=at(0) + timedelta(hours=30), flow_direction="export",
+                      zone="usgulf", terminal_id=1)
+    open_v = mk_visit(departed_ts=None, flow_direction="export", terminal_id=1)
+    assert closed_visits([closed, open_v], "export") == [closed]
+    assert berth_turn_hours(closed) == pytest.approx(30.0)
+
+
+def test_closed_lane_legs_filters_direction_not_distance():
+    # Distance is NOT a filter (GFW legs have no coords) — only status/laden/lane.
+    good = mk_closed_leg()
+    no_geo = mk_closed_leg(mmsi=2, distance_nm=None)  # kept (anomaly needs no distance)
+    same_zone = mk_leg(status="same_zone", dest_zone="usgulf")
+    ballast = mk_closed_leg(mmsi=3, laden=False)
+    base = closed_lane_legs([good, no_geo, same_zone, ballast], LANE)
+    assert set(base) == {good, no_geo}
+    # Speed uses the leg's own distance when present, else the centroid fallback,
+    # else None (here no_geo has neither distance nor a centroid → None).
+    assert leg_speed_kn(good, {}) == pytest.approx(4800.0 / 384.0)
+    assert leg_speed_kn(no_geo, {}) is None  # no distance, no centroids
+    # Centroid fallback: a GFW-style leg (no coords) with known O/D terminals gets
+    # its distance from the terminal centroids.
+    gfw_like = mk_leg(status="closed", mmsi=4, dest_zone="nweurope", laden=True,
+                      arrived_ts=at(16), distance_nm=None, duration_h=384.0,
+                      dest_terminal_id=5)
+    speed = leg_speed_kn(gfw_like, {1: (29.7, -93.8), 5: (52.0, 4.0)})
+    assert speed is not None and speed > 0
+
+
+def test_typical_od_duration_median():
+    legs = [mk_closed_leg(duration_h=300.0), mk_closed_leg(duration_h=400.0, mmsi=2),
+            mk_closed_leg(duration_h=500.0, mmsi=3)]
+    typ = typical_od_duration_h(legs)
+    assert typ[("usgulf", "nweurope")] == pytest.approx(400.0)
+
+
+def test_round_trips_consecutive_departures():
+    legs = [
+        mk_closed_leg(mmsi=7, departed_ts=at(0)),
+        mk_closed_leg(mmsi=7, departed_ts=at(40)),
+        mk_closed_leg(mmsi=7, departed_ts=at(75)),
+    ]
+    rts = round_trips(legs)
+    assert sorted(round(r.days) for r in rts) == [35, 40]
+    assert all(r.mmsi == 7 for r in rts)
+
+
+def test_voyage_age_days():
+    leg = mk_leg(status="open_in_transit", departed_ts=at(0))
+    assert voyage_age_days(leg, (at(0) + timedelta(days=5)).date()) == 5.0
+    assert voyage_age_days(leg, at(0).date()) == 0.0  # mooring/departure day = age 0
+
+
+def test_accumulate_daily_open_fraction():
+    # one closed + one open leg in the same band/day → open_fraction = 0.5
+    closed = mk_leg(status="closed", dest_zone="nweurope",
+                    arrived_ts=NOW + timedelta(days=1), gas_capacity_m3=100_000)
+    openl = mk_leg(status="open_in_transit", mmsi=2, gas_capacity_m3=100_000,
+                   dest_region="nweurope")
+    days = daily_buckets(at(0).date(), at(0).date())
+    rows = accumulate_daily(
+        [closed, openl], days, signal_key="gas_in_transit_volume",
+        interval_of=leg_interval, band_of=lambda lg: transit_dest_band(lg, LANE),
+        open_of=lambda lg: lg.status != "closed",
+    )
+    r = next(r for r in rows if r.regime == "all")
+    assert r.open_fraction == pytest.approx(0.5)
+
+
+def test_fleet_daily_active_and_laden_fraction():
+    laden = mk_leg(status="open_in_transit", mmsi=1, laden=True, departed_ts=at(0))
+    ballast = mk_leg(status="open_in_transit", mmsi=2, laden=False, departed_ts=at(0))
+    days = daily_buckets((at(0) + timedelta(days=1)).date(),
+                         (at(0) + timedelta(days=1)).date())
+    rows = fleet_daily([laden, ballast], [], days, basis=BASIS_PHYSICAL,
+                       leg_interval_fn=leg_interval)
+    active = next(r for r in rows if r.signal_key == "active_vessels")
+    frac = next(r for r in rows if r.signal_key == "fleet_laden_frac")
+    assert active.value == 2.0
+    assert frac.value == pytest.approx(0.5)  # 1 of 2 active vessels laden
+    assert active.regime == "all"

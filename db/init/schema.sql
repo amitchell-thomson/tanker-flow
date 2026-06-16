@@ -205,7 +205,8 @@ CREATE INDEX ON port_events (zone, event_type, event_time DESC);
 --               not by the bucket_date. A synthetic 'all' row sums both regimes.
 --   basis       'physical' = hindsight-clean reconstruction (a leg is live on day d
 --               iff departed<=d<arrived, using today's classification); 'knowable'
---               is reserved for the future leakage-free point-in-time series.
+--               = the leakage-free point-in-time value the live pipeline would have
+--               printed on d (built — see pipeline/signal.py + SIGNALS.md §0·7).
 -- NB: the headline #1/#2 "laden ton-miles in transit" lives here as a signal_key
 -- value, not a dedicated table.
 CREATE TABLE signal_daily (
@@ -216,6 +217,21 @@ CREATE TABLE signal_daily (
     regime       TEXT             NOT NULL CHECK (regime IN ('noaa','gfw','bbox','mmsi_filter','all')),
     value        DOUBLE PRECISION NOT NULL,
     n_legs       INTEGER,
+    -- Confidence components (SIGNALS.md §0·8 — data-quality metadata, NOT a value).
+    -- Stored decomposed (never a single blended score): the modelling layer combines
+    -- them as observation variance. All nullable — populated only where meaningful.
+    --   value_dispersion   MAD of the underlying per-item measurements (distributional
+    --                      signals: turn-time, speed, age, anomaly, round-trip). NULL
+    --                      for stocks/counts/fractions.
+    --   open_fraction      share of `value` from items lacking an observed terminating
+    --                      event (open legs / open visits) — the censoring-exposure axis.
+    --                      0.0 when all contributors are closed; NULL when N/A.
+    --   estimated_fraction share of `value` resting on an estimated magnitude rather
+    --                      than an observed one (berth flow over terminal-mean dwell for
+    --                      open visits). NULL where open_fraction already subsumes it.
+    value_dispersion   DOUBLE PRECISION,
+    open_fraction      DOUBLE PRECISION,
+    estimated_fraction DOUBLE PRECISION,
     basis        TEXT             NOT NULL DEFAULT 'physical'
                                   CHECK (basis IN ('physical','knowable')),
     computed_at  TIMESTAMPTZ      NOT NULL DEFAULT now(),
@@ -223,6 +239,26 @@ CREATE TABLE signal_daily (
 );
 CREATE INDEX ix_signal_daily_key_date ON signal_daily (signal_key, bucket_date);
 CREATE INDEX ix_signal_daily_date     ON signal_daily (bucket_date);
+
+
+-- signal_daily_live_vintage — append-only "as-printed" log. Each LIVE signals
+-- rebuild appends the value it printed for the current day, so the knowable-basis
+-- self-validation (SIGNALS.md §0·7·1·4) can later assert that knowable[d] recomputed
+-- == the value the live pipeline actually emitted on d. Only the live regimes are
+-- captured (the historical backfill has no real-time vintage to reconstruct); it
+-- lands sparse and accrues with the live tail, like data/capture_rate.py.
+CREATE TABLE signal_daily_live_vintage (
+    id           BIGSERIAL        PRIMARY KEY,
+    signal_key   TEXT             NOT NULL,
+    bucket_date  DATE             NOT NULL,
+    zone_scope   TEXT             NOT NULL,
+    regime       TEXT             NOT NULL,
+    basis        TEXT             NOT NULL,
+    value        DOUBLE PRECISION NOT NULL,
+    n_legs       INTEGER,
+    printed_at   TIMESTAMPTZ      NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_sdlv_key_date ON signal_daily_live_vintage (signal_key, bucket_date);
 
 
 -- EIA ground-truth + fundamentals (data/eia.py). Exogenous reference data — NOT

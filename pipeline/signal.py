@@ -58,6 +58,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import statistics
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -69,6 +70,7 @@ from rich.logging import RichHandler
 
 from config import settings
 
+from .geo import haversine_nm
 from .legs import (
     CENSOR_OPEN_DAYS,
     FALLBACK_DEST_REGION,
@@ -125,11 +127,34 @@ TERMINAL_METADATA_SQL = (
     "SELECT terminal_id, zone, flow_direction FROM terminals WHERE zone IS NOT NULL"
 )
 
+# Per-terminal centroid from the terminal_zones polygons — the great-circle
+# distance fallback for legs whose endpoint events carry no lat/lon (every GFW
+# event: source 'gfw_events' stores no coordinates). Voyage distance is an O-D
+# property, so the terminal centroid is an apt — arguably steadier — proxy than a
+# jittery single arrival fix, and it is what gives #22/#24 their historical depth.
+TERMINAL_CENTROID_SQL = """
+SELECT terminal_id,
+       ST_Y(ST_Centroid(ST_Collect(geom))) AS lat,
+       ST_X(ST_Centroid(ST_Collect(geom))) AS lon
+FROM terminal_zones
+GROUP BY terminal_id
+"""
+
 INSERT_SQL = """
 INSERT INTO signal_daily
-    (signal_key, bucket_date, zone_scope, regime, value, n_legs, basis)
+    (signal_key, bucket_date, zone_scope, regime, value, n_legs,
+     value_dispersion, open_fraction, estimated_fraction, basis)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+"""
+
+# Append-only "as-printed" vintage log (carry-forward item 2, SIGNALS.md §0·7·1·4):
+# only the live regimes, captured the day they are first printed.
+VINTAGE_INSERT_SQL = """
+INSERT INTO signal_daily_live_vintage
+    (signal_key, bucket_date, zone_scope, regime, basis, value, n_legs)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
 """
+LIVE_REGIMES = ("bbox", "mmsi_filter")
 
 
 # ----------------------------------------------------------------------
@@ -139,7 +164,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)
 
 @dataclass(frozen=True)
 class SignalRow:
-    """One row of the signal_daily table."""
+    """One row of the signal_daily table. The three confidence components
+    (SIGNALS.md §0·8) are decomposed metadata, not part of the value — the model
+    layer combines them as observation variance; each is None where not meaningful."""
 
     signal_key: str
     bucket_date: date
@@ -148,6 +175,9 @@ class SignalRow:
     value: float
     n_legs: int | None
     basis: str = BASIS_PHYSICAL
+    value_dispersion: float | None = None  # MAD of per-item measurements (distributions)
+    open_fraction: float | None = None  # share of value from un-terminated items
+    estimated_fraction: float | None = None  # share resting on an estimated magnitude
 
 
 @dataclass(frozen=True)
@@ -504,22 +534,31 @@ def accumulate_daily(
     contribution: Callable[[object, date], float | None] = _gas,
     aggregate: str = "sum",  # 'sum' | 'mean'
     basis: str = BASIS_PHYSICAL,
+    open_of: Callable[[object], bool] | None = None,
 ) -> list[SignalRow]:
     """Stacked per-day reconstruction. For each item, accumulate its
     `contribution` (None ⇒ skipped that day) into a (band, regime, day) cell over
     its live interval, then emit a sum or mean per cell. Each item is tagged by
     its own regime plus a synthetic 'all' regime, so a regime-segmented and a
     pooled series are both available. `band_of` is the stacked dimension written
-    to zone_scope."""
+    to zone_scope.
+
+    `open_of` (the confidence component, SIGNALS.md §0·8): when given, the share of
+    each cell's value contributed by items it flags `True` (un-terminated: open
+    legs / open visits) is written to `open_fraction` — the censoring-exposure axis.
+    None ⇒ open_fraction left NULL (signal has no open/closed distinction)."""
     if not days:
         return []
     panel_start, panel_end = days[0], days[-1]
     last_excl = panel_end + timedelta(days=1)
-    # (band, regime, date) -> [total, count]
-    acc: dict[tuple[str, str, date], list[float]] = defaultdict(lambda: [0.0, 0.0])
+    # (band, regime, date) -> [total, count, open_total]
+    acc: dict[tuple[str, str, date], list[float]] = defaultdict(
+        lambda: [0.0, 0.0, 0.0]
+    )
     for item in items:
         start, end_excl = interval_of(item, panel_end)
         band = band_of(item)
+        is_open = bool(open_of(item)) if open_of is not None else False
         d = max(start, panel_start)
         hi = min(end_excl, last_excl)
         while d < hi:
@@ -529,11 +568,255 @@ def accumulate_daily(
                     cell = acc[(band, regime, d)]
                     cell[0] += c
                     cell[1] += 1
+                    if is_open:
+                        cell[2] += c
             d += timedelta(days=1)
     rows: list[SignalRow] = []
-    for (band, regime, d), (total, count) in acc.items():
+    for (band, regime, d), (total, count, open_total) in acc.items():
         value = total / count if aggregate == "mean" else total
-        rows.append(SignalRow(signal_key, d, band, regime, value, int(count), basis))
+        open_frac = (open_total / total) if (open_of is not None and total) else None
+        rows.append(
+            SignalRow(
+                signal_key, d, band, regime, value, int(count), basis,
+                open_fraction=open_frac,
+            )
+        )
+    return rows
+
+
+# ----------------------------------------------------------------------
+# Phase 1 — event/measurement signals (the complement of the stock builder)
+# ----------------------------------------------------------------------
+
+
+def _median_mad(values: list[float]) -> tuple[float, float | None]:
+    """Median and Median Absolute Deviation — a robust centre + spread pair, used
+    as (value, value_dispersion) for the distributional signals. MAD (not stdev)
+    so a phantom-long tail can't blow up the spread. None spread for n<2."""
+    med = statistics.median(values)
+    if len(values) < 2:
+        return med, None
+    mad = statistics.median([abs(v - med) for v in values])
+    return med, mad
+
+
+SLOW_STEAM_KN = 13.0  # implied-speed threshold for the slow-steaming share (#24)
+
+
+def accumulate_events(
+    items: list,
+    days: list[date],
+    *,
+    signal_key: str,
+    measure_of: Callable[[object], float | None],
+    date_of: Callable[[object], date],
+    band_of: Callable[[object], str],
+    stat: str = "median",  # 'median' (+MAD) | 'count' | 'fraction'
+    bases: tuple[str, ...] = ALL_BASES,
+) -> list[SignalRow]:
+    """Per-event aggregation — the complement of accumulate_daily's interval/stock
+    reconstruction. Each item yields ONE measurement attributed to ONE day (its
+    completion day: arrival or departure), grouped into a (band, regime, day) cell
+    and reduced by `stat`:
+
+      - 'median'   → value = median, value_dispersion = MAD (robust spread)
+      - 'count'    → value = number of events (n)
+      - 'fraction' → value = mean of 0/1 measurements (a rate)
+
+    These signals are built over *closed* items, so the measurement is fixed once
+    observed — `knowable == physical` by construction (a leg's speed is learned on
+    its arrival day, exactly when a live observer would learn it). We emit identical
+    rows under every basis in `bases` so a basis filter never silently drops the
+    signal. Each item carries its own `regime`; a synthetic 'all' regime pools."""
+    if not days:
+        return []
+    panel_start, panel_end = days[0], days[-1]
+    acc: dict[tuple[str, str, date], list[float]] = defaultdict(list)
+    for item in items:
+        m = measure_of(item)
+        if m is None:
+            continue
+        d = date_of(item)
+        if d < panel_start or d > panel_end:
+            continue
+        for regime in (item.regime, "all"):
+            acc[(band_of(item), regime, d)].append(m)
+    rows: list[SignalRow] = []
+    for (band, regime, d), vals in acc.items():
+        n = len(vals)
+        disp: float | None = None
+        if stat == "count":
+            value = float(n)
+        elif stat == "fraction":
+            value = sum(vals) / n
+        else:  # median
+            value, disp = _median_mad(vals)
+        for basis in bases:
+            rows.append(
+                SignalRow(
+                    signal_key, d, band, regime, value, n, basis,
+                    value_dispersion=disp,
+                )
+            )
+    return rows
+
+
+def closed_visits(visits: list[Visit], flow: str) -> list[Visit]:
+    """Completed berth visits at terminals of one flow direction — the base for
+    the berth-turn-time signals (#8 export, #14 import)."""
+    return [
+        v
+        for v in visits
+        if v.flow_direction == flow
+        and v.departed_ts is not None
+        and v.terminal_id is not None
+    ]
+
+
+def berth_turn_hours(v: Visit) -> float | None:
+    """Berth occupancy hours = departed − moored (#8 / #14). None if non-positive."""
+    h = (v.departed_ts - v.moored_ts).total_seconds() / 3600.0
+    return h if h > 0 else None
+
+
+def closed_lane_legs(legs: list[Leg], lane: LaneFilter) -> list[Leg]:
+    """Closed, laden, cross-zone US→EU legs with a real duration — the base for
+    voyage-time anomaly (#21, duration only), implied speed (#22) and slow-steaming
+    (#24). Distance is NOT required here: most legs arrive via GFW, whose events
+    carry no lat/lon, so `leg.distance_nm` is NULL — the speed signals recover the
+    distance from terminal centroids (`leg_distance_nm`); #21 needs no distance."""
+    return [
+        lg
+        for lg in legs
+        if lg.status == "closed"
+        and lg.laden is True
+        and lane.is_export(lg.origin_zone)
+        and lane.is_import(lg.dest_zone)
+        and lg.duration_h
+        and lg.duration_h > 0
+    ]
+
+
+def od_lane_band(leg: Leg) -> str:
+    """O-D lane band, e.g. 'usgulf->nweurope' (the #5 O-D dimension)."""
+    return f"{leg.origin_zone}->{leg.dest_zone}"
+
+
+def leg_distance_nm(
+    leg: Leg, centroids: dict[int, tuple[float, float]]
+) -> float | None:
+    """Great-circle voyage distance: the leg's own fix-to-fix distance when both
+    endpoints had coordinates (live legs), else the origin→dest terminal-centroid
+    distance (the historical GFW path, no event coords). None if neither resolves."""
+    if leg.distance_nm:
+        return leg.distance_nm
+    o = centroids.get(leg.origin_terminal_id)
+    d = centroids.get(leg.dest_terminal_id)
+    if o is None or d is None:
+        return None
+    return haversine_nm(o[0], o[1], d[0], d[1])
+
+
+def leg_speed_kn(
+    leg: Leg, centroids: dict[int, tuple[float, float]]
+) -> float | None:
+    """Implied average voyage speed (knots) = great-circle nm / voyage hours (#22).
+    Distance via `leg_distance_nm` (centroid fallback). None if no distance."""
+    dist = leg_distance_nm(leg, centroids)
+    return dist / leg.duration_h if dist is not None else None
+
+
+def typical_od_duration_h(closed_legs: list[Leg]) -> dict[tuple[str, str], float]:
+    """Median observed voyage duration (h) per O-D lane — the baseline #21 measures
+    the anomaly against. Pooled over all regimes (a lane's great-circle time is a
+    physical constant, not a regime artifact)."""
+    per: dict[tuple[str, str], list[float]] = defaultdict(list)
+    for lg in closed_legs:
+        per[(lg.origin_zone, lg.dest_zone)].append(lg.duration_h)
+    return {k: statistics.median(v) for k, v in per.items()}
+
+
+@dataclass(frozen=True)
+class RoundTrip:
+    """One vessel's gap between two consecutive departures (#32). Tagged by the
+    later departure's regime so it segments like every other signal."""
+
+    mmsi: int
+    regime: str
+    departed_ts: datetime
+    origin_zone: str
+    days: float
+
+
+def round_trips(legs: list[Leg]) -> list[RoundTrip]:
+    """Consecutive-departure gaps per vessel = round-trip time (#32). Sorted by
+    departure; each adjacent pair contributes one positive-day gap."""
+    by_mmsi: dict[int, list[Leg]] = defaultdict(list)
+    for lg in legs:
+        by_mmsi[lg.mmsi].append(lg)
+    out: list[RoundTrip] = []
+    for ls in by_mmsi.values():
+        ls.sort(key=lambda x: x.departed_ts)
+        for a, b in zip(ls, ls[1:]):
+            d = (b.departed_ts - a.departed_ts).total_seconds() / 86400.0
+            if d > 0:
+                out.append(RoundTrip(b.mmsi, b.regime, b.departed_ts, b.origin_zone, d))
+    return out
+
+
+def voyage_age_days(leg: Leg, d: date) -> float | None:
+    """Per-day contribution for #20: the leg's age in days on day d (now − departed),
+    a *mean* over the open legs live that day. Always ≥0 over the live interval."""
+    age = (d - leg.departed_ts.date()).days
+    return float(age) if age >= 0 else None
+
+
+def fleet_daily(
+    legs: list[Leg],
+    visits: list[Visit],
+    days: list[date],
+    *,
+    basis: str,
+    leg_interval_fn: Callable,
+) -> list[SignalRow]:
+    """Fleet-utilisation stocks #33/#34 as daily distinct-vessel counts. A vessel
+    is *active* on day d if any of its legs (in-transit interval) or visits (berth
+    interval) covers d; *laden* if a laden leg covers d. These pool across vessels
+    of mixed regime, so they're emitted under 'all' only. Dual-basis via
+    `leg_interval_fn` (knowable caps open legs at their voyage window; physical runs
+    them to panel_end)."""
+    if not days:
+        return []
+    panel_start, panel_end = days[0], days[-1]
+    last_excl = panel_end + timedelta(days=1)
+    active: dict[date, set[int]] = defaultdict(set)
+    laden: dict[date, set[int]] = defaultdict(set)
+
+    def mark(item, interval_of, is_laden: bool) -> None:
+        start, end_excl = interval_of(item, panel_end)
+        d = max(start, panel_start)
+        hi = min(end_excl, last_excl)
+        while d < hi:
+            active[d].add(item.mmsi)
+            if is_laden:
+                laden[d].add(item.mmsi)
+            d += timedelta(days=1)
+
+    for lg in legs:
+        mark(lg, leg_interval_fn, lg.laden is True)
+    for v in visits:
+        mark(v, visit_interval, False)  # in-berth = active, not laden-at-sea
+
+    rows: list[SignalRow] = []
+    for d in days:
+        a = len(active.get(d, ()))
+        if a == 0:
+            continue
+        ln = len(laden.get(d, ()))
+        rows.append(SignalRow("active_vessels", d, "fleet", "all", float(a), a, basis))
+        rows.append(
+            SignalRow("fleet_laden_frac", d, "fleet", "all", ln / a, a, basis)
+        )
     return rows
 
 
@@ -551,8 +834,12 @@ async def build_signals(
     visits = await compute_visits(pool, now)
     async with pool.acquire() as conn:
         term_rows = await conn.fetch(TERMINAL_METADATA_SQL)
+        centroid_rows = await conn.fetch(TERMINAL_CENTROID_SQL)
 
     lane = build_lane_filter(term_rows)
+    centroids: dict[int, tuple[float, float]] = {
+        r["terminal_id"]: (r["lat"], r["lon"]) for r in centroid_rows
+    }
 
     # Visit bases are basis-independent (same berth occupancy); only the per-day
     # contribution differs by basis. Leg bases differ by basis: knowable also
@@ -595,8 +882,12 @@ async def build_signals(
         ),
     }
 
+    visit_open = lambda v: v.departed_ts is None  # noqa: E731 — open berth visit
+    leg_open = lambda lg: lg.status != "closed"  # noqa: E731 — un-arrived leg
+
     rows: list[SignalRow] = []
     for basis, p in plans.items():
+        # --- Headline gas-volume stocks/flows (now carrying open_fraction) ---
         rows += accumulate_daily(
             loading,
             days,
@@ -605,6 +896,7 @@ async def build_signals(
             band_of=visit_terminal_band,
             contribution=p["load_contrib"],
             basis=basis,
+            open_of=visit_open,
         )
         rows += accumulate_daily(
             discharging,
@@ -614,6 +906,7 @@ async def build_signals(
             band_of=visit_terminal_band,
             contribution=p["disch_contrib"],
             basis=basis,
+            open_of=visit_open,
         )
         rows += accumulate_daily(
             p["transit"],
@@ -622,6 +915,7 @@ async def build_signals(
             interval_of=p["leg_interval"],
             band_of=lambda lg: transit_dest_band(lg, lane),
             basis=basis,
+            open_of=leg_open,
         )
         rows += accumulate_daily(
             p["ballast"],
@@ -630,7 +924,81 @@ async def build_signals(
             interval_of=p["leg_interval"],
             band_of=lambda lg: ballast_dest_band(lg, lane),
             basis=basis,
+            open_of=leg_open,
         )
+        # --- #20 mean laden-voyage age (floating-storage proxy). Shares the exact
+        #     in-transit leg base as gas_in_transit_volume — the MEAN age of the
+        #     cargo at sea each day vs that signal's SUM of its volume. Under each
+        #     basis a leg contributes age = d−departed over the same interval it
+        #     contributes volume, so #20 inherits the same decade of depth (a closed
+        #     historical leg ages over its pre-arrival days; physical and knowable
+        #     differ only in how un-arrived legs are censored). ---
+        rows += accumulate_daily(
+            p["transit"],
+            days,
+            signal_key="laden_voyage_age_d",
+            interval_of=p["leg_interval"],
+            band_of=lambda lg: transit_dest_band(lg, lane),
+            contribution=voyage_age_days,
+            aggregate="mean",
+            basis=basis,
+            open_of=leg_open,
+        )
+        # --- #33/#34 fleet utilisation (basis-dependent via leg interval) ---
+        rows += fleet_daily(
+            legs, visits, days, basis=basis, leg_interval_fn=p["leg_interval"]
+        )
+
+    # --- Event/measurement signals (closed items ⇒ knowable == physical; emitted
+    #     once under both bases). Built over the closed leg/visit bases. ---
+    cl_legs = closed_lane_legs(legs, lane)
+    typical = typical_od_duration_h(cl_legs)
+    export_v = closed_visits(visits, "export")
+    rows += accumulate_events(
+        export_v, days, signal_key="load_berth_turn_h",
+        measure_of=berth_turn_hours, date_of=lambda v: v.departed_ts.date(),
+        band_of=visit_terminal_band, stat="median",
+    )
+    rows += accumulate_events(
+        closed_visits(visits, "import"), days, signal_key="discharge_berth_turn_h",
+        measure_of=berth_turn_hours, date_of=lambda v: v.departed_ts.date(),
+        band_of=visit_terminal_band, stat="median",
+    )
+    def _slow(lg: Leg) -> float | None:
+        s = leg_speed_kn(lg, centroids)
+        return None if s is None else (1.0 if s < SLOW_STEAM_KN else 0.0)
+
+    rows += accumulate_events(
+        cl_legs, days, signal_key="voyage_speed_kn",
+        measure_of=lambda lg: leg_speed_kn(lg, centroids),
+        date_of=lambda lg: lg.arrived_ts.date(), band_of=od_lane_band, stat="median",
+    )
+    rows += accumulate_events(
+        cl_legs, days, signal_key="slow_steam_frac", measure_of=_slow,
+        date_of=lambda lg: lg.arrived_ts.date(), band_of=od_lane_band, stat="fraction",
+    )
+    rows += accumulate_events(
+        cl_legs, days, signal_key="voyage_time_anomaly_d",
+        measure_of=lambda lg: (lg.duration_h - typical[(lg.origin_zone, lg.dest_zone)])
+        / 24.0,
+        date_of=lambda lg: lg.arrived_ts.date(), band_of=od_lane_band, stat="median",
+    )
+    rows += accumulate_events(
+        export_v, days, signal_key="us_loadings_count",
+        measure_of=lambda v: 1.0, date_of=lambda v: v.departed_ts.date(),
+        band_of=visit_terminal_band, stat="count",
+    )
+    rows += accumulate_events(
+        [v for v in export_v if not v.cold_start], days,
+        signal_key="us_loadings_count_warm",
+        measure_of=lambda v: 1.0, date_of=lambda v: v.departed_ts.date(),
+        band_of=visit_terminal_band, stat="count",
+    )
+    rows += accumulate_events(
+        round_trips(legs), days, signal_key="round_trip_d",
+        measure_of=lambda rt: rt.days, date_of=lambda rt: rt.departed_ts.date(),
+        band_of=lambda rt: rt.origin_zone, stat="median",
+    )
 
     summary = {
         "total_rows": len(rows),
@@ -660,6 +1028,20 @@ async def build_signals(
             1 for v in discharging + loading if v.gas_capacity_m3 is None
         ),
     }
+    # Carry-forward item 1: open-leg censoring exposure of the in-transit stock,
+    # per regime (physical). A live (mmsi_filter) value far above the historical
+    # noaa/gfw is the phantom-open-leg fingerprint, not a market move.
+    of_by_regime: dict[str, list[float]] = defaultdict(list)
+    for r in rows:
+        if (
+            r.signal_key == "gas_in_transit_volume"
+            and r.basis == BASIS_PHYSICAL
+            and r.open_fraction is not None
+        ):
+            of_by_regime[r.regime].append(r.open_fraction)
+    summary["transit_open_fraction"] = {
+        reg: sum(v) / len(v) for reg, v in of_by_regime.items() if v
+    }
     return rows, summary
 
 
@@ -674,6 +1056,9 @@ async def load_signals(pool: asyncpg.Pool, rows: list[SignalRow]) -> None:
             r.regime,
             r.value,
             r.n_legs,
+            r.value_dispersion,
+            r.open_fraction,
+            r.estimated_fraction,
             r.basis,
         )
         for r in rows
@@ -685,16 +1070,40 @@ async def load_signals(pool: asyncpg.Pool, rows: list[SignalRow]) -> None:
                 await conn.executemany(INSERT_SQL, payload)
 
 
+async def snapshot_live_vintage(
+    pool: asyncpg.Pool, rows: list[SignalRow], panel_end: date
+) -> int:
+    """Carry-forward item 2 (SIGNALS.md §0·7·1·4): append today's live-regime values
+    to the append-only as-printed log, so a later `knowable[d]` recompute can be
+    checked against what the pipeline actually emitted on d. Only the current panel
+    day under the live regimes is captured (history has no real-time vintage). Read
+    side dedups on the latest printed_at per (signal_key, bucket_date, …)."""
+    payload = [
+        (r.signal_key, r.bucket_date, r.zone_scope, r.regime, r.basis, r.value, r.n_legs)
+        for r in rows
+        if r.regime in LIVE_REGIMES and r.bucket_date == panel_end
+    ]
+    if not payload:
+        return 0
+    async with pool.acquire() as conn:
+        await conn.executemany(VINTAGE_INSERT_SQL, payload)
+    return len(payload)
+
+
 async def run(
     pool: asyncpg.Pool,
     now: datetime | None = None,
     panel_start: date | None = None,
+    *,
+    snapshot_vintage: bool = False,
 ) -> None:
     t0 = time.monotonic()
     if now is None:
         now = datetime.now(UTC)
     rows, summary = await build_signals(pool, now, panel_start=panel_start)
     await load_signals(pool, rows)
+    if snapshot_vintage:
+        summary["vintage_rows"] = await snapshot_live_vintage(pool, rows, now.date())
     _log_summary(summary, time.monotonic() - t0)
 
 
@@ -736,6 +1145,20 @@ def _log_summary(summary: dict, wall_seconds: float) -> None:
             summary["null_gas_legs"],
             summary["null_gas_visits"],
         )
+    if summary.get("transit_open_fraction"):
+        logger.info(
+            "  in-transit open_fraction (physical, censoring exposure): %s",
+            ", ".join(
+                f"{reg}={f:.2f}"
+                for reg, f in sorted(summary["transit_open_fraction"].items())
+            ),
+        )
+    if "vintage_rows" in summary:
+        logger.info(
+            "  live as-printed vintage: appended %d rows for %s",
+            summary["vintage_rows"],
+            summary["panel_end"],
+        )
     logger.info("  rows by signal_key:")
     for key, n in sorted(summary["by_key"].items()):
         logger.info("    %-32s %d", key, n)
@@ -770,7 +1193,14 @@ async def main() -> None:
 
     pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=4)
     try:
-        await run(pool, now=args.as_of, panel_start=args.panel_start)
+        # A real-time rebuild (no --as-of) snapshots the live as-printed vintage; a
+        # pinned historical replay does not (it isn't "what we printed live").
+        await run(
+            pool,
+            now=args.as_of,
+            panel_start=args.panel_start,
+            snapshot_vintage=args.as_of is None,
+        )
     finally:
         await pool.close()
 

@@ -255,6 +255,38 @@ until both are specified — `physical` for validation, `knowable` for training.
 
 ---
 
+## 0·8 · Signal confidence — decomposed data-quality metadata (built)
+
+Data quality varies enormously across the panel — a 2017 value reconstructed from
+sparse early NOAA is not the same instrument as a 2024 value, and a live in-transit
+stock built mostly from un-arrived (open) legs is not the same as one built from
+resolved voyages. Rather than collapse that into a single opaque `confidence ∈
+[0,1]` (un-interpretable, and its blend weights would be hand-tuned against no
+ground truth — a fudge), `signal_daily` carries the quality axes **decomposed**, so
+the modelling layer combines them as observation variance (the measurement-error
+fit `MODELS.md` already calls for). Three nullable columns, each one clear thing,
+populated only where meaningful:
+
+| Column | Meaning | Populated for |
+|---|---|---|
+| `value_dispersion` | MAD of the per-item measurements behind the cell (robust spread; a phantom tail can't inflate it like stdev) | distributional signals: turn-time, speed, voyage-time anomaly, round-trip |
+| `open_fraction` | share of `value` from items with **no observed terminating event** (open legs / open visits) — the censoring-exposure axis | every stock/flow over legs/visits; 0 when all contributors closed |
+| `estimated_fraction` | share of `value` resting on an **estimated magnitude** (not just an un-observed endpoint) — reserved for the Phase-2 queue-time estimates where it is distinct from `open_fraction` | (reserved) |
+
+Two existing dimensions complete the picture and are *not* duplicated into a score:
+`regime` (the fidelity tier) and `n_legs` (sample size). The one **ground-truth-
+anchored** confidence measure lives outside this table — `data/capture_rate.py`'s
+NOAA-vs-EIA capture rate, the only "what fraction of reality do we see" number
+measured against an external truth (US, for now).
+
+`open_fraction` is also the live-vs-historical diagnostic: the `physical`
+`gas_in_transit_volume` is ~100% closed historically (`open_fraction≈0` — every past
+leg has resolved) but ~64% open in the live `mmsi_filter` window — the scorer
+tier-decay phantom-leg fingerprint (§0·5), not a market move. A model must
+down-weight a high-`open_fraction` cell; the column makes that mechanical.
+
+---
+
 ## 1 · Flow signals — the headline market signal
 
 | # | Signal | Feasible? | Lead | Type |
