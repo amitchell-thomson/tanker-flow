@@ -903,6 +903,113 @@ def queued_arrivals_index(
 
 
 # ----------------------------------------------------------------------
+# Phase 3 — outage / anomaly / fleet signals
+# ----------------------------------------------------------------------
+
+
+def days_since_rows(
+    dates_by_band: dict[str, list[date]],
+    days: list[date],
+    signal_key: str,
+    *,
+    bases: tuple[str, ...] = ALL_BASES,
+) -> list[SignalRow]:
+    """Per-band daily recency: days since the most recent event on/before each day —
+    the outage detector (#36/#37). Pooled across sources (regime='all'): outage
+    detection wants the latest event from ANY feed, so a coverage gap in one source
+    doesn't masquerade as a terminal going quiet. Basis-invariant (an event is known
+    when it happens), so emitted identically under both bases."""
+    rows: list[SignalRow] = []
+    for band, dates in dates_by_band.items():
+        ds = sorted(set(dates))
+        i, last = 0, None
+        for d in days:
+            while i < len(ds) and ds[i] <= d:
+                last = ds[i]
+                i += 1
+            if last is not None:
+                v = float((d - last).days)
+                for basis in bases:
+                    rows.append(SignalRow(signal_key, d, band, "all", v, None, basis))
+    return rows
+
+
+def queue_wow_rows(
+    queues: list[Queue],
+    days: list[date],
+    signal_key: str,
+    interval_of: Callable,
+    *,
+    bases: tuple[str, ...] = ALL_BASES,
+) -> list[SignalRow]:
+    """Week-over-week change in queue depth (#38) — a sudden jump leads an outage
+    before it is confirmed. Builds the per-(terminal, regime) daily depth, then emits
+    depth[d] − depth[d−7] wherever either week is non-empty."""
+    if not days:
+        return []
+    panel_start, panel_end = days[0], days[-1]
+    last_excl = panel_end + timedelta(days=1)
+    acc: dict[tuple[str, str], dict[date, float]] = defaultdict(
+        lambda: defaultdict(float)
+    )
+    for q in queues:
+        s, e = interval_of(q, panel_end)
+        band = queue_band(q)
+        d = max(s, panel_start)
+        hi = min(e, last_excl)
+        while d < hi:
+            for regime in (q.regime, "all"):
+                acc[(band, regime)][d] += 1.0
+            d += timedelta(days=1)
+    week = timedelta(days=7)
+    rows: list[SignalRow] = []
+    for (band, regime), byday in acc.items():
+        for d in days:
+            prev = byday.get(d - week, 0.0)
+            cur = byday.get(d, 0.0)
+            if prev or cur:
+                for basis in bases:
+                    rows.append(
+                        SignalRow(signal_key, d, band, regime, cur - prev, None, basis)
+                    )
+    return rows
+
+
+def newbuild_rows(
+    legs: list[Leg],
+    visits: list[Visit],
+    queues: list[Queue],
+    days: list[date],
+    *,
+    bases: tuple[str, ...] = ALL_BASES,
+) -> list[SignalRow]:
+    """Fleet growth (#35): count of MMSIs making their first appearance (earliest
+    leg/visit/queue event) per day. A coarse newbuild-into-service proxy banded
+    'fleet'. Basis-invariant."""
+    first: dict[int, date] = {}
+
+    def note(mmsi: int, d: date) -> None:
+        if mmsi not in first or d < first[mmsi]:
+            first[mmsi] = d
+
+    for lg in legs:
+        note(lg.mmsi, lg.departed_ts.date())
+    for v in visits:
+        note(v.mmsi, v.moored_ts.date())
+    for q in queues:
+        note(q.mmsi, q.entry_ts.date())
+
+    per_day = Counter(first.values())
+    rows: list[SignalRow] = []
+    for d in days:
+        c = per_day.get(d, 0)
+        if c:
+            for basis in bases:
+                rows.append(SignalRow("newbuild_appearances", d, "fleet", "all", float(c), c, basis))
+    return rows
+
+
+# ----------------------------------------------------------------------
 # DB orchestration
 # ----------------------------------------------------------------------
 
@@ -1155,6 +1262,39 @@ async def build_signals(
         date_of=lambda v: v.moored_ts.date(), band_of=visit_terminal_band,
         stat="fraction",
     )
+
+    # --- Phase 3: outage / anomaly / fleet ------------------------------------
+    # #36 days since last export departure, per export terminal (US outage radar)
+    dep_dates: dict[str, list[date]] = defaultdict(list)
+    for lg in legs:
+        if lane.is_export(lg.origin_zone) and lg.origin_terminal_id is not None:
+            dep_dates[str(lg.origin_terminal_id)].append(lg.departed_ts.date())
+    rows += days_since_rows(dep_dates, days, "days_since_departed")
+    # #37 days since last import mooring, per import terminal (EU outage radar)
+    moor_dates: dict[str, list[date]] = defaultdict(list)
+    for v in visits:
+        if v.flow_direction == "import" and v.terminal_id is not None:
+            moor_dates[str(v.terminal_id)].append(v.moored_ts.date())
+    rows += days_since_rows(moor_dates, days, "days_since_moored")
+    # #38 week-over-week queue-depth change (sudden congestion → leading outage)
+    rows += queue_wow_rows(load_q, days, "us_queue_formation_wow", queue_interval)
+    rows += queue_wow_rows(disch_q, days, "eu_queue_formation_wow", queue_interval)
+    # #5 O-D flow count — closed cross-zone voyages per lane, at departure
+    closed_all = [lg for lg in legs if lg.status == "closed"]
+    rows += accumulate_events(
+        closed_all, days, signal_key="od_flow_count", measure_of=lambda lg: 1.0,
+        date_of=lambda lg: lg.departed_ts.date(), band_of=od_lane_band, stat="count",
+    )
+    # #39 cold-start rate per zone (dark-fleet / AIS-off proxy; live-meaningful —
+    # historical cold_start is dominated by backfill synthetic entry, so read it
+    # within the live regime, segmented by the regime tag).
+    rows += accumulate_events(
+        arrivals, days, signal_key="cold_start_rate",
+        measure_of=lambda v: 1.0 if v.cold_start else 0.0,
+        date_of=lambda v: v.moored_ts.date(), band_of=lambda v: v.zone, stat="fraction",
+    )
+    # #35 newbuild appearances per day (fleet capacity growth)
+    rows += newbuild_rows(legs, visits, queues, days)
 
     summary = {
         "total_rows": len(rows),

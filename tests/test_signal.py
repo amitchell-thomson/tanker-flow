@@ -21,8 +21,11 @@ from pipeline.signal import (
     _median_mad,
     accumulate_daily,
     accumulate_events,
+    days_since_rows,
     flow_queues,
+    newbuild_rows,
     queue_interval,
+    queue_wow_rows,
     queued_arrivals_index,
     terminal_queue_hours,
     amortized_cargo_contribution,
@@ -741,3 +744,44 @@ def test_queued_arrivals_index():
     assert (1, at(10)) in queued and (2, at(10)) in queued
     assert (3, None) not in queued  # open queue isn't a completed arrival
     assert (1, at(10)) in meaningful and (2, at(10)) not in meaningful
+
+
+# --- Phase 3: outage / anomaly / fleet ----------------------------------------
+
+
+def test_days_since_rows_recency():
+    d0 = at(0).date()
+    dates = {"1": [d0, d0 + timedelta(days=3)]}  # events on day 0 and day 3
+    days = [d0 + timedelta(days=i) for i in range(6)]
+    rows = days_since_rows(dates, days, "days_since_departed")
+    phys = {r.bucket_date: r.value for r in rows if r.basis == BASIS_PHYSICAL}
+    assert phys[d0] == 0.0
+    assert phys[d0 + timedelta(days=2)] == 2.0  # 2 days since the day-0 event
+    assert phys[d0 + timedelta(days=3)] == 0.0  # event on day 3 resets it
+    assert phys[d0 + timedelta(days=5)] == 2.0  # 2 days since the day-3 event
+    assert {r.regime for r in rows} == {"all"}  # pooled across sources
+
+
+def test_queue_wow_rows():
+    # one queue spanning days 0-2 at terminal 1; depth jumps then clears.
+    q = mk_queue(terminal_id=1, entry_ts=at(0),
+                 moored_ts=at(0) + timedelta(days=3))
+    days = [at(0).date() + timedelta(days=i) for i in range(12)]
+    rows = queue_wow_rows([q], days, "us_queue_formation_wow", queue_interval)
+    byday = {r.bucket_date: r.value for r in rows
+             if r.regime == "all" and r.basis == BASIS_PHYSICAL}
+    assert byday[at(0).date()] == 1.0  # depth 1 vs 0 a week earlier
+    # a week after the queue cleared, WoW turns negative
+    assert byday[at(0).date() + timedelta(days=8)] == -1.0
+
+
+def test_newbuild_rows_first_appearance():
+    legs = [mk_leg(status="open_in_transit", mmsi=1, departed_ts=at(0)),
+            mk_leg(status="open_in_transit", mmsi=1, departed_ts=at(5)),  # 2nd, ignored
+            mk_leg(status="open_in_transit", mmsi=2, departed_ts=at(0))]
+    days = [at(0).date(), at(5).date()]
+    rows = newbuild_rows(legs, [], [], days)
+    day0 = next(r.value for r in rows
+                if r.bucket_date == at(0).date() and r.basis == BASIS_PHYSICAL)
+    assert day0 == 2.0  # both vessels first seen on day 0
+    assert not any(r.bucket_date == at(5).date() for r in rows)  # no new vessel day 5
