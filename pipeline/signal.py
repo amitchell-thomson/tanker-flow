@@ -1010,6 +1010,109 @@ def newbuild_rows(
 
 
 # ----------------------------------------------------------------------
+# Phase 4 — intent (§6) + composites (§9)
+# ----------------------------------------------------------------------
+
+
+def declared_intent_legs(legs: list[Leg], lane: LaneFilter) -> list[Leg]:
+    """Open laden US-origin legs carrying a declared destination region — the base
+    for `declared_eu_share` (#27/#31). Open only: the declaration in `legs.dest_region`
+    is the vessel's *current* watchlist dest, which equals the departure declaration
+    only while the voyage is still in progress. Live-only by nature (NOAA/GFW carry
+    no master broadcasts)."""
+    return [
+        lg
+        for lg in legs
+        if lg.status == "open_in_transit"
+        and lg.laden is True
+        and lane.is_export(lg.origin_zone)
+        and lg.dest_region is not None
+    ]
+
+
+def _daily_scalar(
+    rows: list[SignalRow], signal_key: str, basis: str, regime: str, agg: str
+) -> dict[date, float]:
+    """Collapse a banded signal to one scalar per day (sum or mean across bands) for
+    a given basis+regime — the per-day component a composite consumes."""
+    by_day: dict[date, list[float]] = defaultdict(list)
+    for r in rows:
+        if r.signal_key == signal_key and r.basis == basis and r.regime == regime:
+            by_day[r.bucket_date].append(r.value)
+    return {
+        d: (sum(v) if agg == "sum" else sum(v) / len(v)) for d, v in by_day.items()
+    }
+
+
+def _expanding_z(series: dict[date, float]) -> dict[date, float]:
+    """Leakage-safe standardisation: z[d] uses only the mean/std of days < d (an
+    expanding window), so it never peeks at the future — safe for the knowable basis.
+    Undefined (skipped) until ≥2 prior points exist."""
+    out: dict[date, float] = {}
+    xs: list[float] = []
+    for d in sorted(series):
+        if len(xs) >= 2:
+            m = statistics.fmean(xs)
+            s = statistics.pstdev(xs)
+            out[d] = (series[d] - m) / s if s > 0 else 0.0
+        xs.append(series[d])
+    return out
+
+
+def _combine(
+    parts: dict[str, dict[date, float]], signal_key: str, fn, *, basis: str
+) -> list[SignalRow]:
+    """Emit a composite over the days where every named part is present."""
+    if not parts:
+        return []
+    common = set.intersection(*(set(p) for p in parts.values()))
+    return [
+        SignalRow(signal_key, d, "all", "all", fn({k: parts[k][d] for k in parts}), None, basis)
+        for d in sorted(common)
+    ]
+
+
+def composite_rows(rows: list[SignalRow]) -> list[SignalRow]:
+    """The §9 composites (#40–#44) — model-input features combining the primitives.
+    Components are standardised (expanding-window z, leakage-safe) before combining so
+    the disparate units (counts, hours, m³) are commensurable. Computed on the pooled
+    `regime='all'` series; emitted banded 'all', both bases. Composites that need an
+    EU-queue component are live-only (EU queue has no history)."""
+    out: list[SignalRow] = []
+    for basis in ALL_BASES:
+        load_t = _expanding_z(_daily_scalar(rows, "us_loadings_count", basis, "all", "sum"))
+        lq = _expanding_z(_daily_scalar(rows, "load_queue_h", basis, "all", "mean"))
+        disch_t = _expanding_z(_daily_scalar(rows, "gas_discharging_eu", basis, "all", "sum"))
+        dq = _expanding_z(_daily_scalar(rows, "discharge_queue_h", basis, "all", "mean"))
+        intr = _expanding_z(_daily_scalar(rows, "gas_in_transit_volume", basis, "all", "sum"))
+        anom = _expanding_z(_daily_scalar(rows, "voyage_time_anomaly_d", basis, "all", "mean"))
+        euqd = _expanding_z(_daily_scalar(rows, "eu_queue_depth", basis, "all", "sum"))
+        eu_share = _daily_scalar(rows, "declared_eu_share", basis, "all", "mean")
+
+        # #40 net US-export pressure, #41 net EU-absorption pressure
+        p40 = _combine({"l": load_t, "q": lq}, "net_export_pressure",
+                       lambda x: x["l"] - x["q"], basis=basis)
+        p41 = _combine({"a": disch_t, "q": dq}, "net_absorption_pressure",
+                       lambda x: x["a"] - x["q"], basis=basis)
+        out += p40 + p41
+        # #42 spread thrust = #40 − #41 (the headline supply-vs-demand composite)
+        d40 = {r.bucket_date: r.value for r in p40}
+        d41 = {r.bucket_date: r.value for r in p41}
+        out += _combine({"e": d40, "a": d41}, "spread_thrust",
+                        lambda x: x["e"] - x["a"], basis=basis)
+        # #43 implied storage build
+        out += _combine({"t": intr, "n": anom, "q": euqd, "a": disch_t},
+                        "implied_storage_build",
+                        lambda x: x["t"] + x["n"] + x["q"] - x["a"], basis=basis)
+        # #44 diversion arbitrage = first difference of the EU-declared share
+        days = sorted(eu_share)
+        for prev, d in zip(days, days[1:]):
+            out.append(SignalRow("diversion_arbitrage", d, "all", "all",
+                                 eu_share[d] - eu_share[prev], None, basis))
+    return out
+
+
+# ----------------------------------------------------------------------
 # DB orchestration
 # ----------------------------------------------------------------------
 
@@ -1295,6 +1398,17 @@ async def build_signals(
     )
     # #35 newbuild appearances per day (fleet capacity growth)
     rows += newbuild_rows(legs, visits, queues, days)
+
+    # --- Phase 4: intent (#27/#31) + composites (#40–#44) ---------------------
+    # declared EU share of laden US cargoes currently at sea (arbitrage intent).
+    rows += accumulate_events(
+        declared_intent_legs(legs, lane), days, signal_key="declared_eu_share",
+        measure_of=lambda lg: 1.0 if lane.is_import(lg.dest_region) else 0.0,
+        date_of=lambda lg: lg.departed_ts.date(), band_of=lambda lg: "all",
+        stat="fraction",
+    )
+    # composites read every base signal already in `rows`, so they go last.
+    rows += composite_rows(rows)
 
     summary = {
         "total_rows": len(rows),

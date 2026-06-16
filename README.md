@@ -1,6 +1,6 @@
 # tanker-flow
 
-Derives leading Henry Hub / TTF spread signals from LNG carrier positions. AIS vessel fixes are ingested in real time (and backfilled a decade deep from NOAA and Global Fishing Watch), classified against terminal zone polygons into port events, and aggregated into a **suite of 28 market signals** — gas-in-transit volume, loading/discharge pace, anchorage queues, voyage speed, floating-storage age and outage detection — across US export and European import terminals. Every signal is built dual-basis (a leakage-safe point-in-time series for modelling alongside a hindsight series for validation). See [`analysis/SIGNALS.md`](analysis/SIGNALS.md).
+Derives leading Henry Hub / TTF spread signals from LNG carrier positions. AIS vessel fixes are ingested in real time (and backfilled a decade deep from NOAA and Global Fishing Watch), classified against terminal zone polygons into port events, and aggregated into a **suite of 34 market signals** — gas-in-transit volume, loading/discharge pace, anchorage queues, voyage speed, floating-storage age and outage detection — across US export and European import terminals. Every signal is built dual-basis (a leakage-safe point-in-time series for modelling alongside a hindsight series for validation). See [`analysis/SIGNALS.md`](analysis/SIGNALS.md).
 
 ---
 
@@ -24,7 +24,7 @@ ais_fixes           ──► pipeline/port_events.py ──► port_events  (pe
 port_events         ──►┬─ pipeline/legs.py    (at-sea voyages)
                        ├─ pipeline/visits.py  (berth occupancy)
                        └─ pipeline/queues.py  (anchorage waits)
-                              └─► pipeline/signal.py ──► signal_daily  (28-signal daily panel, dual-basis)
+                              └─► pipeline/signal.py ──► signal_daily  (34-signal daily panel, dual-basis)
 EIA API             ──► data/eia.py ───────────────► eia_series        (US LNG-export ground truth)
 eia_series + events ──► data/capture_rate.py ──────► capture-rate validation (NOAA vs EIA)
 ```
@@ -55,7 +55,7 @@ eia_series + events ──► data/capture_rate.py ──────► capture
 - **`priority_watchlist`** — derived hourly by `pipeline/scoring.py`. One row per LNG/FSRU vessel, ranked into 5 tiers based on current zone proximity / declared destination / activity. The ingester reads this to pick which 150 of ~780 vessels to subscribe to each cycle (100 persistent + 50 scan rotation). `slot_kind` (`persistent` / `pinned` / `scan`) and `in_slot` record who is currently subscribed; `last_scan_window_at` drives scan rotation fairness.
 - **`tier_promotions`** — append-only log of vessels promoted **up into** the persistent band (tiers 1-3), written by `scoring.py` (`via='scoring'`) and the inline state machine (`via='inline'`). Powers the TUI promotions panel.
 - **`port_events`** — derived table, recomputable from `ais_fixes` via `make port-events`. One row per per-vessel transition: `zone_entry → [anchorage_entry → [anchored] → anchorage_exit]* → [moored → departed]? → zone_exit`. `anchorage_entry`/`anchorage_exit` are raw polygon-crossing markers (no dwell, no SOG filter) — bracket every visit to the anchorage polygon, so `queue_time = anchorage_exit - anchorage_entry`. `anchored` is the dwell-confirmed sibling (≥30 min stationary). Combined: presence of `anchorage_entry` answers "did this vessel queue?"; presence of `anchored` answers "did it queue meaningfully?". Each row also carries `terminal_id`, `lat`/`lon` (for great-circle distance downstream), `laden_flag` (forward-filled draught vs `design_draught`), `cold_start` (vessel already in a polygon at first observation), and `regime` (a stored fidelity tag: `noaa` / `gfw` / `bbox` / `mmsi_filter`).
-- **`signal_daily`** — the derived signal panel, rebuilt by `make signals` (TRUNCATE + swap). One row per `(signal_key, bucket_date, zone_scope, regime, basis)` carrying `value`, `n_legs`, and the confidence columns (`value_dispersion`, `open_fraction`, `estimated_fraction`). 28 signals across loading/discharge, in-transit, queues, voyage speed/age, fleet and outage detection — each built in both a `physical` (validation) and `knowable` (leakage-safe, model-ready) basis. `signal_daily_live_vintage` logs the live values as-printed for the point-in-time self-validation. **The full catalogue is [`analysis/SIGNALS.md`](analysis/SIGNALS.md).**
+- **`signal_daily`** — the derived signal panel, rebuilt by `make signals` (TRUNCATE + swap). One row per `(signal_key, bucket_date, zone_scope, regime, basis)` carrying `value`, `n_legs`, and the confidence columns (`value_dispersion`, `open_fraction`, `estimated_fraction`). 34 signals across loading/discharge, in-transit, queues, voyage speed/age, fleet and outage detection — each built in both a `physical` (validation) and `knowable` (leakage-safe, model-ready) basis. `signal_daily_live_vintage` logs the live values as-printed for the point-in-time self-validation. **The full catalogue is [`analysis/SIGNALS.md`](analysis/SIGNALS.md).**
 - **`eia_series`** — US LNG-export volumes from the EIA v2 API (`data/eia.py`), the external ground truth for `data/capture_rate.py`'s NOAA-vs-EIA capture-rate check.
 - **`vf_rescue_log`** — append-only audit trail **and** restart-safe credit ledger for `ingestion/vf_rescue.py`. One row per VF live-position lookup attempt: `rescue_class`, `result` (`rescued` / `no_position` / `rejected_stale` / `rejected_teleport` / `error` / `dry_run`), `credits` billed, and `recheck_at` (the per-vessel cooldown). Today's `SUM(credits)` gates the daily cap; the latest row per MMSI is the cooldown.
 - **`vf_account_status`** — VesselFinder account-balance snapshots from the free `/status` endpoint, appended each rescue run. The TUI shows the latest `credits` + `expiration_date`; consecutive rows give the true burn rate.
@@ -114,7 +114,7 @@ make vf-status       # Fetch + store the VF account balance (free /status call)
 # Pipeline
 make port-events     # Recompute port_events from ais_fixes + terminal_zones (idempotent)
 make scoring         # Recompute priority_watchlist (also runs hourly inside the ingester)
-make signals         # Rebuild the signal_daily panel (legs + visits + queues → 28 signals)
+make signals         # Rebuild the signal_daily panel (legs + visits + queues → 34 signals)
 
 # Historical backfill (decade depth, 2016+)
 make backfill-noaa   # NOAA US Class-A fixes → ais_fixes
@@ -135,7 +135,7 @@ make viz             # Start FastAPI monitoring web app (localhost:8000)
 
 `pipeline/signal.py` aggregates the three port-event pairings — `legs.py` (at-sea
 voyages), `visits.py` (berth occupancy), `queues.py` (anchorage waits) — into
-`signal_daily`: **28 daily signals**, each a leading indicator of the HH/TTF spread.
+`signal_daily`: **34 daily signals**, each a leading indicator of the HH/TTF spread.
 Every signal is built in two bases (`physical` for validation, `knowable` for
 leakage-safe modelling), tagged by ingestion `regime` (never blend across the
 2026-05-30 fidelity seam), and carries decomposed confidence metadata. The headline

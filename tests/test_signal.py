@@ -19,9 +19,13 @@ from pipeline.signal import (
     UNKNOWN_BAND,
     LaneFilter,
     _median_mad,
+    SignalRow,
+    _expanding_z,
     accumulate_daily,
     accumulate_events,
+    composite_rows,
     days_since_rows,
+    declared_intent_legs,
     flow_queues,
     newbuild_rows,
     queue_interval,
@@ -785,3 +789,41 @@ def test_newbuild_rows_first_appearance():
                 if r.bucket_date == at(0).date() and r.basis == BASIS_PHYSICAL)
     assert day0 == 2.0  # both vessels first seen on day 0
     assert not any(r.bucket_date == at(5).date() for r in rows)  # no new vessel day 5
+
+
+# --- Phase 4: intent + composites ---------------------------------------------
+
+
+def test_declared_intent_legs():
+    keep = mk_leg(status="open_in_transit", laden=True, origin_zone="usgulf",
+                  dest_region="nweurope")
+    closed = mk_leg(status="closed", dest_zone="nweurope", dest_region="nweurope")
+    nodest = mk_leg(status="open_in_transit", laden=True, mmsi=2, dest_region=None)
+    ballast = mk_leg(status="open_in_transit", laden=False, mmsi=3, dest_region="usgulf")
+    assert declared_intent_legs([keep, closed, nodest, ballast], LANE) == [keep]
+
+
+def test_expanding_z_leakage_safe():
+    d = [at(i).date() for i in range(4)]
+    z = _expanding_z({d[0]: 1.0, d[1]: 2.0, d[2]: 3.0, d[3]: 4.0})
+    assert d[0] not in z and d[1] not in z  # needs >=2 prior points
+    assert z[d[2]] == pytest.approx(3.0)  # (3 - mean(1,2)) / pstdev(1,2) = 1.5/0.5
+
+
+def test_composite_spread_thrust_is_difference():
+    days = [at(i).date() for i in range(6)]
+    rows = []
+    for i, dd in enumerate(days):
+        rows += [
+            SignalRow("us_loadings_count", dd, "1", "all", float(i + 1), None, BASIS_PHYSICAL),
+            SignalRow("load_queue_h", dd, "1", "all", float(10 + i), None, BASIS_PHYSICAL),
+            SignalRow("gas_discharging_eu", dd, "1", "all", float(i + 2), None, BASIS_PHYSICAL),
+            SignalRow("discharge_queue_h", dd, "1", "all", 5.0, None, BASIS_PHYSICAL),
+        ]
+    comp = composite_rows(rows)
+    g = lambda key: {r.bucket_date: r.value for r in comp  # noqa: E731
+                     if r.signal_key == key and r.basis == BASIS_PHYSICAL}
+    st, ne, na = g("spread_thrust"), g("net_export_pressure"), g("net_absorption_pressure")
+    assert st  # non-empty
+    for dd in st:
+        assert st[dd] == pytest.approx(ne[dd] - na[dd])

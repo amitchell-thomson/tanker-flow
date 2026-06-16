@@ -106,7 +106,7 @@ tier-decay phantoms), which a model must down-weight.
 
 ## 3 · The signal catalogue (built)
 
-28 keys in `signal_daily`, by family. **Banding** = the `zone_scope` stacking key.
+34 keys in `signal_daily`, by family. **Banding** = the `zone_scope` stacking key.
 
 ### 3.1 · Headline gas-volume (the dashboard stack)
 
@@ -162,6 +162,7 @@ structurally near-zero in normal markets, so the missing history is a tolerable 
 | `signal_key` | what / how / why |
 |---|---|
 | `od_flow_count` (#5) | closed cross-zone voyages per origin→destination lane per day. Isolates the US→Europe lane vs leakage elsewhere. |
+| `declared_eu_share` (#27/#31) | of laden US cargoes currently at sea with a declared destination, the share bound for Europe (vs Asia/other). From the live declaration on open legs (`legs.dest_region`). **Live-only** — declared destination exists only in the live feed (NOAA/GFW carry no master broadcasts). Rising = the arbitrage is already pulling cargoes to Europe → spread compressing in the market's view. |
 
 ### 3.6 · Fleet & shocks (S / A)
 
@@ -173,14 +174,29 @@ structurally near-zero in normal markets, so the missing history is a tolerable 
 | `newbuild_appearances` (#35) | vessels making their first appearance per day — fleet capacity growth. |
 | `cold_start_rate` (#39) | share of arrivals flagged `cold_start` per zone — an AIS-off / dark-fleet proxy. **Read within the live regime**: GFW backfill events are all synthetic cold-starts (regime-confounded). |
 
+### 3.7 · Composites — the model-input features (#40–#44)
+
+Pure functions of the primitives above, the direct feed into the spread model. Each
+component is standardised (expanding-window z, leakage-safe) before combining so
+counts, hours and m³ are commensurable; emitted on the pooled `regime='all'` series,
+both bases. Composites that need an EU-queue component are **live-only** (EU queue has
+no history); `net_export_pressure` is US-only and so runs the full decade.
+
+| `signal_key` | what / how / why |
+|---|---|
+| `net_export_pressure` (#40) | z(US loadings) − z(US load-queue). High = pushing gas out fast and unobstructed → HH soft relative to TTF. **Decade-deep.** |
+| `net_absorption_pressure` (#41) | z(EU discharge volume) − z(EU discharge-queue). High = Europe absorbing fast. Live-only. |
+| `spread_thrust` (#42) | #40 − #41 — **the headline composite**: supply outrunning demand (positive → spread narrows) vs a bottleneck (negative → spread widens). Live-only (needs #41). |
+| `implied_storage_build` (#43) | z(in-transit) + z(voyage anomaly) + z(EU queue depth) − z(EU discharge) — gas in the system not yet consumed. Live-only. |
+| `diversion_arbitrage` (#44) | first-difference of `declared_eu_share` — the *change* in where cargoes are heading, leading the realised arbitrage. Live-only. |
+
 ---
 
 ## 4 · Deferred & infeasible
 
-**Planned (next phases, see `MODELS.md` build order):**
-- **Intent (§6 #27/#29/#30/#31)** — declared-destination split, ETA-slip, re-emergence diversion. From `vessel_state`; largely live-only (NOAA/GFW carry no master broadcasts).
-- **Composites (#40–#44)** — net export/absorption pressure, spread thrust, implied storage build, diversion arbitrage. Pure functions of the primitives above; the direct model inputs.
-- **Floating-storage volume (#17/#19)** and **speed profiles (#25/#26)** — degraded / need fix-level SOG; lower value (`#20` is the robust floating proxy already built).
+**Planned (next, see `MODELS.md` build order):**
+- **ETA-slip (#30) & re-emergence diversion (#29)** — need at-departure `vessel_state` dest/ETA historization (a temporal join + per-voyage ETA parse). Live-only and thin, so low ROI vs the composites; deferred. (`declared_eu_share` covers the high-value intent already.)
+- **Floating-storage volume (#17/#19)** and **speed profiles (#25/#26)** — degraded / need fix-level SOG; lower value (`laden_voyage_age_d` is the robust floating proxy already built).
 
 **Infeasible without satellite AIS** (documented, not built): mid-voyage SOG (#23),
 real-time diversion (#28), and any mid-ocean floating-storage volume — terrestrial AIS
