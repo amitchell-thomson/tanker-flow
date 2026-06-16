@@ -78,6 +78,7 @@ from .legs import (
     Leg,
     compute_legs,
 )
+from .queues import Queue, compute_queues
 from .utils import parse_as_of
 from .visits import Visit, compute_visits
 
@@ -613,6 +614,7 @@ def accumulate_events(
     band_of: Callable[[object], str],
     stat: str = "median",  # 'median' (+MAD) | 'count' | 'fraction'
     bases: tuple[str, ...] = ALL_BASES,
+    estimated_of: Callable[[object], bool] | None = None,
 ) -> list[SignalRow]:
     """Per-event aggregation — the complement of accumulate_daily's interval/stock
     reconstruction. Each item yields ONE measurement attributed to ONE day (its
@@ -631,7 +633,7 @@ def accumulate_events(
     if not days:
         return []
     panel_start, panel_end = days[0], days[-1]
-    acc: dict[tuple[str, str, date], list[float]] = defaultdict(list)
+    acc: dict[tuple[str, str, date], list[tuple[float, bool]]] = defaultdict(list)
     for item in items:
         m = measure_of(item)
         if m is None:
@@ -639,10 +641,12 @@ def accumulate_events(
         d = date_of(item)
         if d < panel_start or d > panel_end:
             continue
+        est = bool(estimated_of(item)) if estimated_of is not None else False
         for regime in (item.regime, "all"):
-            acc[(band_of(item), regime, d)].append(m)
+            acc[(band_of(item), regime, d)].append((m, est))
     rows: list[SignalRow] = []
-    for (band, regime, d), vals in acc.items():
+    for (band, regime, d), pairs in acc.items():
+        vals = [m for m, _ in pairs]
         n = len(vals)
         disp: float | None = None
         if stat == "count":
@@ -651,11 +655,14 @@ def accumulate_events(
             value = sum(vals) / n
         else:  # median
             value, disp = _median_mad(vals)
+        est_frac = (
+            sum(1 for _, e in pairs if e) / n if estimated_of is not None else None
+        )
         for basis in bases:
             rows.append(
                 SignalRow(
                     signal_key, d, band, regime, value, n, basis,
-                    value_dispersion=disp,
+                    value_dispersion=disp, estimated_fraction=est_frac,
                 )
             )
     return rows
@@ -821,6 +828,81 @@ def fleet_daily(
 
 
 # ----------------------------------------------------------------------
+# Phase 2 — anchorage-queue signals (over pipeline/queues.py)
+# ----------------------------------------------------------------------
+
+
+def flow_queues(queues: list[Queue], flow: str) -> list[Queue]:
+    """Queues at terminals of one flow direction with a known terminal — the base
+    for the load (#6/#7, export) and discharge (#12/#13, import) queue signals."""
+    return [q for q in queues if q.flow_direction == flow and q.terminal_id is not None]
+
+
+def queue_band(q: Queue) -> str:
+    """Per-terminal band (the queue stacking key)."""
+    return str(q.terminal_id)
+
+
+def terminal_queue_hours(queues: list[Queue]) -> tuple[dict[int, float], float]:
+    """Mean observed wait (h) per terminal from *closed* queues, plus a global-mean
+    fallback. Used to estimate an open (still-waiting) queue's eventual total wait
+    so the live nowcast reflects vessels currently stuck, not just completed ones."""
+    per: dict[int, list[float]] = defaultdict(list)
+    for q in queues:
+        h = q.queue_h
+        if h is not None and h > 0 and q.terminal_id is not None:
+            per[q.terminal_id].append(h)
+    means = {t: sum(v) / len(v) for t, v in per.items()}
+    allh = [h for hs in per.values() for h in hs]
+    return means, (sum(allh) / len(allh) if allh else 0.0)
+
+
+# An open (un-berthed) queue still "waiting" past this many days is almost always a
+# phantom — the vessel berthed or left while AIS-silent and we never saw the close.
+# Real LNG anchorage waits are hours-to-days; a fortnight is a generous ceiling.
+# It caps both the open-queue depth interval and the estimated-wait magnitude, the
+# queue analog of OPEN_VISIT_CEILING_DAYS / the open-leg censor.
+QUEUE_OPEN_CEILING_DAYS = 14
+
+
+def queue_interval(q: Queue, panel_end: date) -> tuple[date, date]:
+    """Dates a vessel is in queue (depth #7/#13): entry day → mooring day (half-open;
+    not counted on the day it berths). An open queue runs to panel_end but is capped
+    at QUEUE_OPEN_CEILING_DAYS so a phantom (lost vessel) can't inflate depth forever."""
+    start = q.entry_ts.date()
+    if q.moored_ts is not None:
+        end_excl = max(q.moored_ts.date(), start + timedelta(days=1))
+    else:
+        ceiling = start + timedelta(days=QUEUE_OPEN_CEILING_DAYS)
+        end_excl = min(panel_end + timedelta(days=1), ceiling)
+        end_excl = max(end_excl, start + timedelta(days=1))
+    return start, end_excl
+
+
+def knowable_queue_interval(q: Queue, panel_end: date) -> tuple[date, date]:
+    """Knowable depth interval. Open queues are only ever 'today' (an as-of=now
+    rebuild has no past open queues), so the two bases coincide for depth here."""
+    return queue_interval(q, panel_end)
+
+
+def queued_arrivals_index(
+    queues: list[Queue],
+) -> tuple[set[tuple[int, datetime]], set[tuple[int, datetime]]]:
+    """(queued, meaningfully-queued) arrival keys (mmsi, moored_ts) from closed
+    queues — used to compute the #15/#16 rates over the full arrival set (visits)."""
+    queued: set[tuple[int, datetime]] = set()
+    meaningful: set[tuple[int, datetime]] = set()
+    for q in queues:
+        if q.moored_ts is None:
+            continue
+        key = (q.mmsi, q.moored_ts)
+        queued.add(key)
+        if q.anchored_seen:
+            meaningful.add(key)
+    return queued, meaningful
+
+
+# ----------------------------------------------------------------------
 # DB orchestration
 # ----------------------------------------------------------------------
 
@@ -832,6 +914,7 @@ async def build_signals(
     return all signal rows (+ a summary for logging)."""
     legs = await compute_legs(pool, now, enrich=True)
     visits = await compute_visits(pool, now)
+    queues = await compute_queues(pool, now)
     async with pool.acquire() as conn:
         term_rows = await conn.fetch(TERMINAL_METADATA_SQL)
         centroid_rows = await conn.fetch(TERMINAL_CENTROID_SQL)
@@ -1000,6 +1083,79 @@ async def build_signals(
         band_of=lambda rt: rt.origin_zone, stat="median",
     )
 
+    # --- Phase 2: anchorage-queue signals (over pipeline/queues.py) -----------
+    load_q = flow_queues(queues, "export")
+    disch_q = flow_queues(queues, "import")
+    loadq_means, loadq_global = terminal_queue_hours(load_q)
+    dischq_means, dischq_global = terminal_queue_hours(disch_q)
+    is_open_q = lambda q: q.moored_ts is None  # noqa: E731 — still-waiting queue
+
+    ceiling_h = QUEUE_OPEN_CEILING_DAYS * 24.0
+
+    def _queue_measure(means: dict[int, float], glob: float):
+        """Wait hours: observed for a closed queue; for an open one the include-
+        estimated eventual wait = max(waited-so-far, terminal mean) (#6/#12). An open
+        queue waited past the phantom ceiling is dropped (a lost vessel, not a wait);
+        otherwise the estimate is capped at the ceiling."""
+        def m(q: Queue) -> float | None:
+            if q.moored_ts is not None:
+                return q.queue_h
+            waited = (now - q.entry_ts).total_seconds() / 3600.0
+            if waited > ceiling_h:
+                return None  # phantom open queue — drop
+            est = means.get(q.terminal_id, glob)
+            val = min(max(waited, est), ceiling_h)
+            return val if val > 0 else None
+        return m
+
+    def _queue_date(q: Queue) -> date:
+        # closed → the day the wait resolved at berthing; open → today (current view)
+        return q.moored_ts.date() if q.moored_ts is not None else panel_end
+
+    # #6 / #12 queue time (median+MAD, per terminal; open queues estimated)
+    rows += accumulate_events(
+        load_q, days, signal_key="load_queue_h",
+        measure_of=_queue_measure(loadq_means, loadq_global),
+        date_of=_queue_date, band_of=queue_band, stat="median", estimated_of=is_open_q,
+    )
+    rows += accumulate_events(
+        disch_q, days, signal_key="discharge_queue_h",
+        measure_of=_queue_measure(dischq_means, dischq_global),
+        date_of=_queue_date, band_of=queue_band, stat="median", estimated_of=is_open_q,
+    )
+
+    # #7 / #13 queue depth (daily stock count of vessels in queue, per terminal)
+    for basis, qint in (
+        (BASIS_PHYSICAL, queue_interval),
+        (BASIS_KNOWABLE, knowable_queue_interval),
+    ):
+        rows += accumulate_daily(
+            load_q, days, signal_key="us_queue_depth", interval_of=qint,
+            band_of=queue_band, contribution=lambda q, d: 1.0, basis=basis,
+            open_of=is_open_q,
+        )
+        rows += accumulate_daily(
+            disch_q, days, signal_key="eu_queue_depth", interval_of=qint,
+            band_of=queue_band, contribution=lambda q, d: 1.0, basis=basis,
+            open_of=is_open_q,
+        )
+
+    # #15 / #16 queue-formation rates over ALL arrivals (visits), per terminal
+    arrivals = [v for v in visits if v.terminal_id is not None]
+    queued_keys, meaningful_keys = queued_arrivals_index(queues)
+    rows += accumulate_events(
+        arrivals, days, signal_key="queued_rate",
+        measure_of=lambda v: 1.0 if (v.mmsi, v.moored_ts) in queued_keys else 0.0,
+        date_of=lambda v: v.moored_ts.date(), band_of=visit_terminal_band,
+        stat="fraction",
+    )
+    rows += accumulate_events(
+        arrivals, days, signal_key="meaningful_queue_rate",
+        measure_of=lambda v: 1.0 if (v.mmsi, v.moored_ts) in meaningful_keys else 0.0,
+        date_of=lambda v: v.moored_ts.date(), band_of=visit_terminal_band,
+        stat="fraction",
+    )
+
     summary = {
         "total_rows": len(rows),
         "by_key": Counter(r.signal_key for r in rows),
@@ -1027,6 +1183,10 @@ async def build_signals(
         "null_gas_visits": sum(
             1 for v in discharging + loading if v.gas_capacity_m3 is None
         ),
+        "queues_total": len(queues),
+        "queues_open": sum(1 for q in queues if q.moored_ts is None),
+        "queues_us_export": len(load_q),
+        "queues_eu_import": len(disch_q),
     }
     # Carry-forward item 1: open-leg censoring exposure of the in-transit stock,
     # per regime (physical). A live (mmsi_filter) value far above the historical
@@ -1129,6 +1289,13 @@ def _log_summary(summary: dict, wall_seconds: float) -> None:
         summary["transit_overdue_knowable"],
     )
     logger.info("  ballast→US legs: %d", summary["ballast_legs"])
+    logger.info(
+        "  anchorage queues: %d (US export: %d, EU import: %d, open: %d)",
+        summary["queues_total"],
+        summary["queues_us_export"],
+        summary["queues_eu_import"],
+        summary["queues_open"],
+    )
     logger.info(
         "  EU discharging visits: %d  (in berth now: %d)",
         summary["discharging_visits"],

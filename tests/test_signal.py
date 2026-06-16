@@ -21,6 +21,10 @@ from pipeline.signal import (
     _median_mad,
     accumulate_daily,
     accumulate_events,
+    flow_queues,
+    queue_interval,
+    queued_arrivals_index,
+    terminal_queue_hours,
     amortized_cargo_contribution,
     amortized_cargo_knowable,
     ballast_dest_band,
@@ -680,3 +684,60 @@ def test_fleet_daily_active_and_laden_fraction():
     assert active.value == 2.0
     assert frac.value == pytest.approx(0.5)  # 1 of 2 active vessels laden
     assert active.regime == "all"
+
+
+# --- Phase 2: anchorage-queue signal helpers ----------------------------------
+
+from pipeline.queues import Queue  # noqa: E402
+
+
+def mk_queue(*, mmsi=1, terminal_id=1, zone="usgulf", flow="export",
+             entry_ts=at(0), moored_ts=at(1), anchored_seen=True,
+             last_exit_ts=None, regime="mmsi_filter"):
+    return Queue(
+        mmsi=mmsi, terminal_id=terminal_id, zone=zone, flow_direction=flow,
+        entry_ts=entry_ts, moored_ts=moored_ts, anchored_ts=None,
+        last_exit_ts=last_exit_ts, anchored_seen=anchored_seen, laden=False,
+        regime=regime, gas_capacity_m3=170_000,
+    )
+
+
+def test_flow_queues_splits_by_direction():
+    qs = [mk_queue(flow="export"), mk_queue(flow="import", mmsi=2),
+          mk_queue(flow=None, mmsi=3, terminal_id=None)]
+    assert flow_queues(qs, "export") == [qs[0]]
+    assert flow_queues(qs, "import") == [qs[1]]
+
+
+def test_terminal_queue_hours_means_from_closed():
+    h10 = at(0) + timedelta(hours=10)
+    h20 = at(0) + timedelta(hours=20)
+    qs = [
+        mk_queue(terminal_id=1, entry_ts=at(0), moored_ts=h10),  # 10h
+        mk_queue(terminal_id=1, entry_ts=at(0), moored_ts=h20, mmsi=2),  # 20h
+        mk_queue(terminal_id=2, entry_ts=at(0), moored_ts=None, mmsi=3),  # open: skip
+    ]
+    means, glob = terminal_queue_hours(qs)
+    assert means[1] == pytest.approx(15.0)
+    assert glob == pytest.approx(15.0)
+
+
+def test_queue_interval_half_open_and_open():
+    moored = at(0) + timedelta(hours=48)  # berths 2 days after entry
+    closed = mk_queue(entry_ts=at(0), moored_ts=moored)
+    s, e = queue_interval(closed, (at(0) + timedelta(days=5)).date())
+    assert s == at(0).date()
+    assert e == moored.date()  # not counted on the day it berths (half-open)
+    openq = mk_queue(entry_ts=at(0), moored_ts=None, mmsi=2)
+    _, e2 = queue_interval(openq, (at(0) + timedelta(days=3)).date())
+    assert e2 == (at(0) + timedelta(days=3)).date() + timedelta(days=1)
+
+
+def test_queued_arrivals_index():
+    real = mk_queue(mmsi=1, moored_ts=at(10), anchored_seen=True)
+    clip = mk_queue(mmsi=2, moored_ts=at(10), anchored_seen=False)
+    openq = mk_queue(mmsi=3, moored_ts=None)
+    queued, meaningful = queued_arrivals_index([real, clip, openq])
+    assert (1, at(10)) in queued and (2, at(10)) in queued
+    assert (3, None) not in queued  # open queue isn't a completed arrival
+    assert (1, at(10)) in meaningful and (2, at(10)) not in meaningful

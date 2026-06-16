@@ -271,7 +271,7 @@ populated only where meaningful:
 |---|---|---|
 | `value_dispersion` | MAD of the per-item measurements behind the cell (robust spread; a phantom tail can't inflate it like stdev) | distributional signals: turn-time, speed, voyage-time anomaly, round-trip |
 | `open_fraction` | share of `value` from items with **no observed terminating event** (open legs / open visits) — the censoring-exposure axis | every stock/flow over legs/visits; 0 when all contributors closed |
-| `estimated_fraction` | share of `value` resting on an **estimated magnitude** (not just an un-observed endpoint) — reserved for the Phase-2 queue-time estimates where it is distinct from `open_fraction` | (reserved) |
+| `estimated_fraction` | share of `value` resting on an **estimated magnitude** (not just an un-observed endpoint) | the queue-time signals #6/#12 (open queues valued at an estimated eventual wait) |
 
 Two existing dimensions complete the picture and are *not* duplicated into a score:
 `regime` (the fidelity tier) and `n_legs` (sample size). The one **ground-truth-
