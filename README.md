@@ -1,6 +1,6 @@
 # tanker-flow
 
-Derives a leading Henry Hub / TTF spread signal from live LNG carrier positions. AIS vessel fixes are ingested in real time, classified against terminal zone polygons, and aggregated into laden ton-miles in transit — a forward-looking proxy for LNG trade flows between US export terminals and NW European import terminals.
+Derives leading Henry Hub / TTF spread signals from LNG carrier positions. AIS vessel fixes are ingested in real time (and backfilled a decade deep from NOAA and Global Fishing Watch), classified against terminal zone polygons into port events, and aggregated into a **suite of 28 market signals** — gas-in-transit volume, loading/discharge pace, anchorage queues, voyage speed, floating-storage age and outage detection — across US export and European import terminals. Every signal is built dual-basis (a leakage-safe point-in-time series for modelling alongside a hindsight series for validation). See [`analysis/SIGNALS.md`](analysis/SIGNALS.md).
 
 ---
 
@@ -18,9 +18,15 @@ priority_watchlist  ──► ingestion/aisstream.py ──► ais_fixes        
                                                     terminal_zones     (berth + anchorage + approach polygons)
 VesselFinder API    ──► ingestion/vesselfinder.py ──► vessel_registry  (masterdata enrichment by IMO)
 VesselFinder API    ──► ingestion/vf_rescue.py ─────► ais_fixes        (live-position backstop for AIS gaps)
-ais_fixes           ──► pipeline/port_events.py ──► port_events       (per-visit state machine)
-port_events         ──► pipeline/signal.py ────────► laden_ton_miles   [not yet implemented]
-EIA API             ──► data/eia.py ───────────────► Henry Hub fundamentals [not yet implemented]
+NOAA / GFW archives ──► ingestion/historical/* ─────► ais_fixes / port_events  (decade backfill, 2016+)
+
+ais_fixes           ──► pipeline/port_events.py ──► port_events  (per-visit state machine)
+port_events         ──►┬─ pipeline/legs.py    (at-sea voyages)
+                       ├─ pipeline/visits.py  (berth occupancy)
+                       └─ pipeline/queues.py  (anchorage waits)
+                              └─► pipeline/signal.py ──► signal_daily  (28-signal daily panel, dual-basis)
+EIA API             ──► data/eia.py ───────────────► eia_series        (US LNG-export ground truth)
+eia_series + events ──► data/capture_rate.py ──────► capture-rate validation (NOAA vs EIA)
 ```
 
 ---
@@ -41,14 +47,16 @@ EIA API             ──► data/eia.py ────────────�
 
 ## Database schema
 
-- **`ais_fixes`** — append-only raw position fixes, partitioned by day. Sources: `aisstream-mmsi-1` / `aisstream-mmsi-2` / `aisstream-mmsi-3` (one per parallel MMSI-filtered WebSocket) and `vesselfinder` (weekly reconciliation **and** the `vf_rescue.py` live-position backstop — both inject as normal fixes).
+- **`ais_fixes`** — append-only raw position fixes, partitioned by day. Sources: `aisstream-*` (the live MMSI-filtered WebSockets, labelled per connection/worker), `vesselfinder` (reconciliation + the `vf_rescue.py` live-position backstop), and `noaa-ais` (the NOAA decade backfill). GFW backfill events land directly in `port_events` as `gfw_events` (port visits, no raw fixes). The `source` column carries the regime fidelity (see `signal_daily`).
 - **`vessel_state`** — voyage-specific fields (draught, destination, ETA) from `ShipStaticData` messages.
 - **`vessel_registry`** — one row per MMSI, enriched with VesselFinder masterdata. ~780 LNG/FSRU vessels bulk-imported from the IGU 2025 World LNG Report (`db/seed/lng_fleet_igu_2025.csv`). `is_lng_carrier` and `is_fsru` flags drive vessel filtering.
 - **`terminals`** — 35 LNG export/import terminals with scope and type metadata. `unlocode` column (e.g. `NLRTM`) is used by `pipeline/dest_parser.py` to resolve free-text `vessel_state.dest` strings to a terminal_id. `flow_direction` (`export` / `import`) labels each terminal's role.
 - **`terminal_zones`** — berth, anchorage, and approach polygons (MultiPolygon/4326) linked to terminals. Drawn in QGIS, imported via `make seed-zones`. The `approach` macro-zone contains anchorage + channel + berth as one envelope so a single port visit stays "open" while the vessel transits between them. See `qgis/README.md` for coverage.
 - **`priority_watchlist`** — derived hourly by `pipeline/scoring.py`. One row per LNG/FSRU vessel, ranked into 5 tiers based on current zone proximity / declared destination / activity. The ingester reads this to pick which 150 of ~780 vessels to subscribe to each cycle (100 persistent + 50 scan rotation). `slot_kind` (`persistent` / `pinned` / `scan`) and `in_slot` record who is currently subscribed; `last_scan_window_at` drives scan rotation fairness.
 - **`tier_promotions`** — append-only log of vessels promoted **up into** the persistent band (tiers 1-3), written by `scoring.py` (`via='scoring'`) and the inline state machine (`via='inline'`). Powers the TUI promotions panel.
-- **`port_events`** — derived table, recomputable from `ais_fixes` via `make port-events`. One row per per-vessel transition: `zone_entry → [anchorage_entry → [anchored] → anchorage_exit]* → [moored → departed]? → zone_exit`. `anchorage_entry`/`anchorage_exit` are raw polygon-crossing markers (no dwell, no SOG filter) — bracket every visit to the anchorage polygon, so `queue_time = anchorage_exit - anchorage_entry`. `anchored` is the dwell-confirmed sibling (≥30 min stationary). Combined: presence of `anchorage_entry` answers "did this vessel queue?"; presence of `anchored` answers "did it queue meaningfully?". Each row also carries `terminal_id`, `lat`/`lon` (for great-circle ton-miles downstream), `laden_flag` (forward-filled draught vs `design_draught`), and `cold_start` (vessel already in a polygon at first observation).
+- **`port_events`** — derived table, recomputable from `ais_fixes` via `make port-events`. One row per per-vessel transition: `zone_entry → [anchorage_entry → [anchored] → anchorage_exit]* → [moored → departed]? → zone_exit`. `anchorage_entry`/`anchorage_exit` are raw polygon-crossing markers (no dwell, no SOG filter) — bracket every visit to the anchorage polygon, so `queue_time = anchorage_exit - anchorage_entry`. `anchored` is the dwell-confirmed sibling (≥30 min stationary). Combined: presence of `anchorage_entry` answers "did this vessel queue?"; presence of `anchored` answers "did it queue meaningfully?". Each row also carries `terminal_id`, `lat`/`lon` (for great-circle distance downstream), `laden_flag` (forward-filled draught vs `design_draught`), `cold_start` (vessel already in a polygon at first observation), and `regime` (a stored fidelity tag: `noaa` / `gfw` / `bbox` / `mmsi_filter`).
+- **`signal_daily`** — the derived signal panel, rebuilt by `make signals` (TRUNCATE + swap). One row per `(signal_key, bucket_date, zone_scope, regime, basis)` carrying `value`, `n_legs`, and the confidence columns (`value_dispersion`, `open_fraction`, `estimated_fraction`). 28 signals across loading/discharge, in-transit, queues, voyage speed/age, fleet and outage detection — each built in both a `physical` (validation) and `knowable` (leakage-safe, model-ready) basis. `signal_daily_live_vintage` logs the live values as-printed for the point-in-time self-validation. **The full catalogue is [`analysis/SIGNALS.md`](analysis/SIGNALS.md).**
+- **`eia_series`** — US LNG-export volumes from the EIA v2 API (`data/eia.py`), the external ground truth for `data/capture_rate.py`'s NOAA-vs-EIA capture-rate check.
 - **`vf_rescue_log`** — append-only audit trail **and** restart-safe credit ledger for `ingestion/vf_rescue.py`. One row per VF live-position lookup attempt: `rescue_class`, `result` (`rescued` / `no_position` / `rejected_stale` / `rejected_teleport` / `error` / `dry_run`), `credits` billed, and `recheck_at` (the per-vessel cooldown). Today's `SUM(credits)` gates the daily cap; the latest row per MMSI is the cooldown.
 - **`vf_account_status`** — VesselFinder account-balance snapshots from the free `/status` endpoint, appended each rescue run. The TUI shows the latest `credits` + `expiration_date`; consecutive rows give the true burn rate.
 - **`ingestion_events`** — append-only lifecycle log (connect / subscribe / planned_reconnect / watchdog_reconnect / disconnect / error). Per-connection liveness is derived from `ingestion_stats_minute` instead of a dedicated heartbeat table.
@@ -106,6 +114,16 @@ make vf-status       # Fetch + store the VF account balance (free /status call)
 # Pipeline
 make port-events     # Recompute port_events from ais_fixes + terminal_zones (idempotent)
 make scoring         # Recompute priority_watchlist (also runs hourly inside the ingester)
+make signals         # Rebuild the signal_daily panel (legs + visits + queues → 28 signals)
+
+# Historical backfill (decade depth, 2016+)
+make backfill-noaa   # NOAA US Class-A fixes → ais_fixes
+make backfill-gfw    # GFW port visits → port_events (gfw_events)
+make reconcile       # Dedup GFW US visits NOAA already covers (run before signals)
+
+# Ground truth
+make eia             # Pull US LNG-export volumes from the EIA API → eia_series
+make capture-rate    # Validate AIS capture against EIA (NOAA vs published exports)
 
 # Viz
 make viz             # Start FastAPI monitoring web app (localhost:8000)
@@ -113,13 +131,25 @@ make viz             # Start FastAPI monitoring web app (localhost:8000)
 
 ---
 
+## Signals
+
+`pipeline/signal.py` aggregates the three port-event pairings — `legs.py` (at-sea
+voyages), `visits.py` (berth occupancy), `queues.py` (anchorage waits) — into
+`signal_daily`: **28 daily signals**, each a leading indicator of the HH/TTF spread.
+Every signal is built in two bases (`physical` for validation, `knowable` for
+leakage-safe modelling), tagged by ingestion `regime` (never blend across the
+2026-05-30 fidelity seam), and carries decomposed confidence metadata. The headline
+set is gas-in-transit volume, US loading and EU discharge pace, anchorage queue
+time/depth, voyage speed and floating-storage age, and per-terminal outage radar.
+Full definitions — what each is, how it's constructed, and why it helps the spread
+model — are in **[`analysis/SIGNALS.md`](analysis/SIGNALS.md)**.
+
 ## What is not yet implemented
 
 | Component | Description |
 |---|---|
-| `pipeline/signal.py` | Aggregates `port_events` into laden ton-miles in transit by zone pair |
-| `data/eia.py` | Pulls US natural gas storage data from the EIA API (Henry Hub fundamentals) |
-| `analysis/` | Spread prediction model and exploratory notebooks |
+| Intent / composite signals | Declared-destination split, ETA-slip, and the composite model inputs (net export/absorption pressure, spread thrust) — see `analysis/SIGNALS.md` §4 |
+| `analysis/` spread model | The HH/TTF spread fit on the `knowable` panel — see `analysis/MODELS.md` |
 
 ---
 
