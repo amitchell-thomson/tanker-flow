@@ -1,9 +1,16 @@
 # Validation sweep — are the 34 signals model-ready?
 
-The gate between signal *extraction* (done) and *modelling* (`MODELS.md`). A single
-harness — proposed `analysis/validate_signals.py`, run by `make validate-signals` —
-runs the tiers below over `signal_daily` (+ cross-refs to `port_events`, `eia_series`,
-`signal_daily_live_vintage`) and emits a per-signal pass/fail report.
+The gate between signal *extraction* (done) and *modelling* (`MODELS.md`). The harness
+`analysis/validate_signals.py` (`make validate-signals`) runs the tiers below over
+`signal_daily` (+ cross-refs to `port_events`, `eia_series`, `signal_daily_live_vintage`)
+and emits a per-signal pass/fail report, exiting non-zero on any blocking failure.
+
+**Status (2026-06-16): GATE GREEN** — PASS=71, WARN=0, FAIL=0, SKIP=2 (the two SKIPs
+are time-gated: EIA capture-rate firms ~mid-2026, vintage self-validation accrues with
+the live tail). The sweep caught and drove two fixes on first run: a too-tight
+`voyage_speed_kn` lower bound (sub-3 kn is genuine slow-steaming, not an error) and 15
+implausibly-long `load_queue_h` mis-pairs (fixed at source — `MAX_QUEUE_PAIR_DAYS`
+30→14, aligned to the open-queue ceiling).
 
 **Gate rule:** Tiers 0–5 are **blocking** — no spread fit until green. Tier 6 is
 **confirmatory** (does each signal carry the economic meaning we built it for). Tier 3

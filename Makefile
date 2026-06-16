@@ -1,4 +1,4 @@
-.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events backfill-noaa backfill-noaa-reload backfill-gfw backfill-gfw-dry reconcile reconcile-dry scoring signals vf-rescue vf-rescue-dry vf-status refresh-fleet discover discover-dry discover-berths discover-berths-dry complete-registry complete-registry-dry complete-registry-sample retire-stale retire-stale-dry backup eia eia-full capture-rate coverage
+.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events backfill-noaa backfill-noaa-reload backfill-gfw backfill-gfw-dry reconcile reconcile-dry scoring signals validate-signals vf-rescue vf-rescue-dry vf-status refresh-fleet discover discover-dry discover-berths discover-berths-dry complete-registry complete-registry-dry complete-registry-sample retire-stale retire-stale-dry backup eia eia-full capture-rate coverage
 
 up:
 	docker compose up -d
@@ -92,10 +92,15 @@ seed-unlocodes:
 scoring:
 	uv run python -m pipeline.scoring
 
-# Rebuild the signal_daily panel (laden ton-miles in transit + flow signals)
-# from voyage legs + port_events. Idempotent: TRUNCATEs then rebuilds.
+# Rebuild the signal_daily panel (34 signals) from legs + visits + queues.
+# Idempotent: TRUNCATEs then rebuilds. Run `make validate-signals` after.
 signals:
 	uv run python -m pipeline.signal
+
+# Signal validation sweep — the model-readiness gate (analysis/VALIDATION.md).
+# Exit non-zero on any blocking (tier 0-5) failure.
+validate-signals:
+	uv run python -m analysis.validate_signals
 
 # VesselFinder rescue: fetch live positions for high-value AIS-silent vessels.
 # Credit-budgeted. Use vf-rescue-dry first for a no-spend candidate/cost preview.

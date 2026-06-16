@@ -50,9 +50,11 @@ from config import regime_of
 logger = logging.getLogger(__name__)
 
 # A `moored` more than this long after the run's anchorage_entry belongs to a later
-# port call (or the live block after a data gap), not this wait — leave the queue
-# open (capped downstream) rather than spanning the gap. Mirrors visits.py.
-MAX_QUEUE_PAIR_DAYS = 30
+# port call (or the live block after a data gap), not this wait — discard the run
+# rather than spanning the gap. Set to the open-queue phantom ceiling (14d, see
+# signal.QUEUE_OPEN_CEILING_DAYS): a real LNG loading/discharge wait is hours-to-days,
+# so a "queue" longer than a fortnight is always a bridged AIS gap, not a wait.
+MAX_QUEUE_PAIR_DAYS = 14
 
 
 @dataclass(frozen=True)
