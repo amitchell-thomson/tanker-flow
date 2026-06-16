@@ -27,21 +27,29 @@ raw AIS there). So the rule is:
   • a US→EU leg then pairs NOAA-departed(US) → GFW-zone_entry(EU): one clean,
     fully-observed leg.
 
-We do NOT blanket-delete GFW at US terminals — NOAA is ~77 % capture, and GFW
-fills the gaps (pre-2016, NOAA gap days, the ~23 % NOAA missed). Only GFW US
-visits that *match* a NOAA visit are dropped; unmatched GFW US visits survive and
-add coverage.
+We do NOT blanket-delete GFW at US terminals. NOAA backfill capture is *time-
+varying*: ~exhaustive in recent years (the NOAA `departed` cargo count tracks EIA
+monthly exports to within a few %, 2022+), but sparse early on (in 2020 NOAA saw
+~272 US visits against GFW's ~880). So GFW still earns its keep as gap-fill in the
+under-covered early years (and any NOAA outage day). Only GFW US visits that
+*match* a NOAA visit are dropped; unmatched GFW US visits survive and add coverage.
 
 ────────────────────────────────────────────────────────────────────────────
-The match
+The match — by (mmsi, time), NOT (mmsi, terminal_id)
 ────────────────────────────────────────────────────────────────────────────
-A GFW US visit ≙ a NOAA US visit when they share (mmsi, terminal_id) and their
-`moored` times fall within MATCH_TOLERANCE_HOURS. A vessel does not re-visit the
-same US terminal within ~2 days, so a 48 h window is unambiguous yet absorbs the
-offset between GFW's anchorage-entry `start` and NOAA's berth `moored`. On a
-match we delete that GFW visit's whole event set — its `zone_entry` and `moored`
-(at the visit start) and its paired `departed` (at the visit end) — so no orphan
-GFW endpoint is left to mis-pair.
+A GFW US visit ≙ a NOAA US visit when they share `mmsi` and their `moored` times
+fall within MATCH_TOLERANCE_HOURS. We deliberately do **not** require the same
+`terminal_id`: GFW and NOAA attribute the *same physical visit* to different
+terminal_ids often enough that a terminal-keyed match silently failed for ~half
+the real duplicates (3,359 GFW US moored had a co-temporal NOAA moored at a
+*different* terminal_id and so survived, doubling `gas_loading_us` / the US-origin
+leg of `gas_in_transit_volume` in the `'all'` regime). An LNG carrier cannot
+complete two US loadings within ~2 days, so a NOAA `moored` for the same vessel
+inside a 48 h window is unambiguously the same visit whatever terminal each source
+named — and 48 h still absorbs the offset between GFW's anchorage-entry `start` and
+NOAA's berth `moored`. On a match we delete that GFW visit's whole event set — its
+`zone_entry` and `moored` (at the visit start) and its paired `departed` (at the
+visit end) — so no orphan GFW endpoint is left to mis-pair.
 
 Only export (US Gulf / US Atlantic) terminals are considered: NOAA never sees EU
 import terminals, so a GFW EU visit can never be a duplicate.
@@ -68,8 +76,9 @@ import config
 logger = logging.getLogger("reconcile")
 
 # A GFW US `moored` within this many hours of a NOAA `moored` for the same vessel
-# and terminal is the same visit. Wide enough to bridge GFW anchorage-entry vs
-# NOAA berth-moored timing, far below the gap between successive US visits.
+# is the same visit (terminal attribution is NOT required to agree — see module
+# docstring). Wide enough to bridge GFW anchorage-entry vs NOAA berth-moored
+# timing, far below the ~weeks between successive US loadings by one carrier.
 MATCH_TOLERANCE_HOURS = 48
 
 # Identify each GFW US-export visit (its moored) that matches a NOAA visit, and
@@ -100,7 +109,7 @@ SELECT g.mmsi, g.terminal_id, g.moored_ts, g.departed_ts,
        g.gfw_dep_laden,
        (SELECT nd.laden_flag FROM port_events nd
         WHERE nd.source = 'noaa-ais' AND nd.event_type = 'departed'
-          AND nd.mmsi = g.mmsi AND nd.terminal_id = g.terminal_id
+          AND nd.mmsi = g.mmsi
         ORDER BY abs(extract(epoch FROM
             (nd.event_time - COALESCE(g.departed_ts, g.moored_ts))))
         LIMIT 1) AS noaa_dep_laden
@@ -108,7 +117,7 @@ FROM gfw_visit g
 WHERE EXISTS (
     SELECT 1 FROM port_events n
     WHERE n.source = 'noaa-ais' AND n.event_type = 'moored'
-      AND n.mmsi = g.mmsi AND n.terminal_id = g.terminal_id
+      AND n.mmsi = g.mmsi
       AND abs(extract(epoch FROM (n.event_time - g.moored_ts)))
           <= {MATCH_TOLERANCE_HOURS} * 3600
 )
@@ -134,7 +143,7 @@ matched AS (
     WHERE EXISTS (
         SELECT 1 FROM port_events n
         WHERE n.source = 'noaa-ais' AND n.event_type = 'moored'
-          AND n.mmsi = g.mmsi AND n.terminal_id = g.terminal_id
+          AND n.mmsi = g.mmsi
           AND abs(extract(epoch FROM (n.event_time - g.moored_ts)))
               <= {MATCH_TOLERANCE_HOURS} * 3600
     )
