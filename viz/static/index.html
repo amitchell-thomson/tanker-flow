@@ -32,6 +32,7 @@
           <div id="panel-head">
             <span id="panel-title">Live feed</span>
             <span id="panel-sub"></span>
+            <button id="panel-collapse" title="Hide panel" aria-label="Hide panel">⟩</button>
           </div>
           <div id="panel-tabs">
             <button class="tab-btn active" id="tab-events">Port events</button>
@@ -103,23 +104,30 @@
         <button class="layer-btn" id="btn-density">Density</button>
       </div>
       <div id="legend" class="hud">
-        <div class="legend-title">Vessel class</div>
-        <div class="legend-row"><span class="swatch" style="background:#cba6f7;"></span> LNG carrier</div>
-        <div class="legend-row"><span class="swatch sq" style="background:#f38ba8;"></span> FSRU</div>
-        <div class="legend-title">Watchlist tier (ring)</div>
-        <div class="tier-scale">
-          <span class="tier-1">1</span><span class="tier-2">2</span><span class="tier-3">3</span><span class="tier-4">4</span><span class="tier-5">5</span>
+        <button id="legend-head" title="Collapse / expand legend">
+          <span class="legend-head-title">Legend</span>
+          <span class="legend-caret">▾</span>
+        </button>
+        <div id="legend-body">
+          <div class="legend-title">Vessel class</div>
+          <div class="legend-row"><span class="swatch" style="background:#cba6f7;"></span> LNG carrier</div>
+          <div class="legend-row"><span class="swatch sq" style="background:#f38ba8;"></span> FSRU</div>
+          <div class="legend-title">Watchlist tier (ring)</div>
+          <div class="tier-scale">
+            <span class="tier-1">1</span><span class="tier-2">2</span><span class="tier-3">3</span><span class="tier-4">4</span><span class="tier-5">5</span>
+          </div>
+          <div class="fade-labels"><span>at terminal</span><span>stale</span></div>
+          <div class="legend-title">Fix freshness</div>
+          <div class="fade-bar"></div>
+          <div class="fade-labels"><span>just seen</span><span>&gt;24h</span></div>
+          <div class="legend-title">Terminal activity</div>
+          <div class="legend-row"><span class="swatch sq" style="background:#a6e3a1;"></span> active (&lt;2d)</div>
+          <div class="legend-row"><span class="swatch sq" style="background:#f9e2af;"></span> slowing (&lt;7d)</div>
+          <div class="legend-row"><span class="swatch sq" style="background:#f38ba8;"></span> silent &gt;7d</div>
+          <div class="legend-row"><span class="swatch sq" style="background:#6c7086;"></span> no events</div>
         </div>
-        <div class="fade-labels"><span>at terminal</span><span>stale</span></div>
-        <div class="legend-title">Fix freshness</div>
-        <div class="fade-bar"></div>
-        <div class="fade-labels"><span>just seen</span><span>&gt;24h</span></div>
-        <div class="legend-title">Terminal activity</div>
-        <div class="legend-row"><span class="swatch sq" style="background:#a6e3a1;"></span> active (&lt;2d)</div>
-        <div class="legend-row"><span class="swatch sq" style="background:#f9e2af;"></span> slowing (&lt;7d)</div>
-        <div class="legend-row"><span class="swatch sq" style="background:#f38ba8;"></span> silent &gt;7d</div>
-        <div class="legend-row"><span class="swatch sq" style="background:#6c7086;"></span> no events</div>
       </div>
+      <button id="panel-reopen" class="hud" hidden title="Show panel">⟨&nbsp;Feed</button>
       <div id="status" class="hud">Loading…</div>
       <div id="vessel-feeds" class="hud" hidden></div>
       <div id="playback-bar" class="hud" hidden>
@@ -136,7 +144,25 @@
       <div id="signals-subhead">
         <span class="subhead-title">Market signals</span>
         <span class="subhead-blurb">LNG carrier positions &rarr; Henry&nbsp;Hub&nbsp;/&nbsp;TTF spread</span>
-        <label id="regime-toggle"><input type="checkbox" id="split-regime"> split by ingest regime</label>
+        <div id="signal-controls">
+          <input id="signal-filter" type="search" placeholder="filter signals…" autocomplete="off">
+          <label class="ctl-sel" title="How much history to load — a shorter window loads far faster">range
+            <select id="signal-range">
+              <option value="90">90d</option>
+              <option value="365" selected>1y</option>
+              <option value="1825">5y</option>
+              <option value="0">all</option>
+            </select>
+          </label>
+          <label class="ctl-toggle" title="Show only the four headline gas-volume signals"><input type="checkbox" id="headline-only"> headline only</label>
+          <label class="ctl-sel" title="physical = hindsight (validation); knowable = leakage-safe point-in-time (the model input)">basis
+            <select id="basis-select">
+              <option value="physical">physical</option>
+              <option value="knowable">knowable</option>
+            </select>
+          </label>
+          <label id="regime-toggle" title="Show the live (mmsi_filter) regime alone instead of the pooled series"><input type="checkbox" id="split-regime"> split by regime</label>
+        </div>
         <span id="signals-status">Loading…</span>
       </div>
       <div id="status-strip">
@@ -166,6 +192,18 @@
     <div id="drawer-actions"></div>
     <div id="drawer-body"></div>
   </aside>
+
+  <!-- Fullscreen chart modal (click a signal chart / its ⤢ button) -->
+  <div id="chart-modal" hidden>
+    <div class="cm-head">
+      <div>
+        <div id="cm-title">—</div>
+        <div id="cm-sub"></div>
+      </div>
+      <button id="cm-close" title="Close (Esc)" aria-label="Close">&times;</button>
+    </div>
+    <div class="cm-body"><canvas id="cm-canvas"></canvas></div>
+  </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>

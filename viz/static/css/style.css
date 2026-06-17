@@ -67,7 +67,36 @@ body[data-view="signals"] #view-signals { display: flex; flex-direction: column;
   display: flex;
   flex-direction: column;
   font-size: 13px;
+  min-width: 0;
+  transition: transform 0.24s cubic-bezier(0.22, 1, 0.36, 1),
+              margin-right 0.24s cubic-bezier(0.22, 1, 0.36, 1);
 }
+/* Collapsed: slide the panel off the right edge and reclaim its width with a
+   negative margin so the map reflows to full width (no content squash). The
+   reset-btn + legend reference the panel width for their offset, so pin them to
+   the edge while it's hidden. */
+#view-map.panel-collapsed #events-panel {
+  transform: translateX(100%);
+  margin-right: calc(-1 * var(--panel-w));
+  border-left: none;
+}
+#view-map.panel-collapsed #reset-btn,
+#view-map.panel-collapsed #legend { right: 12px; }
+#panel-collapse {
+  margin-left: 6px; flex: none;
+  background: none; border: none; color: var(--overlay0);
+  cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px;
+}
+#panel-collapse:hover { color: var(--text); }
+/* Re-open handle — a slim tab flush to the right edge while the panel is hidden */
+#panel-reopen {
+  top: 96px; right: 0;
+  border-top-right-radius: 0; border-bottom-right-radius: 0;
+  padding: 9px 9px; color: var(--subtext1); cursor: pointer;
+  font-size: 12px; font-family: inherit; white-space: nowrap;
+}
+#panel-reopen:hover { background: rgba(205, 214, 244, 0.06); color: var(--text); }
+#panel-reopen[hidden] { display: none; }
 #events-count, #fixes-count { color: var(--subtext0); font-weight: normal; font-size: 12px; margin-left: auto; }
 /* Sidebar header */
 #panel-head { display: flex; align-items: baseline; gap: 8px; padding: 11px 12px 9px; border-bottom: 1px solid var(--surface0); }
@@ -303,6 +332,18 @@ body[data-view="signals"] #view-signals { display: flex; flex-direction: column;
 #legend .tier-scale span { flex: 1; text-align: center; border-radius: 2px; font-size: 9px; font-weight: 700; color: var(--crust); padding: 1px 0; }
 #legend .fade-bar { height: 9px; border-radius: 2px; margin-top: 3px; background: linear-gradient(90deg, var(--pink) 0%, rgba(245, 194, 231, 0.16) 100%); }
 #legend .fade-labels { display: flex; justify-content: space-between; font-size: 9px; color: var(--subtext0); margin-top: 1px; }
+/* Collapsible legend: the head is a full-width toggle; collapsed → just the chip */
+#legend-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  width: 100%; padding: 0; background: none; border: none; cursor: pointer;
+  color: var(--text); font-family: inherit; font-size: 11px; font-weight: 600;
+}
+.legend-head-title { letter-spacing: 0.02em; }
+.legend-caret { color: var(--overlay0); font-size: 10px; transition: transform 0.15s ease; }
+#legend-body { margin-top: 7px; }
+#legend.collapsed { width: auto; }
+#legend.collapsed #legend-body { display: none; }
+#legend.collapsed .legend-caret { transform: rotate(-90deg); }
 /* Dark-theme the Leaflet chrome (zoom, attribution, popups, tooltips) */
 .leaflet-control-zoom a {
   background: rgba(17, 17, 27, 0.85); color: var(--text);

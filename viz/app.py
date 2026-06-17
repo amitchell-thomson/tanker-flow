@@ -1054,9 +1054,16 @@ async def signals(
     since_days: int | None = None,
     pool: asyncpg.Pool = Depends(get_pool),
 ):
-    """Market-signal daily panel from signal_daily. Small table — returns the
-    whole (filtered) set and lets the dashboard group by signal_key. Pins
-    basis='physical' by default (the only basis built today)."""
+    """Market-signal daily panel from signal_daily. Returns the (filtered) set
+    and lets the dashboard group by signal_key. Defaults to basis='physical' (the
+    validation series); the dashboard can request basis='knowable' (the leakage-
+    safe model input). Carries the decomposed confidence columns so the UI can
+    render data-quality per cell.
+
+    `regime` accepts a comma-separated list (e.g. 'all,mmsi_filter') so the
+    dashboard fetches only the regime(s) it actually renders — the full panel is
+    ~500k rows / 130 MB across every regime and the whole decade, so the
+    regime + `since_days` window are what keep the load fast."""
     args: list = [basis]
     where = ["sd.basis = $1"]
     if signal_key:
@@ -1066,8 +1073,9 @@ async def signals(
         args.append(zone_scope)
         where.append(f"sd.zone_scope = ${len(args)}")
     if regime:
-        args.append(regime)
-        where.append(f"sd.regime = ${len(args)}")
+        regimes = [r for r in regime.split(",") if r]
+        args.append(regimes)
+        where.append(f"sd.regime = ANY(${len(args)}::text[])")
     if since_days is not None:
         args.append(since_days)
         where.append(
@@ -1076,7 +1084,9 @@ async def signals(
 
     sql = f"""
         SELECT sd.signal_key, sd.bucket_date, sd.zone_scope, sd.regime,
-               sd.value, sd.n_legs, sd.basis, sd.computed_at
+               sd.value, sd.n_legs,
+               sd.value_dispersion, sd.open_fraction, sd.estimated_fraction,
+               sd.basis, sd.computed_at
         FROM signal_daily sd
         WHERE {" AND ".join(where)}
         ORDER BY sd.signal_key, sd.zone_scope, sd.regime, sd.bucket_date
