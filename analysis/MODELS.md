@@ -30,6 +30,74 @@ Three facts follow and shape everything below:
    near-deterministic and validate against EIA *now*; the spread (Part B) is low-SNR
    and confounded.
 
+### 0·1 · Validated data caveats (signal-integrity + EIA cross-checks, 2026-06-17)
+
+The sweep is green (`make validate-signals`: 71 PASS / 0 FAIL; Freeport-2022 and
+seasonality reproduce). Two findings nonetheless change *how* the panel must be
+modelled — both are **level/seasonality effects the `knowable`/confidence columns do
+not capture**, so neither is caught by down-weighting `open_fraction`:
+
+- **US capture gradient — early years systematically under-count.** `noaa` US loadings
+  ÷ EIA-implied cargoes is **not flat across the decade**: ~95% (2016) → **~46% (2020)**
+  → **~103–105% (2024–25)**, monthly within ±7% recently. The cause is NOAA terrestrial-
+  AIS receiver density growing over time, so **pre-2022 US-supply *levels* are attenuated
+  by up to ~2×**. This is an absolute bias, not censoring → it survives `open_fraction`.
+  **It is recoverable, not a reason to discard pre-2022 — see §0·2 for the recipe.** The
+  correction applies to *level/count/volume* signals only; ratio/timing signals (queue h,
+  speed, turn-time, round-trip) read *observed* events where a representative sample
+  suffices, so they are barely affected even in the sparse years. (See also the `'all'`
+  regime double-count: read `regime='noaa'` for US, per §1.)
+- **Tanker seasonality ≈ weather seasonality — a confounder, flagged.** The signals
+  carry a strong, *correct* seasonal cycle: EU discharge winter/summer **1.20×**, gas-in-
+  transit **1.48×** (in-transit leads *and* amplifies discharge — as a leading indicator
+  should). But that cycle overlaps the spread's own weather seasonality, so a naive fit
+  would just re-discover winter. **This makes the degree-day controls + FWL partialling
+  of §2 load-bearing, not optional** — the claim is tanker edge *net of* weather, and the
+  in-transit lead over discharge is the project's shot at beating a pure degree-day model.
+
+### 0·2 · Recovering the early years — the best historical US-supply signal (NOAA × GFW × EIA)
+
+The pre-2022 US under-count (§0·1) is recoverable because **three sources triangulate**,
+and NOAA and GFW have **opposite, complementary coverage gradients** (US loadings as % of
+EIA-implied; verified 2026-06-17):
+
+| | 2016 | 2018 | **2019** | **2020** | 2021 | 2023 | 2025 |
+|---|---|---|---|---|---|---|---|
+| **NOAA** | 95 | 74 | **59** | **46** | 74 | 93 | 105 |
+| **GFW**  | 65 | 69 | **79** | **93** | 59 | 33 | 14 |
+
+NOAA (terrestrial) is sparse early, exhaustive now; GFW (satellite-fed) is strong early,
+fades recently — crossover ~2021. **GFW captures the 2019–2020 trough that NOAA misses.**
+EIA is the **exhaustive monthly ground truth** over the whole span. The recipe:
+
+1. **Fuse, don't pick — a deduped NOAA∪GFW union.** NOAA carries 2022+, GFW carries the
+   early trough. ⚠ The current `regime='all'` is **not** this: it over-counts (119–160%
+   every year) because `reconcile.py`'s mmsi+time match is too tight and misses true
+   NOAA↔GFW pairs (a loading shows at slightly different timestamps in each feed), so the
+   union ≈ the *sum*. **Step 0 is a looser cross-source dedup** (wider time window; match
+   on mmsi + terminal + day) so the union approaches the true ~100%, not the sum.
+2. **Anchor the residual to EIA.** A clean union still won't be exactly 100%/month. Either
+   (a) rescale the level signal by `1/capture_t`, or — preferred for the Part A count
+   models — (b) carry `log(capture_t)` as a **Poisson/NB exposure offset** (`log λ = xβ +
+   log(capture)`), so under-coverage lands on the offset, not the coefficients, and
+   low-coverage months down-weight themselves with the right uncertainty.
+3. **Vintage discipline.** Historical (`physical`/training) fit may use full EIA (hindsight).
+   The live `knowable` series must use **trailing/point-in-time** EIA (it lags ~1–2 mo) to
+   stay leakage-safe — but the early-year problem is historical, so this binds only the live tail.
+4. **Carry a US fidelity indicator.** Using GFW for early US adds a `gfw→noaa` step to the
+   previously single-fidelity US line — keep `regime`/source (or the capture covariate) as
+   an indicator rather than silently concatenating (§1's "never blend fidelity").
+5. **Scope.** Correct `gas_loading_us` / `us_loadings_count*` / the US in-transit bands only.
+   GFW is coarse (port visits, **no coordinates/anchorage**), so it contributes early-year
+   *counts/timing* but not fix-level queue/speed (speed already falls back to centroids).
+6. **Acceptance test.** The recovered early years should reconcile three ways — our fused
+   level ≈ EIA, and GFW's independent early count (≈600 cargoes in 2020) corroborates the
+   rescaled NOAA (EIA implies 648). That NOAA × GFW × EIA agreement is the proof the early
+   years are *recovered*, not fabricated.
+
+**Net:** the best historical US-supply signal = **deduped NOAA∪GFW union, EIA-calibrated
+(exposure offset), regime-indicated** — all six early years kept, not discarded.
+
 ---
 
 ## 1 · Reading `signal_daily` into a model (the non-negotiables)
@@ -88,6 +156,11 @@ adds edge over controls `Z`: (1) regress spread on `Z` → residual `ỹ`; (2) r
 on `Z` → residual `T̃`; (3) regress `ỹ` on `T̃` — a non-zero coefficient is edge net of
 weather/storage. The ML analogue: fit with controls + tanker signals, then SHAP /
 permutation importance for the *incremental* lift over a controls-only model.
+
+> **Not optional here (see §0·1).** The tanker panel carries its own strong seasonality
+> (gas-in-transit winter/summer ≈ 1.48×) that overlaps the spread's weather cycle, so
+> without degree-day partialling a fit re-encodes winter rather than tanker edge. The
+> degree-day controls are the highest-priority entry in the table above for that reason.
 
 ---
 
@@ -190,23 +263,64 @@ autocorrelated spread — they overfit and the "Transformer wins" papers usually
 
 ## Build order
 
-0. **Refresh complete (this doc).** Signals built; basis/regime/confidence machinery in
-   place.
-1. **Validation sweep** — confirm the 34 signals are model-ready (see
-   `analysis/VALIDATION.md`): capture-rate vs EIA, the knowable self-validation, range/
-   coverage/sign checks. **Gate: do not model until green.**
-2. **Target + controls** — FX/unit-consistent spread (§2) + EIA Phase 2 + AGSI +
-   degree-days assembled into the daily panel.
-3. **AR(1)+controls baseline** — the null; FWL partial-effect harness.
-4. **Physical nowcasts (Part A)** — kinematic ETA + Poisson/NB + survival, validated
-   against EIA on the decade. The defensible "models working today" deliverable.
-5. **BOCPD outage nowcast (A5)** — cheap, online, asymmetric payoff.
-6. **Hierarchical pooling (C2)** across terminals for the survival models.
-7. **Spread model — BSTS (B2)** with spike-and-slab over the pre-registered signals +
-   controls, confidence-weighted; cross-check Elastic Net (B1) and PLS (B3). Report
-   posterior inclusion probabilities and predictive intervals.
-8. **Defer** constrained LightGBM (B5) and full cross-exciting Hawkes until the event
-   count is in the tens of thousands.
+**Done.** ✅ Signals built (34 keys, dual-basis, confidence-instrumented); basis/regime/
+confidence machinery in place. ✅ Validation sweep green (`make validate-signals`,
+`analysis/VALIDATION.md`) — structural/coverage/range/leakage/confidence pass, Freeport-
+2022 + seasonality reproduce. **Gate cleared: cleared to model.**
+
+### Decisions locked
+- **TTF source = Barchart Premier, ~$30 one-time** (Build C). Subscribe one month, CSV-
+  export the TTF daily futures series (Barchart root `TG` / native `TFM`) 2016→present,
+  cancel. Historical EOD download is included; the $155/mo ICE Endex fee is real-time-
+  only, so no exchange fee on history. Gives **clean daily TTF across the whole 2016+
+  panel** — no monthly-interpolation seam. **License: raw TTF CSV stays out of git**
+  (untracked `data/private/`); only derived signals/charts are publishable.
+- **Spread cadence = daily**, clean over the entire panel.
+
+The work now runs as **two parallel tracks** — Part A nowcasts need neither TTF nor
+controls (they validate against EIA), so TTF resolution never gates modelling progress.
+
+### Track 1 — control set + spread target (new-data integration)
+Thin loaders, siblings to `data/eia.py` (pure parse + `merge` + upsert). EIA series →
+existing `eia_series`; non-EIA series → a shared `market_series` table (same key shape);
+one assembler joins all onto the `signal_daily` daily grid into a new `model_panel`.
+
+1. **EIA Phase 2** (do first, ~30 min, zero-risk) — `--probe storage_l48` / `--probe
+   hh_spot` to verify the unverified v2 routes, fix the registry entry on a 404, backfill.
+   Yields Henry Hub spot + US Lower-48 storage.
+2. **TTF** — one-time Barchart CSV pull into `data/private/`; `data/ttf.py` = pure CSV
+   parser → `market_series` upsert. Wire **World Bank Pink Sheet** monthly TTF (CC-BY,
+   free) purely as a monthly-resolution cross-check on the daily series.
+3. **EUR/USD FX** — FRED `DEXUSEU` (or Yahoo `EURUSD=X`), daily EOD.
+4. **Spread target** — `spread = HH[$/MMBtu] − TTF[€/MWh]/3.412 × EUR/USD` (§2). Clean
+   daily 2016+. Unblocks Part B.
+5. **GIE AGSI+** EU storage (free API, registration key) → `market_series`.
+6. **Degree-days** US + NW Europe (NOAA free for US; NW-Europe source TBD) — Track-1 tail,
+   a control not the target.
+
+### Track 2 — Part A physical nowcasts (start now, in parallel; validate on the decade)
+Walk-forward CV, `basis='knowable'`, confidence columns as observation variance.
+7. **A1 kinematic ETA** — no training; physics baseline; validates within weeks.
+8. **A2 Poisson/NB arrivals**, **A3 Cox/Weibull survival** on queue/berth with **C2
+   hierarchical pooling across terminals** (highest-leverage move), **A4 Kalman flow-rate**.
+9. **A5 BOCPD outage nowcast** — cheap, online, asymmetric payoff (Freeport-2022 labelled).
+
+### Track 3 — Part B spread model (after Tracks 1 & 2)
+10. **AR(1)+controls baseline** — the null; FWL partial-effect harness.
+11. **BSTS (B2)** with spike-and-slab over the pre-registered signals + controls,
+    confidence-weighted; cross-check Elastic Net (B1) + PLS (B3). Report posterior
+    inclusion probabilities + predictive intervals. Two-stage: feed the Part A nowcast in.
+12. **Defer** constrained LightGBM (B5) and cross-exciting Hawkes until the event count is
+    in the tens of thousands.
+
+### First moves (decision-free)
+1. Buy Barchart Premier + download the TTF CSV (~$30, ~15 min) — the only money/manual step.
+2. EIA Phase 2 probe + backfill (~30 min) — HH spot + US storage.
+3. Start A1 kinematic ETA in parallel — no dependencies, validates fastest.
+
+### Gate items (tracked, not blocking)
+- EIA capture-rate firms when EIA's June-2026 data publishes (~late summer 2026).
+- Vintage self-validation accrues with the live tail.
 
 The deliverable arc: **confirm edge** (Part A nowcasts + FWL partial effects, defensible
 now on the decade) → **forecast the spread** (Part B, Bayesian and uncertainty-first
