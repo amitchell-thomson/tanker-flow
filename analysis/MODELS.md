@@ -98,6 +98,57 @@ EIA is the **exhaustive monthly ground truth** over the whole span. The recipe:
 **Net:** the best historical US-supply signal = **deduped NOAA∪GFW union, EIA-calibrated
 (exposure offset), regime-indicated** — all six early years kept, not discarded.
 
+### 0·3 · The failure modes "cleared to model" does *not* close
+
+The green validation gate (§ Build order) certifies the **panel** is structurally sound.
+It says nothing about the four ways the **modelling** can still manufacture a false edge.
+These are researcher-side, not data-side — the `knowable` basis and the confidence
+columns do not protect against any of them. Treat this subsection as binding protocol,
+not advice.
+
+1. **The real risk is episode memorisation, not `N_eff`.** Even `N_eff≈330` (§0)
+   *overstates* independence **for the spread target**: the decade is, in spread-variance
+   terms, a handful of macro regimes — 2016–19 glut, 2020 COVID, **2021–22 crisis/Ukraine**,
+   2023+ normalisation — and 2021–22 carries most of the realised variance. A model that
+   "works" full-sample has most likely just learned to fire on that one spike. **Mandate:**
+   score skill *per-regime and out-of-regime*, never only pooled; a signal that survives
+   only in 2021–22 is a 2021–22 dummy, not a leading indicator. (This is the empirical case
+   for the B4 regime-switching models, not a footnote to them.)
+
+2. **Lead time is a falsification test, not a hyperparameter.** Each pre-registered signal
+   implies a *physical* lead — US loadings → EU arrivals at the ~14–18 d voyage time;
+   `gas_in_transit_volume` → `gas_discharging_eu` at its convolution lag (§0·1 measured the
+   in-transit→discharge amplification this predicts). **Fix each signal's lag from the
+   mechanism *before* fitting.** If you instead let CV pick the lag that maximises in-sample
+   fit, the lag becomes a hidden free parameter and a forking path; and any "best" lag that
+   doesn't match the signal's causal lead time is evidence the relationship is spurious, not
+   a result to keep.
+
+3. **Researcher degrees of freedom is the leak `knowable` can't catch.** 34 signals × lags ×
+   horizons × transforms × bases is *thousands* of implicit tests against ~a handful of real
+   events — you **will** surface a chance-leading signal. Three hard rules:
+   - **Pre-registration (C8) is binding, not aspirational.** Commit the hypothesis list —
+     signal, expected sign, expected lead — to this file *before* fitting anything in Part B.
+   - **One true holdout, looked at once.** Carve the most recent ~12–18 mo now, write the
+     boundary down, and do not evaluate on it until the very end. Every peek-and-adjust
+     spends it; a holdout you tuned against is just another training set.
+   - **Never iterate toward a backtest/PnL number.** Tuning to a metric and re-running is the
+     most insidious overfit of all — it routes the entire search through your own choices and
+     no point-in-time discipline detects it. Decide the model from the *priors and the CV
+     protocol*, not from which variant printed the best Sharpe.
+
+4. **Forecasting the spread *level* is mostly autocorrelation.** A level fit posts a
+   flattering R² that means almost nothing (yesterday's spread ≈ today's). The honest target
+   is the forward **change** over horizon `h`, scored against the **AR(1)+controls** null
+   (§2 / Part B). Decide level-vs-difference deliberately and make sure no undifferenced
+   feature leaks the level back in.
+
+> **And not yet:** do **not** compute tradeable PnL / Sharpe in this phase. With no
+> transaction costs, spread liquidity, or capacity it will flatter every model and distract
+> from the *only* question that is answerable now — **is there an incremental, point-in-time,
+> out-of-sample lead over the §2 control set.** Tradability is a later, separate question;
+> answering it early just adds degrees of freedom (#3).
+
 ---
 
 ## 1 · Reading `signal_daily` into a model (the non-negotiables)
@@ -164,7 +215,7 @@ permutation importance for the *incremental* lift over a controls-only model.
 
 ---
 
-## Part A · Physical nowcasts (high-SNR, validate today)
+## Part A · Physical nowcasts (high-SNR, validate today) - worth adding destination estimation?
 
 Target: next-week US exports, EU arrivals 1–2 weeks out, queue/berth durations.
 Mechanically constrained → high SNR, validatable weekly against EIA, on the decade.
