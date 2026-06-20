@@ -280,21 +280,43 @@ class Sweep:
         if not await self._table_exists("signal_daily_live_vintage"):
             self.add(4, "vintage", "SKIP", "no vintage table")
             return
-        vrows = await self.conn.fetchval(
-            "SELECT count(DISTINCT bucket_date) FROM signal_daily_live_vintage")
-        if vrows <= 1:
+        # Vintage self-validation: the recomputed `knowable` series must reproduce
+        # what the pipeline PRINTED live on day d. Three things make this honest:
+        #   1. basis='knowable' only — `physical` embeds hindsight and drifts every
+        #      rebuild by design; comparing it is not a leakage test.
+        #   2. last snapshot per (key,date,scope,regime) — the log is append-only with
+        #      multiple intraday snapshots; only the final daily print is canonical.
+        #   3. fully-settled days only — `knowable` legitimately keeps changing for the
+        #      most recent ~SETTLE_DAYS while open legs/visits/queues close (their
+        #      estimated/open fractions resolve). A day is only testable once every open
+        #      item it carried has had time to terminate. Until a logged vintage day ages
+        #      past that window the property is *not yet verifiable* → SKIP, not FAIL.
+        SETTLE_DAYS = 18  # ~ the longest O-D voyage + open-visit/queue window
+        testable = await self.conn.fetchval(
+            """
+            SELECT count(DISTINCT bucket_date) FROM signal_daily_live_vintage
+            WHERE basis='knowable' AND bucket_date < current_date - $1::int
+            """, SETTLE_DAYS)
+        if not testable:
             self.add(4, "vintage", "SKIP",
-                     f"vintage has {vrows} day(s) — accrues with the live tail")
+                     f"no vintage day older than the {SETTLE_DAYS}d settling window yet "
+                     "— knowable stability not verifiable until the live tail accrues")
         else:
             mism = await self.conn.fetchval(
                 """
-                SELECT count(*) FROM signal_daily_live_vintage v
-                JOIN signal_daily s USING (signal_key, bucket_date, zone_scope, regime, basis)
-                WHERE abs(v.value - s.value) > 1e-6
-                  AND v.bucket_date < (SELECT max(bucket_date) FROM signal_daily_live_vintage)
-                """)
+                WITH last_snap AS (
+                  SELECT DISTINCT ON (signal_key, bucket_date, zone_scope, regime)
+                         signal_key, bucket_date, zone_scope, regime, value
+                  FROM signal_daily_live_vintage
+                  WHERE basis='knowable' AND bucket_date < current_date - $1::int
+                  ORDER BY signal_key, bucket_date, zone_scope, regime, printed_at DESC)
+                SELECT count(*) FROM last_snap v
+                JOIN signal_daily s USING (signal_key, bucket_date, zone_scope, regime)
+                WHERE s.basis='knowable' AND abs(v.value - s.value) > 1e-6
+                """, SETTLE_DAYS)
             self.add(4, "vintage", "FAIL" if mism else "PASS",
-                     f"{mism} knowable<>printed" if mism else "knowable==as-printed")
+                     f"{mism} knowable<>printed (over {testable} settled day(s))" if mism
+                     else f"knowable==as-printed ({testable} settled day(s))")
 
     # ---- Tier 5: confidence-column correctness -----------------------------
     async def tier5(self):
