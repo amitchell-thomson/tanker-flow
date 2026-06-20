@@ -249,6 +249,17 @@ ETA_IMMINENT_HOURS = 48
 # drops out of the persistent band at the worst possible moment — exactly during
 # final approach / berthing. Mirrors vf_rescue's ETA_RESCUE_PAST_GRACE_HOURS.
 ETA_PAST_GRACE_HOURS = 12
+# Sticky-ETA tail. Beyond the grace window, an ETA is normally treated as stale
+# and the vessel decays. But a vessel that declared an arrival, is now overdue,
+# and that we have NOT seen arrive (no terminal-polygon fix at/after its ETA) is a
+# dark inbound carrier mid-slip — exactly the one we must keep a persistent slot
+# on, not drop. GREENERGY OCEAN (2026-06) decayed tier-2 → tier-5 this way: ETA
+# ~60h past, grace only 12h, no captured arrival, so it fell out of the band while
+# actually approaching Freeport. We hold it at tier 2 up to this many hours past
+# the ETA. A vessel that genuinely arrived is already tier 1 (recent polygon fix)
+# and never reaches the tier-2 branch; the polygon-fix guard below additionally
+# rejects an arrived-and-departed vessel whose stale ETA would otherwise re-pin it.
+ETA_STICKY_PAST_HOURS = 96
 # Large base so imminent-ETA vessels sort above plain dest-declarations within
 # tier 2 (sooner ETA ⇒ higher score). Well above epoch-second scores (~1.7e9)
 # yet representable in the REAL score column.
@@ -388,7 +399,18 @@ def assign_tier(
         <= parsed_eta
         <= now + timedelta(hours=ETA_IMMINENT_HOURS)
     )
-    if eta_imminent:
+    # Sticky tail: further past the grace window (up to ETA_STICKY_PAST_HOURS) but
+    # only when we have no evidence the vessel arrived — no terminal-polygon fix
+    # at or after its declared ETA. Keeps a dark, overdue inbound carrier in the
+    # persistent band through a slipped arrival (see ETA_STICKY_PAST_HOURS).
+    eta_sticky = (
+        parsed_eta is not None
+        and now - timedelta(hours=ETA_STICKY_PAST_HOURS)
+        <= parsed_eta
+        < now - timedelta(hours=ETA_PAST_GRACE_HOURS)
+        and (last_polygon_fix_ts is None or last_polygon_fix_ts < parsed_eta)
+    )
+    if eta_imminent or eta_sticky:
         hours_to_eta = (parsed_eta - now).total_seconds() / 3600.0
         dest_label = (
             f"terminal_id={dest_terminal_id}" if dest_terminal_id else "for-orders"

@@ -76,13 +76,10 @@ from ingestion.aisstream import NUM_CONNECTIONS as _NUM_CONN  # noqa: E402
 from ingestion.aisstream import _source_label  # noqa: E402
 
 # --- The connection plan: one descriptor per live WebSocket -------------------
-# The 6 connections are 2 egress IPs × 3 each (AISstream caps 3/IP). Per worker,
-# chunks 0-1 are the persistent block and the last chunk is EITHER scan-rotation
-# OR — on the bbox-enabled second egress — the terminal-geofence catch-all. The
-# TUI knows its own (home) config directly; for the second egress it follows the
-# documented deployment (the last worker runs the catch-all) so the table mirrors
-# what aisstream.py actually opens. Drives the connections table, status dots,
-# overnight cache, and reconnect counts — all from one source of truth.
+# The connections are N egress IPs × 3 each (AISstream caps 3/IP). Per worker,
+# chunks 0-1 are the persistent block and the last chunk is the scan rotation.
+# Drives the connections table, status dots, overnight cache, and reconnect
+# counts — all from one source of truth.
 _WORKER_COUNT = max(1, _cfg.worker_count)
 _EGRESS_NAMES = {0: "home", 1: "oracle"}
 
@@ -92,12 +89,12 @@ class _Conn:
     source: str  # ais_fixes.source label this connection writes
     worker: int
     egress: str  # human egress name (home / oracle)
-    role: str  # 'persistent' | 'scan' | 'catch-all'
+    role: str  # 'persistent' | 'scan'
     covers: str  # one-line "what does it do"
-    sparse: bool  # idle minutes are normal (scan + catch-all) → wider tolerances
+    sparse: bool  # idle minutes are normal (scan) → wider tolerances
 
 
-def _build_connections(worker_count: int, home_bbox: bool) -> list[_Conn]:
+def _build_connections(worker_count: int) -> list[_Conn]:
     conns: list[_Conn] = []
     for w in range(worker_count):
         egress = _EGRESS_NAMES.get(w, f"egress-{w}")
@@ -115,36 +112,21 @@ def _build_connections(worker_count: int, home_bbox: bool) -> list[_Conn]:
                     )
                 )
                 continue
-            # Last chunk: scan rotation, unless this egress runs the catch-all.
-            is_bbox = (w == 0 and home_bbox) or (
-                worker_count > 1 and w == worker_count - 1
+            # Last chunk: scan rotation.
+            conns.append(
+                _Conn(
+                    _source_label(w, worker_count, c),
+                    w,
+                    egress,
+                    "scan",
+                    f"tier 4/5 rotation{half}",
+                    True,
+                )
             )
-            if is_bbox:
-                conns.append(
-                    _Conn(
-                        "aisstream-bbox",
-                        w,
-                        egress,
-                        "catch-all",
-                        "33 terminal boxes · all LNG",
-                        True,
-                    )
-                )
-            else:
-                conns.append(
-                    _Conn(
-                        _source_label(w, worker_count, c),
-                        w,
-                        egress,
-                        "scan",
-                        f"tier 4/5 rotation{half}",
-                        True,
-                    )
-                )
     return conns
 
 
-_CONNECTIONS = _build_connections(_WORKER_COUNT, _cfg.bbox_catchall)
+_CONNECTIONS = _build_connections(_WORKER_COUNT)
 # Kept for the existing aggregate/overnight loops that key off source labels.
 _EXPECTED_SOURCES = [c.source for c in _CONNECTIONS]
 # This (home) worker's scan-rotation connection (if any) — its last `subscribed`
@@ -159,11 +141,11 @@ _RECONNECT_GRACE_S = 4200  # ~70 min, covers the 1h planned-reconnect cycle
 
 def _conn_state(role: str, fix_age_s: float, evt_age_s: float) -> str:
     """Per-connection health: 'up' (data flowing), 'idle' (connected, no recent
-    fix — normal for the sparse scan/catch-all), or 'down'. Role-aware so an idle
-    catch-all isn't mistaken for an outage, while a silent persistent conn is."""
+    fix — normal for the sparse scan rotation), or 'down'. Role-aware so an idle
+    scan conn isn't mistaken for an outage, while a silent persistent conn is."""
     if fix_age_s < 120:
         return "up"
-    sparse = role in ("scan", "catch-all")
+    sparse = role == "scan"
     if evt_age_s < (_RECONNECT_GRACE_S if sparse else 600):
         return "idle"
     return "down"
@@ -173,7 +155,6 @@ _STATE_DOT = {"up": "[green]●[/]", "idle": "[cyan]●[/]", "down": "[red]●[/
 _ROLE_COLOR = {
     "persistent": "bright_green",
     "scan": "bright_yellow",
-    "catch-all": "bright_cyan",
 }
 
 # Unified tier palette — used across tier table, watchlist explorer, and
@@ -1320,7 +1301,7 @@ class TankerFlowApp(App):
             )
 
         # --- Per-connection liveness (shared by the status row + the table) ---
-        # Role-aware: an idle catch-all/scan is 'idle' (normal), a silent
+        # Role-aware: an idle scan conn is 'idle' (normal), a silent
         # persistent conn is 'down'. Computed once, reused below.
         fix_ages: dict[str, float] = {r["source"]: r["age_s"] for r in conn_age_rows}
         evt_ages: dict[str, float] = {
@@ -1413,7 +1394,7 @@ class TankerFlowApp(App):
                 live = f"[bold]{int(row['fix_count']):>3}[/] fix · [{lag_color}]{p95:.0f}s[/]"
 
             # 12h: total fixes + missing-minute %, lenient for the sparse conns
-            # (scan/catch-all are idle most minutes by design — not a fault).
+            # (scan rotation is idle most minutes by design — not a fault).
             if ov:
                 f12 = int(ov["fixes_12h"])
                 f12_fmt = f"{f12 / 1000:.1f}k" if f12 >= 1000 else str(f12)
@@ -1444,15 +1425,12 @@ class TankerFlowApp(App):
 
         # --- Connections summary line above the table ---
         n_persist = sum(1 for c in _CONNECTIONS if c.role == "persistent")
-        has_bbox = any(c.role == "catch-all" for c in _CONNECTIONS)
         summary = [f"[bold]{up}[/]/{len(_CONNECTIONS)} up"]
         if idle:
             summary.append(f"[cyan]{idle} idle[/]")
         if dead:
             summary.append(f"[red]{dead} down[/]")
         summary.append(f"{n_persist} persistent [dim](~{n_persist * 50} vessels)[/]")
-        if has_bbox:
-            summary.append("[bright_cyan]+ bbox catch-all[/]")
         summary.append(f"{_WORKER_COUNT} egress IP{'s' if _WORKER_COUNT > 1 else ''}")
         self.query_one("#connections-summary", Static).update(
             "  [dim]·[/]  ".join(summary)

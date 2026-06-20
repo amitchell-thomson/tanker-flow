@@ -14,6 +14,7 @@ from pipeline.scoring import (
     DEFAULT_VOYAGE_DAYS,
     ETA_IMMINENT_HOURS,
     ETA_PAST_GRACE_HOURS,
+    ETA_STICKY_PAST_HOURS,
     FSRU_TIER,
     MANUAL_TIER_OVERRIDES,
     PIN_MAX,
@@ -130,12 +131,44 @@ def test_just_passed_eta_still_holds_slot_within_grace():
     assert "ago" in reason
 
 
-def test_eta_past_grace_window_does_not_promote():
-    # Beyond the grace window the ETA is stale, not late — fall through.
+def test_eta_in_sticky_tail_without_arrival_stays_tier_2():
+    # Past the grace window but inside the sticky tail, with no terminal-polygon
+    # fix at/after the ETA: a dark, overdue inbound carrier we have not seen
+    # arrive — hold it in the persistent band (GREENERGY OCEAN, 2026-06).
+    tier, reason, _score = _assign(
+        False,
+        dest_terminal_id=None,
+        parsed_eta=NOW - timedelta(hours=ETA_PAST_GRACE_HOURS + 36),
+        last_bbox_fix_ts=NOW - timedelta(days=2),
+    )
+    assert tier == 2
+    assert "ago" in reason
+
+
+def test_eta_in_sticky_tail_but_already_arrived_does_not_pin():
+    # Overdue ETA inside the sticky tail, but a terminal-polygon fix landed AFTER
+    # it (and is now >3d old, so tier 1 no longer fires) — the vessel
+    # demonstrably arrived, so the stale ETA must not re-pin it. Falls through to
+    # its position tier (bbox → tier 3) instead of sticking at tier 2.
+    eta = NOW - timedelta(hours=90)  # in (grace, sticky] window
+    arrival = eta + timedelta(hours=2)  # after the ETA, ~3.7d ago (> 3d window)
     tier, _reason, _score = _assign(
         False,
         dest_terminal_id=None,
-        parsed_eta=NOW - timedelta(hours=ETA_PAST_GRACE_HOURS + 2),
+        parsed_eta=eta,
+        last_polygon_fix_ts=arrival,
+        last_approach_fix_ts=arrival,
+        last_bbox_fix_ts=NOW - timedelta(days=2),
+    )
+    assert tier == 3
+
+
+def test_eta_past_sticky_window_does_not_promote():
+    # Beyond the sticky tail the ETA is genuinely stale, not late — fall through.
+    tier, _reason, _score = _assign(
+        False,
+        dest_terminal_id=None,
+        parsed_eta=NOW - timedelta(hours=ETA_STICKY_PAST_HOURS + 2),
         last_bbox_fix_ts=NOW - timedelta(days=2),
     )
     assert tier == 3

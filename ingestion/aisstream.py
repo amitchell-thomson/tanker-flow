@@ -18,7 +18,6 @@ from . import vf_rescue
 from .dynamic_enrichment import EnrichmentState, enrichment_worker, load_known_mmsis
 from .metrics import MinuteAggregator, classify_zone, record_event
 from .models import AISMessage, PositionReport, ShipStaticData
-from .terminal_boxes import load_terminal_boxes
 
 logging.basicConfig(
     level=logging.INFO,
@@ -154,11 +153,6 @@ PORT_EVENTS_INTERVAL_SECONDS = 120
 # before this the panel only moved when run by hand, going hours/days stale.
 SIGNALS_INTERVAL_SECONDS = 600
 
-# Berth auto-add cadence. Candidates accrue slowly (a tanker has to actually berth
-# at an LNG terminal) and resolution is a cheap negative-cached query, so a 30-min
-# pass is ample; aligns with the rescue loop's tempo.
-BERTH_DISCOVERY_INTERVAL_SECONDS = 1800
-
 # Use full-globe bbox; the MMSI filter does the actual constraining.
 GLOBAL_BBOX = [[[-85.0, -180.0], [85.0, 180.0]]]
 
@@ -175,11 +169,6 @@ class IngestionState:
 
     source_name: str = "aisstream"
     non_tanker_mmsis: set[int] = field(default_factory=set)
-    # Positive allow-list for the bbox catch-all (None on MMSI-filtered conns,
-    # where the server-side filter already constrains). When set, parse_message
-    # drops any MMSI not in it — the bbox hears every ship type at a terminal, so
-    # this keeps only our in-scope LNG carriers (FSRUs excluded; see bbox loop).
-    allow_mmsis: set[int] | None = None
     fix_inserts: int = 0
     registry_upserts: int = 0
     state_inserts: int = 0
@@ -192,15 +181,6 @@ class IngestionState:
     # flush time so a vessel the scan rotation just discovered near a terminal
     # isn't dropped before the next hourly scoring pass. Cleared each flush.
     inzone_mmsi: dict[int, str] = field(default_factory=dict)
-    # Phase-1 discovery capture (bbox catch-all only). An UNKNOWN tanker (AIS type
-    # 80-89) loitering in a terminal geofence is almost certainly an LNG carrier we
-    # never registered. discovery_tanker_mmsis flags an unlisted MMSI once its
-    # ShipStaticData shows a tanker type, so its subsequent PositionReports are
-    # captured for position; discovery_buf holds rows to upsert into
-    # discovery_candidates. Resets per connection (~hourly); the table accumulates
-    # across reconnects via ON CONFLICT (mmsi). No-op on MMSI-filtered conns.
-    discovery_tanker_mmsis: set[int] = field(default_factory=set)
-    discovery_buf: list[tuple] = field(default_factory=list)
 
 
 def build_subscribe_payload(api_key: str, mmsis: list[int]) -> dict:
@@ -209,21 +189,6 @@ def build_subscribe_payload(api_key: str, mmsis: list[int]) -> dict:
         "BoundingBoxes": GLOBAL_BBOX,
         "FilterMessageTypes": ["PositionReport", "ShipStaticData"],
         "FiltersShipMMSI": [str(m) for m in mmsis],
-    }
-
-
-def build_bbox_subscribe_payload(api_key: str, boxes: list[list[list[float]]]) -> dict:
-    """Stage-3c catch-all: subscribe to a geofence (the terminal-approach boxes)
-    with NO MMSI filter, so we hear every vessel there — the point is to catch the
-    LNG carriers we did NOT predict into a slot. ShipStaticData is included (on top
-    of PositionReport) for Phase-1 discovery capture: it carries the AIS ship type,
-    which lets us flag UNKNOWN tankers (type 80-89) loitering at a terminal as
-    likely-missed LNG carriers (see _capture_discovery_candidate). The allow-list
-    (is_lng_carrier, non-FSRU) still drops everything else before insert."""
-    return {
-        "APIKey": api_key,
-        "BoundingBoxes": boxes,
-        "FilterMessageTypes": ["PositionReport", "ShipStaticData"],
     }
 
 
@@ -260,6 +225,33 @@ async def load_persistent_mmsis(pool: asyncpg.Pool) -> list[int]:
             PERSISTENT_SLOTS - len(pinned_mmsis),
         )
         mmsis = pinned_mmsis + [r["mmsi"] for r in fill]
+        # Backfill any persistent slots the pins + tier-1-3 band left idle. The
+        # band is routinely smaller than PERSISTENT_SLOTS (there just aren't 100
+        # near-terminal vessels per worker), so without this those slots sit
+        # empty while tier-4/5 vessels rotate slowly through the 50-slot scan
+        # connection. Fill the remainder with the highest-value scan candidates —
+        # tier-4 before tier-5, and within a tier the recently-transmitting ones
+        # first (last_fix_ts DESC) so a continuous slot goes to a vessel we can
+        # actually hear, not a dark mid-ocean hull. FSRUs are excluded (they have
+        # their own low-frequency scan quota). These backfilled MMSIs are written
+        # back as slot_kind='persistent', so load_scan_mmsis drops them from the
+        # scan pools next cycle (no double-subscribe). Pure additive: nothing is
+        # removed, so the band never loses coverage it had before.
+        spare = PERSISTENT_SLOTS - len(mmsis)
+        if spare > 0:
+            backfill = await conn.fetch(
+                f"""
+                SELECT mmsi FROM priority_watchlist
+                WHERE tier >= 4 AND NOT is_pinned AND {part}
+                  AND mmsi <> ALL($1::BIGINT[])
+                  AND mmsi NOT IN (SELECT mmsi FROM vessel_registry WHERE is_fsru)
+                ORDER BY tier ASC, last_fix_ts DESC NULLS LAST, score DESC
+                LIMIT $2
+                """,
+                mmsis,
+                spare,
+            )
+            mmsis = mmsis + [r["mmsi"] for r in backfill]
         if mmsis:
             return mmsis
         # Cold start: priority_watchlist not yet populated. Fall back to the
@@ -285,12 +277,15 @@ async def load_persistent_mmsis(pool: asyncpg.Pool) -> list[int]:
     return [r["mmsi"] for r in rows]
 
 
-# A vessel is "scannable" if it is not already held in a persistent slot and is
-# either persistent-band overflow (tier<=3 that didn't win a slot — slot_kind is
-# NULL or 'scan' from the previous cycle) or tier>=4. slot_kind is one cycle
-# stale, so a vessel newly promoted to persistent may be briefly double-covered;
-# that is harmless (one wasted scan slot for <=1h) and self-corrects next cycle.
-_SCANNABLE = "((tier <= 3 AND (slot_kind IS NULL OR slot_kind = 'scan')) OR tier >= 4)"
+# A vessel is "scannable" if it is not already held in a persistent slot — i.e.
+# slot_kind is NULL or 'scan' (not 'persistent'/'pinned') from the previous
+# cycle. This covers persistent-band overflow (tier<=3 that didn't win a slot)
+# AND tier>=4 vessels, while excluding the tier-4/5 hulls the persistent backfill
+# now subscribes continuously (load_persistent_mmsis) so they aren't double-
+# covered by a scan slot. slot_kind is one cycle stale, so a vessel newly moved
+# between bands may be briefly double-covered; that is harmless (one wasted scan
+# slot for <=1h) and self-corrects next cycle.
+_SCANNABLE = "(slot_kind IS NULL OR slot_kind = 'scan')"
 
 
 async def load_scan_mmsis(pool: asyncpg.Pool) -> list[int]:
@@ -382,8 +377,29 @@ async def load_scan_mmsis(pool: asyncpg.Pool) -> list[int]:
                 SCAN_OVERFLOW_SLOTS,
                 order_by="tier ASC, score DESC, last_scan_window_at ASC NULLS FIRST",
             )
-            await pick("tier = 4", SCAN_TIER4_SLOTS)
-            await pick("tier = 5", SCAN_TIER5_SLOTS)
+            # tier-4/5: exclude vessels the persistent backfill already holds
+            # (slot_kind='persistent'/'pinned') so a continuously-covered hull
+            # doesn't also burn a rotating scan slot.
+            await pick(
+                "tier = 4 AND (slot_kind IS NULL OR slot_kind = 'scan')",
+                SCAN_TIER4_SLOTS,
+            )
+            # tier-5 reacquisition priority: a tier-5 vessel carrying a recent
+            # parsed ETA is an inbound carrier whose arrival is approaching even
+            # though its last fix has aged out — far higher reacquisition value
+            # than a dark hull with no declared destination. Sweep those first,
+            # then fall back to pure least-recently-scanned rotation. Bounded: the
+            # recent-ETA subset is small (imminent/sticky ETAs are already lifted
+            # to tier 2 by scoring), and picked vessels get their scan window
+            # stamped, so non-ETA tier-5 hulls still rotate through each cycle.
+            await pick(
+                "tier = 5 AND (slot_kind IS NULL OR slot_kind = 'scan')",
+                SCAN_TIER5_SLOTS,
+                order_by=(
+                    "(parsed_eta IS NOT NULL AND parsed_eta > now() - INTERVAL '14 days') DESC, "
+                    "last_scan_window_at ASC NULLS FIRST"
+                ),
+            )
             await pick("TRUE", SCAN_FSRU_SLOTS, only_fsru=True)
             # Roll over any shortfall onto whatever is scannable, tier-first so
             # leftover overflow is preferred over tier-4 over tier-5. FSRUs stay
@@ -454,58 +470,6 @@ def chunk_persistent(mmsis: list[int], num_chunks: int) -> list[list[int]]:
     return chunks
 
 
-def _capture_discovery_candidate(
-    msg: "PositionReport | ShipStaticData",
-    mmsi: int,
-    ingest_state: IngestionState,
-) -> None:
-    """Phase-1 discovery capture for the bbox catch-all (called only for MMSIs the
-    allow-list would otherwise drop). An UNKNOWN MMSI whose ShipStaticData shows a
-    tanker type (80-89) is recorded to discovery_candidates — a tanker loitering at
-    an LNG terminal geofence is almost certainly an LNG carrier we never
-    registered. Once flagged, its PositionReports attach the latest position so the
-    is-it-at-an-LNG-berth refinement can run offline (PostGIS against the berth
-    polygons), keeping this hot path free of spatial work. The two message shapes
-    upsert into the same row (COALESCE merge on mmsi); ShipStaticData always lands
-    first (it sets the flag), so the row never lacks a type."""
-    if isinstance(msg, ShipStaticData):
-        vtype = msg.Message.Type
-        if vtype in TANKER_TYPES:
-            ingest_state.discovery_tanker_mmsis.add(mmsi)
-            ingest_state.discovery_buf.append(
-                (
-                    mmsi,
-                    vtype,
-                    msg.MetaData.ShipName,
-                    msg.Message.ImoNumber,
-                    None,  # lat — attached from PositionReport
-                    None,  # lon
-                    None,  # sog
-                    None,  # nav_status
-                    msg.MetaData.time_utc,
-                )
-            )
-        elif vtype is not None:
-            # Confirmed non-tanker: stop tracking so its positions aren't captured.
-            ingest_state.discovery_tanker_mmsis.discard(mmsi)
-    elif (
-        isinstance(msg, PositionReport) and mmsi in ingest_state.discovery_tanker_mmsis
-    ):
-        ingest_state.discovery_buf.append(
-            (
-                mmsi,
-                None,  # ais_type — already set by ShipStaticData
-                None,  # ship_name
-                None,  # imo
-                msg.Message.Latitude,
-                msg.Message.Longitude,
-                msg.Message.Sog,
-                msg.Message.NavigationalStatus,
-                msg.MetaData.time_utc,
-            )
-        )
-
-
 def parse_message(
     raw: str | bytes,
     ingest_state: IngestionState,
@@ -525,14 +489,6 @@ def parse_message(
         return
 
     mmsi = msg.MetaData.MMSI
-
-    # Bbox catch-all: keep only our in-scope LNG carriers (the allow-list); the
-    # geofence otherwise floods us with every ship type near the terminal. No-op
-    # on MMSI-filtered connections (allow_mmsis is None). Before dropping an
-    # unlisted MMSI, run the Phase-1 discovery capture (unknown-tanker-at-terminal).
-    if ingest_state.allow_mmsis is not None and mmsi not in ingest_state.allow_mmsis:
-        _capture_discovery_candidate(msg, mmsi, ingest_state)
-        return
 
     if isinstance(msg, PositionReport):
         if mmsi in ingest_state.non_tanker_mmsis:
@@ -646,18 +602,22 @@ async def flush_buffers(pool: asyncpg.Pool, ingest_state: IngestionState) -> Non
     fix_batch = ingest_state.fix_buf
     registry_batch = ingest_state.registry_buf
     state_batch = ingest_state.state_buf
-    discovery_batch = ingest_state.discovery_buf
     inzone = ingest_state.inzone_mmsi
-    if not fix_batch and not registry_batch and not state_batch and not discovery_batch:
+    if not fix_batch and not registry_batch and not state_batch:
         return
     ingest_state.fix_buf = []
     ingest_state.registry_buf = []
     ingest_state.state_buf = []
-    ingest_state.discovery_buf = []
     ingest_state.inzone_mmsi = {}
 
     async with pool.acquire() as conn:
         if fix_batch:
+            # Sort by the conflict key (fix_ts, mmsi) so every writer acquires
+            # ON CONFLICT row/index locks in the same order. The two-IP workers
+            # (home + Oracle VM) see the same AIS messages and so emit identical
+            # (fix_ts, mmsi) keys; without a stable lock order, overlapping
+            # batches in differing arrival order deadlock each other.
+            fix_batch.sort(key=lambda r: (r[0], r[1]))
             try:
                 await conn.executemany(
                     """
@@ -722,57 +682,11 @@ async def flush_buffers(pool: asyncpg.Pool, ingest_state: IngestionState) -> Non
                 # ON CONFLICT (state_ts, mmsi) DO NOTHING — safe to replay.
                 ingest_state.state_buf = state_batch + ingest_state.state_buf
 
-        if discovery_batch:
-            try:
-                await conn.executemany(
-                    """
-                    INSERT INTO discovery_candidates
-                        (mmsi, ais_type, ship_name, imo, lat, lon, sog,
-                         nav_status, first_seen, last_seen, n_msgs)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, 1)
-                    ON CONFLICT (mmsi) DO UPDATE SET
-                        ais_type   = COALESCE(EXCLUDED.ais_type, discovery_candidates.ais_type),
-                        ship_name  = COALESCE(EXCLUDED.ship_name, discovery_candidates.ship_name),
-                        imo        = COALESCE(EXCLUDED.imo, discovery_candidates.imo),
-                        lat        = COALESCE(EXCLUDED.lat, discovery_candidates.lat),
-                        lon        = COALESCE(EXCLUDED.lon, discovery_candidates.lon),
-                        sog        = COALESCE(EXCLUDED.sog, discovery_candidates.sog),
-                        nav_status = COALESCE(EXCLUDED.nav_status, discovery_candidates.nav_status),
-                        first_seen = LEAST(discovery_candidates.first_seen, EXCLUDED.first_seen),
-                        last_seen  = GREATEST(discovery_candidates.last_seen, EXCLUDED.last_seen),
-                        n_msgs     = discovery_candidates.n_msgs + 1
-                    """,
-                    discovery_batch,
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Batch discovery upsert failed ({len(discovery_batch)} rows):"
-                    f" {e} — re-queuing for retry"
-                )
-                # Idempotent ON CONFLICT (mmsi) upsert — safe to replay.
-                ingest_state.discovery_buf = (
-                    discovery_batch + ingest_state.discovery_buf
-                )
-
         if inzone:
             try:
                 await promote_inzone(conn, inzone)
             except Exception as e:
                 logger.warning(f"Inline in-zone promotion failed: {e}")
-
-
-async def load_lng_allowlist(pool: asyncpg.Pool) -> set[int]:
-    """MMSIs the bbox catch-all is allowed to inject: in-scope LNG carriers,
-    FSRUs excluded. FSRUs sit moored at their host for months and are
-    short-circuited to a synthetic event (pipeline.port_events) — re-hearing them
-    on the geofence adds no signal and churns the band (a probe found 3/5 raw
-    catches were deployed FSRUs). Reloaded each reconnect so newly-discovered
-    newbuilds (IGU discovery → registry) join the allow-list within the hour."""
-    rows = await pool.fetch(
-        "SELECT mmsi FROM vessel_registry "
-        "WHERE is_lng_carrier AND NOT is_fsru AND NOT excluded"
-    )
-    return {r["mmsi"] for r in rows}
 
 
 async def connect_and_drain(
@@ -785,10 +699,7 @@ async def connect_and_drain(
 ) -> None:
     """One WebSocket lifecycle: subscribe with `payload` + drain until disconnect.
 
-    Shared by the MMSI-filtered connections and the Stage-3c bbox catch-all — the
-    only differences are the `payload` (server-side MMSI filter vs terminal
-    geofence) and the allow-list carried on `ingest_state`. `detail` is logged and
-    recorded to ingestion_events.
+    `detail` is logged and recorded to ingestion_events.
 
     Tasks: drain_socket, parser, flusher, watchdog, planned_reconnect. No rotation
     within a connection; the caller's loop builds a fresh subscription on each
@@ -1016,25 +927,6 @@ async def ingest():
     if settings.run_vf_rescue:
         bg_tasks.append(asyncio.create_task(vf_rescue_loop()))
 
-    async def berth_discovery_loop():
-        # Phase-2 auto-add: periodically resolve unknown tankers the bbox catch-all
-        # caught sitting in an LNG berth — VF-enrich, and register the ones VF
-        # confirms are LNG carriers (scripts/discover_berth_tankers.py). Shares the
-        # VF glide budget (logs to vf_rescue_log); self-limiting via a per-candidate
-        # negative cache. No initial run — discovery_candidates is filled by the
-        # catch-all worker over time.
-        from scripts.discover_berth_tankers import run as run_berth_discovery
-
-        while True:
-            await asyncio.sleep(BERTH_DISCOVERY_INTERVAL_SECONDS)
-            try:
-                await run_berth_discovery(dry_run=False)
-            except Exception as e:
-                logger.warning(f"berth_discovery run failed: {e}")
-
-    if settings.run_berth_discovery:
-        bg_tasks.append(asyncio.create_task(berth_discovery_loop()))
-
     async def connection_loop(source_name: str, chunk_index: int):
         """Reconnect loop owning one MMSI-filtered subscription. On each
         (re)connect:
@@ -1056,14 +948,7 @@ async def ingest():
                     # Persistent conn 0 is the only one that writes the slot
                     # assignments — coordinated single-writer, no races.
                     if chunk_index == 0:
-                        # When this worker runs the bbox catch-all in place of a
-                        # scan connection, there are no scan slots to mark — the
-                        # geofence covers terminal discovery, not a fixed MMSI set.
-                        scan_mmsis = (
-                            []
-                            if settings.bbox_catchall
-                            else await load_scan_mmsis(pool)
-                        )
+                        scan_mmsis = await load_scan_mmsis(pool)
                         try:
                             await mark_slot_assignments(
                                 pool, persistent_mmsis, scan_mmsis
@@ -1108,72 +993,13 @@ async def ingest():
                 )
                 await asyncio.sleep(60)
 
-    async def bbox_connection_loop(source_name: str):
-        """Reconnect loop owning the Stage-3c terminal-bbox catch-all (replaces
-        this worker's scan connection when settings.bbox_catchall). Subscribes to
-        the terminal-approach geofence with no MMSI filter and injects fixes for
-        any in-scope LNG carrier (FSRUs excluded) heard there — the free safety-net
-        for cold-start / crowd-out carriers the MMSI filter missed. Fixes dedup
-        against the MMSI feed via the ais_fixes (fix_ts, mmsi) unique index, so
-        it's purely additive; the allow-list + boxes reload each reconnect."""
-        while True:
-            try:
-                allow = await load_lng_allowlist(pool)
-                boxes = await load_terminal_boxes(pool)
-                if not boxes:
-                    logger.warning(
-                        f"[{source_name}] no terminal boxes (terminal_zones empty?)"
-                        " — sleeping 60s"
-                    )
-                    await asyncio.sleep(60)
-                    continue
-                ingest_state = IngestionState(
-                    source_name=source_name, allow_mmsis=allow
-                )
-                payload = build_bbox_subscribe_payload(
-                    settings.aisstream_api_key, boxes
-                )
-                await connect_and_drain(
-                    url,
-                    pool,
-                    ingest_state,
-                    payload,
-                    source_name,
-                    {"boxes": len(boxes), "allow_mmsis": len(allow)},
-                )
-            except websockets.ConnectionClosed as e:
-                logger.warning(
-                    f"[{source_name}] Websocket closed: {e}. Reconnecting in 30s"
-                )
-                await record_event(
-                    pool,
-                    source_name,
-                    "error",
-                    {"kind": "ConnectionClosed", "msg": str(e)},
-                )
-                await asyncio.sleep(30)
-            except Exception as e:
-                logger.warning(
-                    f"[{source_name}] Unexpected error: {e}. Reconnecting in 60s"
-                )
-                await record_event(
-                    pool,
-                    source_name,
-                    "error",
-                    {"kind": type(e).__name__, "msg": str(e)},
-                )
-                await asyncio.sleep(60)
-
-    def make_connection_loop(i: int):
-        # The bbox-enabled worker swaps its scan connection (chunk SCAN_CHUNK_INDEX)
-        # for the single terminal-geofence catch-all; the persistent chunks are
-        # unchanged. Default off ⇒ all NUM_CONNECTIONS are MMSI-filtered as before.
-        if settings.bbox_catchall and i == SCAN_CHUNK_INDEX:
-            return bbox_connection_loop("aisstream-bbox")
-        return connection_loop(_source_label(WORKER_ID, WORKER_COUNT, i), i)
-
     try:
-        await asyncio.gather(*[make_connection_loop(i) for i in range(NUM_CONNECTIONS)])
+        await asyncio.gather(
+            *[
+                connection_loop(_source_label(WORKER_ID, WORKER_COUNT, i), i)
+                for i in range(NUM_CONNECTIONS)
+            ]
+        )
     finally:
         for t in bg_tasks:
             t.cancel()

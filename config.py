@@ -35,24 +35,6 @@ class Settings(BaseSettings):
     # Reads port_events and writes shared state ⇒ primary-only singleton like the above.
     run_signals: bool | None = None
     run_vf_rescue: bool | None = None
-    # Phase-2 berth auto-add (scripts/discover_berth_tankers.py): consume
-    # discovery_candidates, VF-enrich unknown tankers found in an LNG berth, and
-    # register the confirmed LNG carriers. Spends VF credits + reads shared state,
-    # so it's a primary-only singleton like the loops above. It consumes whatever
-    # the bbox catch-all worker wrote, so it runs on the primary even though the
-    # catch-all itself runs on the second egress.
-    run_berth_discovery: bool | None = None
-
-    # Stage-3c terminal-bbox catch-all. When true, THIS worker replaces its
-    # scan-rotation connection (chunk SCAN_CHUNK_INDEX) with a single bbox-only
-    # subscription over the terminal-approach boxes, injecting fixes for any
-    # is_lng_carrier (non-FSRU) heard there. It's the free safety-net for the
-    # cold-start / crowd-out carriers MMSI filtering misses (a 2026-06-11 throttle
-    # probe heard ~337 msg/min and re-acquired weeks-blind carriers at terminals;
-    # the FSRU filter is because ~3/5 raw catches were deployed FSRUs we
-    # short-circuit anyway). Enable on EXACTLY ONE worker (the second egress) so
-    # the single global geofence isn't double-subscribed. Default off ⇒ unchanged.
-    bbox_catchall: bool = False
 
     @model_validator(mode="after")
     def _default_singletons_to_primary(self) -> "Settings":
@@ -65,8 +47,6 @@ class Settings(BaseSettings):
             self.run_signals = primary
         if self.run_vf_rescue is None:
             self.run_vf_rescue = primary
-        if self.run_berth_discovery is None:
-            self.run_berth_discovery = primary
         return self
 
     @property
