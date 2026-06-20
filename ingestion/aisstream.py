@@ -12,7 +12,7 @@ from rich.logging import RichHandler
 
 from config import settings
 
-from pipeline import port_events, scoring
+from pipeline import port_events, scoring, signal
 
 from . import vf_rescue
 from .dynamic_enrichment import EnrichmentState, enrichment_worker, load_known_mmsis
@@ -145,6 +145,14 @@ SCORING_INTERVAL_SECONDS = 300
 # without ever exposing a partial table. Minutes-scale latency is well inside what
 # the signal layer needs (outage/queue nowcasts, not per-second updates).
 PORT_EVENTS_INTERVAL_SECONDS = 120
+
+# Periodic signal_daily rebuild cadence. signal.run() TRUNCATE+swaps the whole
+# panel (legs/visits/queues → 34 signals, both bases) off the latest port_events
+# and appends the live as-printed `knowable` vintage. Coarser than the port_events
+# loop (the panel is a daily nowcast, not per-second) and a multiple of it, so each
+# rebuild reads a freshly-rebuilt port_events. Replaces the manual `make signals` —
+# before this the panel only moved when run by hand, going hours/days stale.
+SIGNALS_INTERVAL_SECONDS = 600
 
 # Berth auto-add cadence. Candidates accrue slowly (a tanker has to actually berth
 # at an LNG terminal) and resolution is a cheap negative-cached query, so a 30-min
@@ -907,7 +915,7 @@ async def ingest():
     url = "wss://stream.aisstream.io/v0/stream"
 
     # Singleton background tasks must run on exactly ONE worker — they recompute
-    # shared state (scoring / port_events) or spend the shared VF credit budget
+    # shared state (scoring / port_events / signals) or spend the shared VF credit budget
     # (rescue + masterdata enrichment). The Settings validator defaults each flag
     # to "primary only" (worker 0); this guard refuses an explicit misconfig that
     # would double-spend VF credits from a non-primary worker.
@@ -918,11 +926,13 @@ async def ingest():
             "budget and must run on worker 0 only)."
         )
     logger.info(
-        "worker %d/%d · run_scoring=%s run_port_events=%s run_vf_rescue=%s",
+        "worker %d/%d · run_scoring=%s run_port_events=%s run_signals=%s "
+        "run_vf_rescue=%s",
         settings.worker_id,
         settings.worker_count,
         settings.run_scoring,
         settings.run_port_events,
+        settings.run_signals,
         settings.run_vf_rescue,
     )
 
@@ -971,6 +981,24 @@ async def ingest():
 
     if settings.run_port_events:
         bg_tasks.append(asyncio.create_task(port_events_loop()))
+
+    async def signals_loop():
+        # Periodic full rebuild of signal_daily so the panel stays near-live rather
+        # than waiting for a manual `make signals` (the gap that left it ~36h stale,
+        # 2026-06-20). run() reads the latest port_events (rebuilt by the loop above),
+        # writes via an atomic staging swap, and snapshot_vintage=True appends the
+        # live as-printed `knowable` values backing the vintage self-validation. No
+        # initial run — it needs a populated port_events, which port_events_loop
+        # produces first (its 120s cadence is well inside this 600s one).
+        while True:
+            await asyncio.sleep(SIGNALS_INTERVAL_SECONDS)
+            try:
+                await signal.run(pool, snapshot_vintage=True)
+            except Exception as e:
+                logger.warning(f"signal_daily rebuild failed: {e}")
+
+    if settings.run_signals:
+        bg_tasks.append(asyncio.create_task(signals_loop()))
 
     async def vf_rescue_loop():
         # Backstop for AIS gaps: periodically fetch live positions from

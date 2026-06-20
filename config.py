@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     # override. A non-primary worker that leaves these unset runs pure ingestion.
     run_scoring: bool | None = None
     run_port_events: bool | None = None
+    # signal_daily rebuild (TRUNCATE+swap of the panel + live-vintage snapshot).
+    # Reads port_events and writes shared state ⇒ primary-only singleton like the above.
+    run_signals: bool | None = None
     run_vf_rescue: bool | None = None
     # Phase-2 berth auto-add (scripts/discover_berth_tankers.py): consume
     # discovery_candidates, VF-enrich unknown tankers found in an LNG berth, and
@@ -58,6 +61,8 @@ class Settings(BaseSettings):
             self.run_scoring = primary
         if self.run_port_events is None:
             self.run_port_events = primary
+        if self.run_signals is None:
+            self.run_signals = primary
         if self.run_vf_rescue is None:
             self.run_vf_rescue = primary
         if self.run_berth_discovery is None:
