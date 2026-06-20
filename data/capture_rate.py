@@ -1,7 +1,7 @@
 """Capture-rate validation: captured US LNG-export cargoes ÷ EIA-implied cargoes.
 
 Phase 1b of the EIA work (docs/design-2026-06-08-data-eia.md), the metric the
-park is blocked on (park-checkups #13): AIS alone never reveals what it *missed*,
+park is blocked on (pipeline-health #13): AIS alone never reveals what it *missed*,
 so the only way to answer "what fraction of real US LNG exports do we capture?"
 is to divide our captured cargoes by an exogenous ground truth — EIA's monthly
 national LNG-export volume (`eia_series`, series N9133US2, MMcf).

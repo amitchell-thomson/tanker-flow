@@ -4,7 +4,7 @@ One-shot, idempotent batch fetcher (sibling to `ingestion/vesselfinder.py`):
 hit the EIA v2 JSON API, upsert tidy rows into `eia_series` keyed by
 (series_id, period). Two roles, one module (see docs/design-2026-06-08-data-eia.md):
 
-  Phase 1 — capture-rate ground truth (the long pole, park-checkup #13):
+  Phase 1 — capture-rate ground truth (the long pole, pipeline-health #13):
     monthly US LNG export volume. Lets us compute captured cargoes (our
     `departed` events) ÷ EIA-implied cargoes per month — the signal's capture
     *ratio*, not just its structural completeness.

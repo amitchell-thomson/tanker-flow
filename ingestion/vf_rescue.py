@@ -110,7 +110,7 @@ GLIDE_HEADROOM_DAYS = 60
 # Surplus this far below the line (in days of glide-rate spend) means P0 demand
 # alone is structurally above the glide rate — P≥1 starvation can no longer pay
 # it back. Log loudly; the decision (top up credits vs tighten P0 gates) is
-# human (park-checkup #6 watches for it).
+# human (pipeline-health #6 watches for it).
 SURPLUS_ALARM_DAYS = 7
 TER_COST = 1
 SAT_COST = 10  # defensive only — we never request satellite (sat=0); 1cr in practice
@@ -1166,7 +1166,7 @@ async def log_skipped_budget(
     0 credits, recheck_at NULL (no cooldown — the vessel stays eligible for later
     cycles / tomorrow's budget). One row per vessel per UTC day. This makes unmet
     demand measurable: a vessel with a skipped_budget row and no later billed row
-    the same day went truly unserved (see park-checkup #6)."""
+    the same day went truly unserved (see pipeline-health #6)."""
     async with pool.acquire() as conn:
         already = {r["mmsi"] for r in await conn.fetch(SKIPPED_TODAY_SQL)}
         for c in skipped:
@@ -1534,7 +1534,7 @@ async def run_rescue(
             f"vf_rescue: balance {abs(surplus):.0f}cr BEHIND the glide line "
             f"(> {SURPLUS_ALARM_DAYS}d of glide rate) — priority-0 demand is "
             f"structurally above the glide rate; top up credits or tighten P0 "
-            f"gates (see park-checkup #6)"
+            f"gates (see pipeline-health #6)"
         )
     summary = {
         "selected": len(candidates),
