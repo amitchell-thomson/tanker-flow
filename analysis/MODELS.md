@@ -215,7 +215,7 @@ permutation importance for the *incremental* lift over a controls-only model.
 
 ---
 
-## Part A · Physical nowcasts (high-SNR, validate today) - worth adding destination estimation?
+## Part A · Physical nowcasts (high-SNR, validate today)
 
 Target: next-week US exports, EU arrivals 1–2 weeks out, queue/berth durations.
 Mechanically constrained → high SNR, validatable weekly against EIA, on the decade.
@@ -250,6 +250,56 @@ spread variance. Bayesian Online Change-Point Detection tracks the run-length po
 `P(r_t|y_{1:t})` — almost no training history needed. Feeds off `days_since_departed`,
 `us_queue_formation_wow`. Being 24–48 h early on a Freeport-style outage beats any
 smooth R².
+
+**A6 · Destination / routing nowcast — call EU-bound from the Gulf exit (validated 2026-06-17).**
+The live in-transit stock is **81 % `unknown`-destination** and `declared_eu_share` is
+effectively dead (6 days), so the highest-value family — *where the marginal cargo goes* —
+is blind exactly where it matters most (live, pre-arrival). It is recoverable from
+geometry: a US-Gulf cargo bound for Europe must exit through the **Straits of Florida** and
+turn NE up the Atlantic, while Asia-bound cargoes route south (Yucatán → Panama). **Decade
+validation** (5,955 laden NOAA Gulf departures): a vessel seen **NE-bound in the Straits**
+arrives at an EU terminal **64–68 %** of the time vs **9 %** for those not seen crossing
+(**≈18× odds**); the crossing is observed **~2.5 d after departure**, giving **~13.5 d of
+lead** on the EU arrival, at **59 % recall**. The 64–68 % is a *floor* — the misses are
+mostly un-captured EU arrivals + Latin-America/Caribbean Atlantic cargoes, not Asia. **The
+heading gate is essential, not cosmetic:** the box is ~50/50 NE-outbound vs SW-returning-to-
+reload, so without COG (≈100 % populated) half the "crossings" are ballast returners.
+
+*Build.* **Chokepoint geofences** (Straits-of-Florida NE = EU/Atlantic; the Yucatán/Panama
+corridor is *out of terrestrial coverage* → the detector is **one-sided**: a NE crossing is
+strong positive EU evidence, absence is weak). Emit a **probabilistic destination** per open
+laden leg — prior = EIA exports-by-destination base rate, likelihood = chokepoint + heading
+— and use it to (a) split the `gas_in_transit_volume` `unknown` band and (b) revive the
+intent family (`declared_eu_share` → an `intent_eu_share` fusing declared + inferred;
+`diversion_arbitrage`). Leakage-safe by construction (inference at `d` uses only fixes ≤ `d`;
+validate the `knowable` call against the `physical` arrival). It is a clean supervised
+problem — decade arrival labels + EIA destination ground truth — so report accuracy and lead
+*per chokepoint*. Improves *lead time* on the headline at-sea signal, which §0·3 makes a
+first-class scoring axis.
+
+> ⚠ **Live coverage is the prerequisite, not the signal.** Historically NOAA was exhaustive
+> (59 % caught); on the **live MMSI-filter feed only ~5 % of departures are caught at the
+> Straits (5 / 104)** — the watchlist demotes a vessel as it leaves the terminal, so it is
+> unsubscribed before Florida. The fix is an ingestion change, not a model change; the
+> Straits are inside terrestrial AISstream range, so coverage is *free* once the vessel is
+> kept in a slot:
+>
+> **Outbound-transit scoring pin (spec).** In `pipeline/scoring.py`, beside the existing
+> open-leg *approach* pin (`is_pinned`):
+> - **Trigger** — a vessel whose latest event is a laden `departed` from a US export
+>   terminal (`zone IN (usgulf, usatlantic)`), within `OUTBOUND_TRANSIT_DAYS` (≈5 d) of that
+>   departure and not yet past the Straits (still south/west of ~27 °N off Florida). Pin →
+>   tier 1 / persistent slot so AISstream keeps delivering its fixes. Exclude FSRUs.
+> - **Release** — a fix clearing the Straits (east of Florida, above ~26.5 °N into the
+>   Atlantic) **or** the window expires **or** an arrival / `zone_entry` fires.
+> - **Budget** — ~2.5 US-Gulf laden departures/day × 5 d ≈ **~13 concurrent pins**; the
+>   persistent block runs under-full (slot overhaul), so it fits — cap at `MAX_OUTBOUND_PINS`
+>   as a safeguard.
+> - **Backstop** — a `vf_rescue` "dest-resolution" class polls a laden-departed vessel that
+>   still goes silent approaching the Straits (credit-budgeted, surplus-only, same machinery
+>   as the existing rescue classes).
+> - **Acceptance** — live Florida-NE recall rises from ~5 % toward the ~59 % historical,
+>   measured by re-running this validation on the live tail as it accrues.
 
 ---
 
