@@ -7,25 +7,50 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Sans+Condensed:wght@500;600;700&display=swap">
   <link rel="stylesheet" href="/static/css/style.css">
   <link rel="stylesheet" href="/static/css/signals.css">
 </head>
 <body data-view="map">
   <!-- ── Shared top bar: wordmark · view nav · provenance chip · live pulse ── -->
   <header id="topbar">
-    <div class="brand"><span class="brand-mark"></span>Tanker&nbsp;Flow</div>
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 32 18" fill="none" aria-hidden="true">
+        <path d="M2 11.2 H29 L26 16 H5 Z" fill="currentColor"/>
+        <circle cx="8.5" cy="8" r="2.8" stroke="currentColor" stroke-width="1.5"/>
+        <circle cx="15.5" cy="8" r="2.8" stroke="currentColor" stroke-width="1.5"/>
+        <circle cx="22.5" cy="8" r="2.8" stroke="currentColor" stroke-width="1.5"/>
+      </svg>Tanker&nbsp;Flow</div>
     <nav id="view-nav">
       <button class="nav-btn active" data-view="map">Map</button>
       <button class="nav-btn" data-view="signals">Signals</button>
     </nav>
-    <button id="trace-chip" hidden></button>
     <div id="live-hud"><span id="live-dot"></span><span id="live-text">…</span></div>
   </header>
 
   <div id="views">
     <!-- ── Map view ── -->
     <section id="view-map" class="view">
+      <!-- ── Docked map toolbar (flush, not floating) ── -->
+      <div id="map-toolbar">
+        <select id="basemap-select" title="Basemap">
+          <option value="dark">Dark (CARTO)</option>
+          <option value="darknolabels">Dark · no labels</option>
+          <option value="darkgray">Dark gray (Esri)</option>
+          <option value="ocean">Ocean</option>
+          <option value="satellite">Satellite</option>
+          <option value="voyager">Voyager (light)</option>
+        </select>
+        <div class="toolbar-sep"></div>
+        <div class="toolbar-layers">
+          <button class="layer-btn active" id="btn-zones">Zones</button>
+          <button class="layer-btn active" id="btn-boxes">AIS boxes</button>
+          <button class="layer-btn active" id="btn-vessels">Vessels</button>
+          <button class="layer-btn" id="btn-density">Density</button>
+        </div>
+        <span id="status">Loading…</span>
+        <button id="reset-btn">Show all vessels</button>
+      </div>
       <div id="layout">
         <div id="map"></div>
         <div id="events-panel">
@@ -88,48 +113,8 @@
         </div>
       </div>
 
-      <button id="reset-btn" class="hud">Show all vessels</button>
-      <div id="layer-controls" class="hud">
-        <select id="basemap-select" title="Basemap">
-          <option value="dark">Dark (CARTO)</option>
-          <option value="darknolabels">Dark · no labels</option>
-          <option value="darkgray">Dark gray (Esri)</option>
-          <option value="ocean">Ocean</option>
-          <option value="satellite">Satellite</option>
-          <option value="voyager">Voyager (light)</option>
-        </select>
-        <button class="layer-btn active" id="btn-zones">Terminal zones</button>
-        <button class="layer-btn active" id="btn-boxes">AIS boxes</button>
-        <button class="layer-btn active" id="btn-vessels">Vessels</button>
-        <button class="layer-btn" id="btn-density">Density</button>
-      </div>
-      <div id="legend" class="hud">
-        <button id="legend-head" title="Collapse / expand legend">
-          <span class="legend-head-title">Legend</span>
-          <span class="legend-caret">▾</span>
-        </button>
-        <div id="legend-body">
-          <div class="legend-title">Vessel class</div>
-          <div class="legend-row"><span class="swatch" style="background:#cba6f7;"></span> LNG carrier</div>
-          <div class="legend-row"><span class="swatch sq" style="background:#f38ba8;"></span> FSRU</div>
-          <div class="legend-title">Watchlist tier (ring)</div>
-          <div class="tier-scale">
-            <span class="tier-1">1</span><span class="tier-2">2</span><span class="tier-3">3</span><span class="tier-4">4</span><span class="tier-5">5</span>
-          </div>
-          <div class="fade-labels"><span>at terminal</span><span>stale</span></div>
-          <div class="legend-title">Fix freshness</div>
-          <div class="fade-bar"></div>
-          <div class="fade-labels"><span>just seen</span><span>&gt;24h</span></div>
-          <div class="legend-title">Terminal activity</div>
-          <div class="legend-row"><span class="swatch sq" style="background:#a6e3a1;"></span> active (&lt;2d)</div>
-          <div class="legend-row"><span class="swatch sq" style="background:#f9e2af;"></span> slowing (&lt;7d)</div>
-          <div class="legend-row"><span class="swatch sq" style="background:#f38ba8;"></span> silent &gt;7d</div>
-          <div class="legend-row"><span class="swatch sq" style="background:#6c7086;"></span> no events</div>
-        </div>
-      </div>
+      <aside id="inspector" hidden></aside>
       <button id="panel-reopen" class="hud" hidden title="Show panel">⟨&nbsp;Feed</button>
-      <div id="status" class="hud">Loading…</div>
-      <div id="vessel-feeds" class="hud" hidden></div>
       <div id="playback-bar" class="hud" hidden>
         <button id="pb-play" title="Play / pause (space)">▶</button>
         <input id="pb-slider" type="range" min="0" max="1000" value="0" step="1" title="Scrub">
@@ -143,9 +128,7 @@
     <section id="view-signals" class="view">
       <div id="signals-subhead">
         <span class="subhead-title">Market signals</span>
-        <span class="subhead-blurb">LNG carrier positions &rarr; Henry&nbsp;Hub&nbsp;/&nbsp;TTF spread</span>
         <div id="signal-controls">
-          <input id="signal-filter" type="search" placeholder="filter signals…" autocomplete="off">
           <label class="ctl-sel" title="How much history to load — a shorter window loads far faster">range
             <select id="signal-range">
               <option value="90">90d</option>
@@ -175,9 +158,23 @@
         <div class="stat"><span class="stat-label">regime now</span><span class="stat-val" id="st-regime">—</span></div>
         <div class="stat"><span class="stat-label">port events rebuilt</span><span class="stat-val" id="st-pe">—</span></div>
       </div>
+      <div id="headline-ribbon"></div>
+      <nav id="family-rail"></nav>
       <main id="signal-sections"></main>
     </section>
   </div>
+
+  <!-- ── Phone bottom tab bar (hidden on desktop; mirrors #view-nav) ── -->
+  <nav id="tabbar">
+    <button class="tabbar-btn active" data-view="map">
+      <svg class="tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14.106 5.553a2 2 0 0 0 1.788 0l3.659-1.83A1 1 0 0 1 21 4.619v12.764a1 1 0 0 1-.553.894l-4.553 2.277a2 2 0 0 1-1.788 0l-4.212-2.106a2 2 0 0 0-1.788 0l-3.659 1.83A1 1 0 0 1 3 19.381V6.618a1 1 0 0 1 .553-.894l4.553-2.277a2 2 0 0 1 1.788 0z"/><path d="M15 5.764v15"/><path d="M9 3.236v15"/></svg>
+      <span class="tab-lbl">Map</span>
+    </button>
+    <button class="tabbar-btn" data-view="signals">
+      <svg class="tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="m19 9-5 5-4-4-3 3"/></svg>
+      <span class="tab-lbl">Signals</span>
+    </button>
+  </nav>
 
   <!-- Contributor drawer (signals view) -->
   <div id="drawer-scrim"></div>

@@ -1,59 +1,85 @@
-/* ── Catppuccin Mocha theme tokens (shared by map + signals pages) ───────────
-   Palette: https://catppuccin.com/palette  ·  accent = blue (#89b4fa).
-   Fonts: Hanken Grotesk (UI) + JetBrains Mono (numerics) — loaded via <link>
-   in index.html / signals.html. */
+/* ── "Oxford" — a desaturated Oxford-navy canvas with sandy Oxford-gold accents
+   and white text (ref: dark-navy / muted-gold editorial sites). Token NAMES are
+   kept from earlier themes (so every rule inherits the new look); only the VALUES
+   changed. One accent (sandy gold), hairline structure, no glow, IBM Plex type. */
 :root {
-  --base:#1e1e2e; --mantle:#181825; --crust:#11111b;
-  --surface0:#313244; --surface1:#45475a; --surface2:#585b70;
-  --overlay0:#6c7086; --overlay1:#7f849c;
-  --text:#cdd6f4; --subtext1:#bac2de; --subtext0:#a6adc8;
-  --accent:#89b4fa;            /* blue */
-  --green:#a6e3a1; --teal:#94e2d5; --sapphire:#74c7ec; --sky:#89dceb;
-  --peach:#fab387; --yellow:#f9e2af; --maroon:#eba0ac; --red:#f38ba8;
-  --mauve:#cba6f7; --lavender:#b4befe; --pink:#f5c2e7;
-  --sel: rgba(137, 180, 250, 0.14);   /* accent-tinted selection wash */
-  --font-sans: 'Hanken Grotesk', -apple-system, BlinkMacSystemFont, sans-serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
-  --panel-w: 360px;
+  /* Oxford-navy base — deep, desaturated blue-blacks */
+  --base:#0e1726; --mantle:#152138; --crust:#0a111e;
+  /* surface0/1/2 read as progressively stronger hairlines / subtle fills */
+  --surface0:#1e2c45; --surface1:#2a3a58; --surface2:#3a4c6e;
+  --overlay0:#65718a; --overlay1:#78849e;
+  --text:#eef2f8; --subtext1:#c3cddd; --subtext0:#99a6bc;
+  --accent:#c8ac72;            /* sandy Oxford gold — the single interactive accent */
+  --accent-soft: rgba(200, 172, 114, 0.14);
+  /* Direction + status semantics (kept under the old names used across the app) */
+  --green:#6cc28d; --red:#d9776f; --yellow:#d8b75f; --peach:#cf9a63;
+  --teal:#5fb0a8; --sapphire:#5b8fc9; --sky:#84b0e0; --maroon:#c98a8a;
+  --mauve:#a892d8; --lavender:#9fb0e0; --pink:#d18fb0;
+  /* Hairline tokens — the structural language is lines, not fills/shadows */
+  --line: rgba(190, 205, 230, 0.085);
+  --line-strong: rgba(190, 205, 230, 0.17);
+  --sel: rgba(200, 172, 114, 0.12);   /* accent-tinted selection wash */
+  --font-sans: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-cond: 'IBM Plex Sans Condensed', 'IBM Plex Sans', sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', monospace;
+  /* 8-pt spacing + tight radii */
+  --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:24px; --s6:32px;
+  --r-sm:4px; --r-md:6px; --r-lg:9px;
+  --panel-w: 358px;
 }
 body { margin: 0; background: var(--base); font-family: var(--font-sans); color: var(--text);
-  height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+  height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+/* Chart-paper grain — a faint static texture for depth (no gradients). Sits under
+   everything, fixed, pointer-transparent. */
+body::before {
+  content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none; opacity: 0.5;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.025'/%3E%3C/svg%3E");
+}
+#topbar, #views, #tabbar { position: relative; z-index: 1; }
 
 /* ── Shared top bar + view switching ── */
 #topbar {
-  flex: none; height: 50px; display: flex; align-items: center; gap: 16px;
-  padding: 0 18px; background: var(--mantle); border-bottom: 1px solid var(--surface0);
+  flex: none; height: 48px; display: flex; align-items: center; gap: var(--s4);
+  padding: 0 var(--s4); background: var(--mantle); border-bottom: 1px solid var(--line-strong);
   z-index: 50;
 }
-.brand { display: flex; align-items: center; gap: 9px; font-weight: 800; font-size: 15px; letter-spacing: -0.01em; color: var(--text); }
-.brand-mark { width: 11px; height: 11px; border-radius: 3px; background: var(--accent); box-shadow: 0 0 10px rgba(137,180,250,0.6); }
-#view-nav { display: flex; gap: 3px; background: var(--surface0); border-radius: 9px; padding: 3px; }
+.brand {
+  display: flex; align-items: center; gap: 11px;
+  font-family: var(--font-cond); font-weight: 700; font-size: 18px;
+  text-transform: uppercase; letter-spacing: 0.09em; color: var(--text);
+}
+/* Wordmark mark — an LNG carrier silhouette (hull + spherical Moss tanks) */
+.brand-mark { width: 30px; height: auto; color: var(--accent); flex: none; }
+/* Nav = an underlined tab rail (Swiss), not a filled pill group */
+#view-nav { display: flex; gap: var(--s5); align-items: center; height: 100%; }
 .nav-btn {
-  padding: 5px 15px; border: none; background: transparent; color: var(--subtext0);
-  font-family: inherit; font-weight: 600; font-size: 13px; border-radius: 6px; cursor: pointer;
-  transition: background 0.12s ease, color 0.12s ease;
+  position: relative; height: 100%; padding: 0; border: none; background: none;
+  color: var(--subtext0); cursor: pointer;
+  font-family: var(--font-cond); font-weight: 600; font-size: 12px;
+  text-transform: uppercase; letter-spacing: 0.1em;
+  transition: color 0.14s ease;
+}
+.nav-btn::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px;
+  background: var(--accent); transform: scaleX(0); transition: transform 0.18s ease;
 }
 .nav-btn:hover { color: var(--subtext1); }
-.nav-btn.active { background: var(--base); color: var(--accent); }
-#trace-chip {
-  display: inline-flex; align-items: center; gap: 6px; font-family: inherit; font-size: 12px;
-  color: var(--accent); background: rgba(137,180,250,0.13); border: 1px solid rgba(137,180,250,0.32);
-  border-radius: 8px; padding: 4px 11px; cursor: pointer;
-}
-#trace-chip[hidden] { display: none; }
-#trace-chip .chip-back { color: var(--subtext0); }
-#trace-chip:hover { background: rgba(137,180,250,0.2); }
-
+.nav-btn.active { color: var(--text); }
+.nav-btn.active::after { transform: scaleX(1); }
 #views { flex: 1; min-height: 0; position: relative; }
-.view { height: 100%; }
-body[data-view="map"]     #view-signals { display: none; }
+/* One active view at a time; each fills #views. */
+.view { height: 100%; display: none; }
 body[data-view="map"]     #view-map     { display: flex; flex-direction: column; }
-body[data-view="signals"] #view-map     { display: none; }
 body[data-view="signals"] #view-signals { display: flex; flex-direction: column; overflow: hidden; }
 #view-map { position: relative; }
 
+/* ── Phone bottom tab bar ── (hidden on desktop; the top #view-nav drives there) */
+#tabbar { display: none; }
+.tabbar-btn { background: none; border: none; font-family: inherit; cursor: pointer; }
+
 #layout { display: flex; flex: 1; min-height: 0; width: 100%; }
-#map { flex: 1; height: 100%; background: #0d0f17; }
+#map { flex: 1; height: 100%; background: #09111e; }
 /* Direction arrows along a vessel track (Leaflet divIcon — strip its default box). */
 .track-arrow { background: none; border: none; }
 .track-arrow svg { transform-origin: 50% 50%; display: block; }
@@ -80,8 +106,6 @@ body[data-view="signals"] #view-signals { display: flex; flex-direction: column;
   margin-right: calc(-1 * var(--panel-w));
   border-left: none;
 }
-#view-map.panel-collapsed #reset-btn,
-#view-map.panel-collapsed #legend { right: 12px; }
 #panel-collapse {
   margin-left: 6px; flex: none;
   background: none; border: none; color: var(--overlay0);
@@ -95,12 +119,12 @@ body[data-view="signals"] #view-signals { display: flex; flex-direction: column;
   padding: 9px 9px; color: var(--subtext1); cursor: pointer;
   font-size: 12px; font-family: inherit; white-space: nowrap;
 }
-#panel-reopen:hover { background: rgba(205, 214, 244, 0.06); color: var(--text); }
+#panel-reopen:hover { background: rgba(190, 205, 230, 0.06); color: var(--text); }
 #panel-reopen[hidden] { display: none; }
 #events-count, #fixes-count { color: var(--subtext0); font-weight: normal; font-size: 12px; margin-left: auto; }
 /* Sidebar header */
 #panel-head { display: flex; align-items: baseline; gap: 8px; padding: 11px 12px 9px; border-bottom: 1px solid var(--surface0); }
-#panel-title { font-weight: 700; font-size: 13px; color: var(--text); }
+#panel-title { font-family: var(--font-cond); font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text); }
 #panel-sub { font-size: 11px; color: var(--overlay0); font-family: var(--font-mono); margin-left: auto; }
 /* Tab bar switching the panel between Port events and Recent fixes */
 #panel-tabs { display: flex; border-bottom: 1px solid var(--surface0); }
@@ -198,82 +222,64 @@ body[data-view="signals"] #view-signals { display: flex; flex-direction: column;
 .badge-ballast { background: var(--surface1); color: var(--subtext0); }
 .badge-cold { background: var(--peach); color: var(--crust); }
 .badge-fsru { background: var(--red); color: var(--crust); }
-/* Floating HUD surfaces — translucent dark cards that read as one system */
+/* Floating HUD surfaces — flat sea-ink panels bounded by a hairline (no glow) */
 .hud {
   position: absolute;
   z-index: 1000;
-  background: rgba(17, 17, 27, 0.82);   /* crust @ 82% */
-  border: 1px solid rgba(205, 214, 244, 0.10);
-  border-radius: 12px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background: rgba(8, 16, 19, 0.9);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  backdrop-filter: blur(10px) saturate(1.1);
+  -webkit-backdrop-filter: blur(10px) saturate(1.1);
 }
-#reset-btn {
-  display: none;
-  top: 12px;
-  right: calc(var(--panel-w) + 12px);
-  padding: 7px 13px;
-  color: var(--text);
-  cursor: pointer;
-  font-size: 13px;
-  font-family: inherit;
+/* ── Docked map toolbar — a flush bar above the map (replaces the floating HUDs).
+   Solid sea-ink, hairline bottom rule; controls sit in normal flow. ── */
+#map-toolbar {
+  flex: none; display: flex; align-items: center; gap: 8px;
+  height: 38px; padding: 0 14px;
+  background: var(--mantle); border-bottom: 1px solid var(--line-strong);
 }
-#reset-btn:hover { background: rgba(69, 71, 90, 0.6); }
-#layer-controls {
-  top: 12px;
-  left: 52px;
-  display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
-  padding: 5px;
-}
-.layer-btn {
-  padding: 5px 10px;
-  background: transparent;
-  color: var(--subtext1);
-  border: 1px solid transparent;
-  border-radius: 5px;
-  cursor: pointer;
-  font-size: 12px;
-  font-family: inherit;
-}
-.layer-btn.active { background: rgba(137, 180, 250, 0.18); color: var(--accent); }
-.layer-btn:hover:not(.active) { background: rgba(205, 214, 244, 0.06); }
+.toolbar-sep { width: 1px; height: 17px; background: var(--line-strong); flex: none; }
+.toolbar-layers { display: flex; gap: 3px; flex: none; }
 #basemap-select {
-  background: transparent;
-  color: var(--subtext1);
-  border: 1px solid rgba(205, 214, 244, 0.12);
-  border-radius: 5px;
-  padding: 4px 6px;
-  font-size: 12px;
-  font-family: inherit;
-  cursor: pointer;
+  background: transparent; color: var(--subtext1);
+  border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+  padding: 3px 7px; font-size: 11px; font-family: var(--font-mono); cursor: pointer;
 }
 #basemap-select option { background: var(--mantle); color: var(--text); }
-#status {
-  bottom: 12px;
-  left: 12px;
-  padding: 6px 12px;
-  color: var(--subtext1);
-  font-size: 11px;
-  font-family: var(--font-mono);
-  max-width: 40vw;
+.layer-btn {
+  padding: 4px 10px; background: transparent; color: var(--subtext0);
+  border: 1px solid transparent; border-radius: var(--r-sm); cursor: pointer; white-space: nowrap;
+  font-family: var(--font-cond); font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.06em;
 }
-/* Track playback scrubber — bottom-center when a vessel is selected, stacked
-   just above the #vessel-feeds strip. */
+.layer-btn.active { background: var(--accent-soft); color: var(--accent); }
+.layer-btn:hover:not(.active) { color: var(--subtext1); }
+#status {
+  margin-left: auto; color: var(--overlay0); font-size: 10.5px; font-family: var(--font-mono);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40vw;
+}
+#reset-btn {
+  display: none; flex: none; padding: 4px 11px; border-radius: var(--r-sm);
+  background: transparent; border: 1px solid var(--accent); color: var(--accent);
+  cursor: pointer; font-family: var(--font-cond); font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+#reset-btn:hover { background: var(--accent-soft); }
+/* Track playback scrubber — a docked pill, bottom-centre over the map when a
+   vessel is selected. */
 #playback-bar {
-  bottom: 54px; left: 50%; transform: translateX(-50%);
+  bottom: 16px; left: 50%; transform: translateX(-50%);
   display: flex; align-items: center; gap: 10px;
   padding: 7px 12px; width: min(560px, 72vw);
 }
 #playback-bar[hidden] { display: none; }
 #playback-bar button {
   background: transparent; color: var(--subtext1);
-  border: 1px solid rgba(205, 214, 244, 0.12); border-radius: 6px;
+  border: 1px solid rgba(190, 205, 230, 0.12); border-radius: 6px;
   padding: 4px 9px; font-size: 13px; font-family: inherit; cursor: pointer; line-height: 1;
 }
-#playback-bar button:hover { background: rgba(205, 214, 244, 0.06); color: var(--text); }
+#playback-bar button:hover { background: rgba(190, 205, 230, 0.06); color: var(--text); }
 #pb-play { min-width: 30px; }
 #pb-speed { min-width: 36px; font-family: var(--font-mono); font-size: 12px; }
 #pb-close { color: var(--overlay1); }
@@ -282,75 +288,67 @@ body[data-view="signals"] #view-signals { display: flex; flex-direction: column;
   color: var(--subtext1); font-family: var(--font-mono); font-size: 11px; white-space: nowrap;
 }
 #pb-slider { flex: 1; accent-color: var(--accent); height: 4px; cursor: pointer; }
-/* "Feeds" strip — which signals the selected vessel contributes to (→ signals) */
-#vessel-feeds {
-  bottom: 12px; left: 50%; transform: translateX(-50%);
-  padding: 7px 12px; display: flex; align-items: center; gap: 8px;
-  font-size: 12px; color: var(--subtext1); max-width: 64vw; flex-wrap: wrap;
+/* ── Selection inspector — a solid, hairline card docked at the map's top-left,
+   shown when a vessel is selected (replaces the floating popup). ── */
+#inspector {
+  position: absolute; top: 50px; left: 12px; z-index: 900;   /* 50 = clear the 38px toolbar */
+  width: 252px; max-width: calc(100vw - 24px);
+  background: var(--mantle); border: 1px solid var(--line-strong); border-radius: var(--r-md);
 }
-#vessel-feeds[hidden] { display: none; }
-#vessel-feeds .feeds-label { color: var(--overlay0); font-family: var(--font-mono); font-size: 11px; }
-.feed-chip {
-  cursor: pointer; font-family: var(--font-mono); font-size: 11px; font-weight: 600;
-  padding: 2px 9px; border-radius: 6px; background: rgba(137, 180, 250, 0.13);
-  color: var(--accent); border: 1px solid rgba(137, 180, 250, 0.3);
+#inspector[hidden] { display: none; }
+.insp-head { display: flex; align-items: center; gap: 8px; padding: 9px 11px; border-bottom: 1px solid var(--line); }
+.insp-name {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--font-cond); font-size: 13px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.04em; color: var(--text);
 }
-.feed-chip:hover { background: rgba(137, 180, 250, 0.22); }
-/* Live ingestion pulse — now lives in the shared top bar (not a floating HUD) */
+.insp-close { flex: none; background: none; border: none; color: var(--overlay0); font-size: 18px; line-height: 1; cursor: pointer; padding: 0 2px; }
+.insp-close:hover { color: var(--text); }
+.insp-chips { display: flex; flex-wrap: wrap; gap: 5px; padding: 9px 11px 5px; }
+.insp-chip { font-size: 9.5px; font-weight: 600; padding: 1px 6px; border-radius: 3px; }
+.insp-chip.chip-carrier { background: var(--mauve); color: var(--crust); }
+.insp-chip.chip-fsru { background: var(--red); color: var(--crust); }
+.insp-chip.slot { background: var(--accent-soft); color: var(--accent); border: 1px solid rgba(200, 172, 114, 0.4); }
+.insp-rows { margin: 0; padding: 3px 11px 10px; }
+.insp-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 3px 0; }
+.insp-row dt { flex: none; color: var(--overlay0); font-family: var(--font-cond); text-transform: uppercase; letter-spacing: 0.05em; font-size: 9.5px; }
+.insp-row dd { margin: 0; min-width: 0; color: var(--subtext1); font-family: var(--font-mono); font-size: 11px; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Track-scope toggle (this leg ⇄ full path) — docked in the inspector footer */
+.insp-foot:empty { display: none; }
+.insp-foot { padding: 9px 11px; border-top: 1px solid var(--line); }
+.insp-scope {
+  width: 100%; padding: 6px 10px; border-radius: var(--r-sm); cursor: pointer;
+  background: var(--accent-soft); color: var(--accent); border: 1px solid rgba(200, 172, 114, 0.38);
+  font-family: var(--font-cond); font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.insp-scope:hover { background: rgba(200, 172, 114, 0.22); }
+/* Live ingestion pulse — lives in the shared top bar */
 #live-hud {
   margin-left: auto;
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 12px;
+  gap: 7px;
+  font-size: 11px;
   font-family: var(--font-mono);
-  color: var(--subtext1);
+  letter-spacing: 0.02em;
+  color: var(--subtext0);
+  text-transform: uppercase;
 }
-#live-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--overlay0); flex: none; }
-#live-dot.live { background: var(--green); animation: live-pulse 1.8s ease-in-out infinite; }
+#live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--overlay0); flex: none; }
+#live-dot.live { background: var(--green); animation: live-pulse 2s ease-in-out infinite; }
 #live-dot.stale { background: var(--red); }
 @keyframes live-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(166, 227, 161, 0.55); }
-  50%      { box-shadow: 0 0 0 6px rgba(166, 227, 161, 0); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(108, 194, 141, 0.5); }
+  50%      { box-shadow: 0 0 0 5px rgba(108, 194, 141, 0); }
 }
-/* Map legend — decodes the marker encoding (class / tier ring / freshness) */
-#legend {
-  bottom: 12px;
-  right: calc(var(--panel-w) + 12px);
-  padding: 9px 11px;
-  font-size: 11px;
-  color: var(--subtext1);
-  line-height: 1.5;
-  width: 150px;
-}
-#legend .legend-title { font-weight: 600; color: var(--text); margin: 7px 0 3px; }
-#legend .legend-title:first-child { margin-top: 0; }
-#legend .legend-row { display: flex; align-items: center; gap: 6px; }
-#legend .swatch { width: 11px; height: 11px; border-radius: 50%; flex: none; }
-#legend .swatch.sq { border-radius: 2px; }
-#legend .tier-scale { display: flex; gap: 3px; margin-top: 2px; }
-#legend .tier-scale span { flex: 1; text-align: center; border-radius: 2px; font-size: 9px; font-weight: 700; color: var(--crust); padding: 1px 0; }
-#legend .fade-bar { height: 9px; border-radius: 2px; margin-top: 3px; background: linear-gradient(90deg, var(--pink) 0%, rgba(245, 194, 231, 0.16) 100%); }
-#legend .fade-labels { display: flex; justify-content: space-between; font-size: 9px; color: var(--subtext0); margin-top: 1px; }
-/* Collapsible legend: the head is a full-width toggle; collapsed → just the chip */
-#legend-head {
-  display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  width: 100%; padding: 0; background: none; border: none; cursor: pointer;
-  color: var(--text); font-family: inherit; font-size: 11px; font-weight: 600;
-}
-.legend-head-title { letter-spacing: 0.02em; }
-.legend-caret { color: var(--overlay0); font-size: 10px; transition: transform 0.15s ease; }
-#legend-body { margin-top: 7px; }
-#legend.collapsed { width: auto; }
-#legend.collapsed #legend-body { display: none; }
-#legend.collapsed .legend-caret { transform: rotate(-90deg); }
 /* Dark-theme the Leaflet chrome (zoom, attribution, popups, tooltips) */
 .leaflet-control-zoom a {
   background: rgba(17, 17, 27, 0.85); color: var(--text);
-  border-color: rgba(205, 214, 244, 0.1);
+  border-color: rgba(190, 205, 230, 0.1);
 }
 .leaflet-control-zoom a:hover { background: rgba(49, 50, 68, 0.95); }
-.leaflet-bar { border: 1px solid rgba(205, 214, 244, 0.1); }
+.leaflet-bar { border: 1px solid rgba(190, 205, 230, 0.1); }
 .leaflet-control-attribution {
   background: rgba(17, 17, 27, 0.7) !important; color: var(--subtext0) !important;
 }
@@ -371,8 +369,63 @@ body[data-view="signals"] #view-signals { display: flex; flex-direction: column;
 /* Event-type color pills (also used as the map icon colors; mirror EVENT_COLORS) */
 .et-zone_entry      { background: var(--green); }
 .et-anchorage_entry { background: var(--sapphire); }
-.et-anchored        { background: var(--accent); }
-.et-anchorage_exit  { background: var(--teal); }
+.et-anchored        { background: var(--teal); }
+.et-anchorage_exit  { background: #7bb38e; }
 .et-moored          { background: var(--peach); }
 .et-departed        { background: var(--maroon); }
 .et-zone_exit       { background: var(--red); }
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Phone layout (≤640px) — bottom tab bar, map + feed stacked, single-column
+   signals, full-width bottom-sheet drawer.
+   ────────────────────────────────────────────────────────────────────────── */
+@media (max-width: 640px) {
+  /* Top bar: wordmark + live pulse (with fixes/min); view nav → bottom tab bar. */
+  #topbar { height: 46px; gap: 10px; padding: 0 14px; }
+  #view-nav { display: none; }
+  #live-hud { font-size: 10px; }   /* keep the "live · N fixes/min" text on phones */
+  .brand { font-size: 16px; }
+  .brand-mark { width: 26px; }
+
+  /* dvh tracks the real viewport as mobile browser chrome shows/hides. The tab bar
+     is an in-flow flex child (NOT a fixed overlay), so #views is sized correctly
+     above it and nothing needs to reserve bottom space. */
+  body { height: 100dvh; }
+  #tabbar {
+    display: flex; flex: none;
+    height: calc(52px + env(safe-area-inset-bottom));
+    padding-bottom: env(safe-area-inset-bottom);
+    background: var(--mantle); border-top: 1px solid var(--surface0);
+  }
+  .tabbar-btn {
+    flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+    color: var(--overlay0); font-family: var(--font-cond); font-size: 10px;
+    font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em;
+  }
+  .tabbar-btn .tab-ico { width: 21px; height: 21px; opacity: 0.85; }
+  .tabbar-btn.active { color: var(--accent); }
+
+  /* ── Map: map on top, event feed stacked under it (collapsible) ── */
+  #layout { flex-direction: column; }
+  #map { flex: 1 1 auto; min-height: 0; height: auto; width: 100%; }
+  #events-panel {
+    flex: none; width: auto; height: 42vh;
+    border-left: none; border-top: 1px solid var(--surface1);
+    transition: height 0.22s ease;
+  }
+  /* Collapsed → just the header bar; the map reclaims the height. */
+  #view-map.panel-collapsed #events-panel { transform: none; margin-right: 0; height: auto; }
+  #view-map.panel-collapsed #panel-tabs,
+  #view-map.panel-collapsed .panel-view { display: none; }
+  #panel-reopen { display: none; }   /* header stays visible → no separate reopen pill */
+  #panel-head { cursor: pointer; }
+  #panel-collapse { font-size: 16px; }
+
+  /* Map toolbar scrolls horizontally if the controls overflow a phone width. */
+  #map-toolbar { overflow-x: auto; padding: 0 10px; gap: 6px; }
+  #status { display: none; }          /* a selection shows as the drawn track itself */
+  #playback-bar { display: none; }    /* playback is desktop-only on phones */
+
+  /* Signals view + contributor drawer + chart modal mobile overrides live in
+     signals.css (it loads after this file → wins the cascade). */
+}

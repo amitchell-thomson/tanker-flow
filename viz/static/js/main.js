@@ -1,9 +1,9 @@
 // Map view wiring. Exposed as initMap() and called once by the app shell (app.js)
 // — not self-running, so the map and signals views can coexist in one document.
 import { map, setBasemap, toggleLayer } from './map.js';
-import { loadVessels, markers, undim } from './vessels.js';
+import { loadVessels, markers, undim, hideInspector } from './vessels.js';
 import { loadTerminalZones, loadBoundingBoxes } from './zones.js';
-import { clearTrackAndEvents, clearSignalArcs, hasTrack } from './track.js';
+import { clearTrackAndEvents, hasTrack } from './track.js';
 import { stopPlayback } from './playback.js';
 import { loadEvents, initEventsPanelHandlers } from './events.js';
 import { toggleDensity } from './density.js';
@@ -16,9 +16,8 @@ function resetView() {
   undim();
   clearTrackAndEvents();
   stopPlayback();
-  clearSignalArcs();
+  hideInspector();
   document.getElementById('reset-btn').style.display = 'none';
-  document.getElementById('vessel-feeds').hidden = true;
   document.querySelectorAll('.event-row.selected').forEach(r => r.classList.remove('selected'));
   setStatus(`${Object.keys(markers).length} vessels — click any vessel or event to inspect`);
 }
@@ -28,7 +27,7 @@ function resetView() {
 // told to recompute its size once the slide finishes so tiles fill the new width.
 function initPanelCollapse() {
   const view = document.getElementById('view-map');
-  const collapseBtn = document.getElementById('panel-collapse');
+  const head = document.getElementById('panel-head');
   const reopenBtn = document.getElementById('panel-reopen');
   const KEY = 'tf.map.panelCollapsed';
   const apply = (collapsed, animate) => {
@@ -43,22 +42,10 @@ function initPanelCollapse() {
     try { localStorage.setItem(KEY, collapsed ? '1' : '0'); } catch (_) { /* private mode */ }
     apply(collapsed, true);
   };
-  collapseBtn.addEventListener('click', toggle);
+  // The whole header is the toggle (the ⟩ button bubbles up to it) — on phones the
+  // header bar stays visible when collapsed, so tapping it re-opens the feed.
+  head.addEventListener('click', toggle);
   reopenBtn.addEventListener('click', toggle);
-}
-
-// Collapse the map legend to its title chip. State persists across reloads.
-function initLegendCollapse() {
-  const legend = document.getElementById('legend');
-  const head = document.getElementById('legend-head');
-  const KEY = 'tf.map.legendCollapsed';
-  let collapsed = localStorage.getItem(KEY) === '1';
-  legend.classList.toggle('collapsed', collapsed);
-  head.addEventListener('click', () => {
-    collapsed = !collapsed;
-    try { localStorage.setItem(KEY, collapsed ? '1' : '0'); } catch (_) { /* private mode */ }
-    legend.classList.toggle('collapsed', collapsed);
-  });
 }
 
 // Returns the initial loadVessels() promise so the shell can defer a ?focus=
@@ -67,9 +54,12 @@ export function initMap() {
   if (started) return Promise.resolve();
   started = true;
 
-  setBasemap('darkgray');
-
-  document.getElementById('basemap-select').addEventListener('change', e => setBasemap(e.target.value));
+  // CARTO dark reads bluest under the navy tint pane (see map.js); sync the select
+  // so its label matches reality (was previously out of step with the default).
+  const basemapSel = document.getElementById('basemap-select');
+  basemapSel.value = 'dark';
+  setBasemap('dark');
+  basemapSel.addEventListener('change', e => setBasemap(e.target.value));
   document.getElementById('btn-zones').addEventListener('click',   () => toggleLayer('zones'));
   document.getElementById('btn-boxes').addEventListener('click',   () => toggleLayer('boxes'));
   document.getElementById('btn-vessels').addEventListener('click', () => toggleLayer('vessels'));
@@ -80,7 +70,6 @@ export function initMap() {
 
   initEventsPanelHandlers();
   initPanelCollapse();
-  initLegendCollapse();
 
   const ready = loadVessels();
   loadTerminalZones();

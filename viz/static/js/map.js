@@ -14,6 +14,20 @@ export const map = L.map('map', {
   preferCanvas: true,
   renderer: L.canvas({ padding: 0.5 }),
 }).setView([25, -30], 3);
+// Zoom control top-right so the selection inspector can dock the top-left corner.
+map.zoomControl.setPosition('topright');
+
+// Navy tint — washes the basemap toward the site's Oxford navy so the map reads
+// as part of the page, not a grey rectangle. A single world-covering rectangle on
+// a pane ABOVE the tiles (z 220) but BELOW the density layer (z 250) and markers
+// (z 600): one cheap shape, no per-tile CSS filter (those force a repaint every
+// pan/zoom frame and were deliberately avoided).
+map.createPane('tintPane').style.zIndex = 220;
+map.getPane('tintPane').style.pointerEvents = 'none';
+L.rectangle([[-89, -360], [89, 360]], {
+  pane: 'tintPane', stroke: false, fill: true,
+  fillColor: '#0e1726', fillOpacity: 0.5, interactive: false,
+}).addTo(map);
 
 let baseLayer = null;
 export function setBasemap(key) {

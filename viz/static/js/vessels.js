@@ -2,7 +2,7 @@
 import { map, registerLayer } from './map.js';
 import {
   FSRU_COLOR, CARRIER_COLOR, SOG_UNDERWAY_KN, bearingDeg, EVENT_COLORS,
-  tierColor, tierRadius, freshnessOpacity, fmtAge, fmtTimeFull, PLAYBACK_WINDOW_MS,
+  tierColor, tierRadius, freshnessOpacity, fmtAge, fmtTimeFull,
 } from './config.js';
 import { drawTrack, clearTrackAndEvents, setEventMarkers } from './track.js';
 import { startPlayback, stopPlayback } from './playback.js';
@@ -68,40 +68,52 @@ function fsruIcon({ r, color, stroke }) {
   });
 }
 
-function popupHtml(v) {
-  const name = v.vessel_name || `MMSI ${v.mmsi}`;
-  const sog = v.sog != null ? v.sog.toFixed(1) + ' kn' : '?';
-  // Draught line: "Draught: cur / design m" with laden/ballast hint.
-  // Threshold is 0.85 × design — flagged in the colour of the value.
-  let draughtLine = '';
+// Concise hover encoding — replaces the old click-popup (the click now opens the
+// docked inspector). Decodes the marker: name · class · tier · freshness.
+function tooltipHtml(v) {
+  const name = (v.vessel_name || '').trim() || `MMSI ${v.mmsi}`;
+  const cls = v.is_fsru ? 'FSRU' : 'LNG carrier';
+  const tier = v.tier != null ? ` · T${v.tier}` : '';
+  return `<b>${name}</b><br>${cls}${tier} · ${fmtAge(v.fix_ts)}`;
+}
+
+// ── Docked selection inspector (replaces the floating popup) ──
+function ladenOf(v) {
+  if (v.current_draught == null || v.design_draught == null) return null;
+  return v.current_draught / v.design_draught >= 0.85;
+}
+export function showInspector(v) {
+  const el = document.getElementById('inspector');
+  if (!el || !v) return;
+  const name = (v.vessel_name || '').trim() || `MMSI ${v.mmsi}`;
+  const classChip = `<span class="insp-chip ${v.is_fsru ? 'chip-fsru' : 'chip-carrier'}">${v.is_fsru ? 'FSRU' : 'LNG carrier'}</span>`;
+  const tierChip = v.tier != null ? `<span class="insp-chip tier tier-${v.tier}">Tier ${v.tier}</span>` : '';
+  const laden = ladenOf(v);
+  const ladenChip = laden == null ? '' : `<span class="insp-chip ${laden ? 'badge-laden' : 'badge-ballast'}">${laden ? 'laden' : 'ballast'}</span>`;
+  const slotChip = v.in_slot ? `<span class="insp-chip slot">${v.slot_kind || 'slot'}</span>` : '';
+  const rows = [];
+  rows.push(['MMSI', v.mmsi]);
+  if (v.imo) rows.push(['IMO', v.imo]);
+  if (v.flag) rows.push(['Flag', v.flag]);
+  rows.push(['SOG', v.sog != null ? v.sog.toFixed(1) + ' kn' : '—']);
   if (v.current_draught != null || v.design_draught != null) {
-    const cur = v.current_draught != null ? v.current_draught.toFixed(1) : '?';
-    const dsn = v.design_draught != null ? v.design_draught.toFixed(1) : '?';
-    let hint = '';
-    if (v.current_draught != null && v.design_draught != null) {
-      const ratio = v.current_draught / v.design_draught;
-      const laden = ratio >= 0.85;
-      hint = ` <span style="color:${laden ? '#16a085' : '#7f8c8d'};font-weight:600;">(${laden ? 'laden' : 'ballast'})</span>`;
-    }
-    draughtLine = `<br>Draught: ${cur} / ${dsn} m${hint}`;
+    rows.push(['Draught', `${v.current_draught != null ? v.current_draught.toFixed(1) : '?'} / ${v.design_draught != null ? v.design_draught.toFixed(1) : '?'} m`]);
   }
-  // Tier line: "Tier N · reason · slot" so it's clear why we watch this
-  // vessel and whether it currently holds a subscription slot.
-  let tierLine = '';
-  if (v.tier != null) {
-    const slot = v.in_slot ? ` · <span style="color:#2ecc71;">${v.slot_kind || 'slot'}</span>` : '';
-    const reason = v.score_reason ? ` · ${v.score_reason}` : '';
-    tierLine = `<br><span style="color:${tierColor(v.tier)};font-weight:600;">Tier ${v.tier}</span>${reason}${slot}`;
-  }
-  return `<b>${name}</b><br>MMSI: ${v.mmsi}`
-    + (v.imo ? `<br>IMO: ${v.imo}` : '')
-    + `<br>Class: ${v.is_fsru ? 'FSRU' : 'LNG carrier'}`
-    + (v.vf_vessel_type ? ` (${v.vf_vessel_type})` : '')
-    + (v.flag ? `<br>Flag: ${v.flag}` : '')
-    + `<br>SOG: ${sog}`
-    + draughtLine
-    + tierLine
-    + `<br>Last fix: ${fmtAge(v.fix_ts)} · ${fmtTimeFull(v.fix_ts)}`;
+  if (v.score_reason) rows.push(['Why', v.score_reason]);
+  rows.push(['Last fix', fmtAge(v.fix_ts)]);
+  el.innerHTML = `
+    <div class="insp-head">
+      <span class="insp-name">${name}</span>
+      <button class="insp-close" aria-label="Close">&times;</button>
+    </div>
+    <div class="insp-chips">${classChip}${tierChip}${ladenChip}${slotChip}</div>
+    <dl class="insp-rows">${rows.map(([k, val]) => `<div class="insp-row"><dt>${k}</dt><dd>${val}</dd></div>`).join('')}</dl>`;
+  el.querySelector('.insp-close').addEventListener('click', hideInspector);
+  el.hidden = false;
+}
+export function hideInspector() {
+  const el = document.getElementById('inspector');
+  if (el) el.hidden = true;
 }
 
 function createMarker(v, spec) {
@@ -122,7 +134,8 @@ function createMarker(v, spec) {
   // Remember the freshness baseline so dim/undim restores to it rather than a
   // flat constant — keeps the staleness fade intact after a track.
   marker._fresh = spec.fresh;
-  marker.bindPopup(popupHtml(v));
+  marker._v = v;
+  marker.bindTooltip(tooltipHtml(v), { sticky: true, direction: 'top', offset: [0, -4] });
   marker.on('click', () => selectVessel(v.mmsi, v.vessel_name || `MMSI ${v.mmsi}`));
   marker.addTo(vesselLayer);
   return marker;
@@ -146,7 +159,8 @@ function updateMarker(marker, v, spec) {
     }
     marker.setOpacity(spec.fresh);
   }
-  marker.setPopupContent(popupHtml(v));
+  marker._v = v;
+  marker.setTooltipContent(tooltipHtml(v));
 }
 
 export async function loadVessels({ silent = false } = {}) {
@@ -178,31 +192,62 @@ export async function loadVessels({ silent = false } = {}) {
   setStatus(`${vessels.length} LNG vessels — click any vessel or event to inspect`);
 }
 
+let currentSel = null;   // { mmsi, name, history, events, lastDep, scope }
+const isPhone = () => window.matchMedia('(max-width: 640px)').matches;
+
+// Most-recent `departed` event time (ms) — the start of the vessel's current leg.
+function lastDepartedMs(events) {
+  let m = null;
+  for (const e of events || []) {
+    if (e.event_type === 'departed' && e.event_time) {
+      const t = new Date(e.event_time).getTime();
+      if (m == null || t > m) m = t;
+    }
+  }
+  return m;
+}
+
 export async function selectVessel(mmsi, name) {
   setStatus(`Loading track for ${name} (${mmsi})…`);
+  // Docked inspector from the marker's stored record (covers marker + event-row
+  // clicks; falls back to a name-only stub if the vessel has no live marker).
+  const rec = markers[String(mmsi)]?._v;
+  showInspector(rec || { mmsi, vessel_name: name });
   dimAllExcept(mmsi);
   clearTrackAndEvents();
   stopPlayback();
-  // Full available track + the vessel's whole event history (drawn along it).
   const [history, events] = await Promise.all([
     fetch(`/api/vessel/${mmsi}/history`).then(r => r.json()),
     fetch(`/api/vessel/${mmsi}/events`).then(r => r.json()).catch(() => []),
   ]);
-  if (!history.length) {
-    setStatus('No history found');
-    window.dispatchEvent(new CustomEvent('app:vessel-selected', { detail: { mmsi, name } }));
-    return;
-  }
-  const track = drawTrack(history, { windowMs: PLAYBACK_WINDOW_MS });
+  if (!history.length) { setStatus('No history found'); return; }
+  // Default view = the current leg (path since the last `departed`); full if none.
+  currentSel = { mmsi, name, history, events, lastDep: lastDepartedMs(events), scope: 'voyage' };
+  drawSelection();
+}
 
-  // Port events along the track.
-  if (events && events.length) {
+// Draw the current selection scoped to currentSel.scope: 'voyage' = since the last
+// `departed` event (the current leg) if one exists, else full; 'full' = everything.
+function drawSelection() {
+  if (!currentSel) return;
+  const { history, events, lastDep, scope, name } = currentSel;
+  clearTrackAndEvents();
+  stopPlayback();
+  const cutoff = (scope === 'voyage' && lastDep != null) ? lastDep : null;
+  const histFix = cutoff != null ? history.filter(h => new Date(h.fix_ts).getTime() >= cutoff) : history;
+  const track = drawTrack(histFix.length ? histFix : history, {});
+
+  // Port events along the (scoped) track.
+  const evShown = cutoff != null
+    ? (events || []).filter(e => new Date(e.event_time).getTime() >= cutoff - 1000)
+    : (events || []);
+  if (evShown.length) {
     const layer = L.layerGroup();
-    events.forEach(e => {
+    evShown.forEach(e => {
       if (e.lat == null || e.lon == null) return;
-      const color = EVENT_COLORS[e.event_type] || '#bdc3c7';
+      const color = EVENT_COLORS[e.event_type] || '#99a6bc';
       L.circleMarker([e.lat, e.lon], {
-        radius: 6, color: '#11111b', fillColor: color, fillOpacity: 0.95, weight: 1.5,
+        radius: 6, color: '#0a111e', fillColor: color, fillOpacity: 0.95, weight: 1.5,
         bubblingMouseEvents: false,
       }).bindTooltip(
         `<b>${e.event_type}</b><br>${e.terminal_name || ''} (${e.zone})<br>${fmtTimeFull(e.event_time)}`,
@@ -212,21 +257,34 @@ export async function selectVessel(mmsi, name) {
     setEventMarkers(layer);
   }
 
-  // Fit to just the recent window (matches the windowed track + playback start at
-  // the latest fix), not the whole voyage — no jarring zoom-out to everywhere the
-  // vessel has ever been. Pressing play re-fits to the full track (see playback).
-  const tEnd = track.length ? new Date(track[track.length - 1].fix_ts).getTime() : 0;
-  const winFixes = track.filter(f => new Date(f.fix_ts).getTime() >= tEnd - PLAYBACK_WINDOW_MS);
-  const fitSrc = winFixes.length ? winFixes : track;
-  const fitPts = fitSrc.length ? fitSrc.map(f => [f.lat, f.lon]) : history.map(h => [h.lat, h.lon]);
-  // maxZoom guards against over-zooming when the window holds a single fix.
-  map.fitBounds(L.latLngBounds(fitPts).pad(0.2), { maxZoom: 11 });
+  const fitPts = track.length ? track.map(f => [f.lat, f.lon]) : history.map(h => [h.lat, h.lon]);
+  if (fitPts.length) map.fitBounds(L.latLngBounds(fitPts).pad(0.2), { maxZoom: 11 });
   document.getElementById('reset-btn').style.display = 'block';
-  startPlayback(track);
-  const ev = events && events.length ? ` · ${events.length} events` : '';
-  setStatus(`${name} — ${history.length} fixes${ev}`);
-  // Let the shell surface which signals this vessel currently feeds.
-  window.dispatchEvent(new CustomEvent('app:vessel-selected', { detail: { mmsi, name } }));
+
+  // Playback is desktop-only — the static track already shows the path on phones.
+  if (!isPhone()) startPlayback(track);
+  renderScopeToggle();
+
+  const evN = evShown.length ? ` · ${evShown.length} events` : '';
+  setStatus(`${name} — ${track.length} fixes${evN}${cutoff != null ? ' · since departure' : ' · full track'}`);
+}
+
+// The "this leg ⇄ full path" toggle lives in the inspector (works on phone too,
+// where there's no playback bar). Only shown when a departure cutoff exists.
+function renderScopeToggle() {
+  const insp = document.getElementById('inspector');
+  if (!insp || insp.hidden || !currentSel) return;
+  let foot = insp.querySelector('.insp-foot');
+  if (!foot) { foot = document.createElement('div'); foot.className = 'insp-foot'; insp.appendChild(foot); }
+  if (currentSel.lastDep == null) { foot.innerHTML = ''; return; }
+  foot.innerHTML = `<button class="insp-scope">${currentSel.scope === 'voyage' ? 'Show full path' : 'Show this leg'}</button>`;
+  foot.querySelector('.insp-scope').addEventListener('click', toggleTrackScope);
+}
+
+export function toggleTrackScope() {
+  if (!currentSel) return;
+  currentSel.scope = currentSel.scope === 'voyage' ? 'full' : 'voyage';
+  drawSelection();
 }
 
 export function dimAllExcept(mmsi) {

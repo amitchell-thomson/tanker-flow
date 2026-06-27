@@ -39,12 +39,12 @@ export const BASEMAPS = {
 
 // Vessel class → fill color (Catppuccin Mocha). Only LNG carriers and FSRUs
 // reach the map.
-export const FSRU_COLOR = '#f38ba8';     // red
-export const CARRIER_COLOR = '#cba6f7';  // mauve — vivid + distinct on the dark map
+export const FSRU_COLOR = '#dd8079';     // brick red
+export const CARRIER_COLOR = '#b9a3e0';  // muted violet — vivid + distinct over navy
 
 // priority_watchlist tier → marker stroke color (Mocha). Tier 1 (in a terminal
 // zone) is hottest, tier 5 (stale) coldest; null = not on the watchlist.
-const TIER_COLORS = { 1: '#a6e3a1', 2: '#f9e2af', 3: '#fab387', 4: '#a6adc8', 5: '#7f849c' };
+const TIER_COLORS = { 1: '#6cc28d', 2: '#d8b75f', 3: '#cf9a63', 4: '#99a6bc', 5: '#65718a' };
 export function tierColor(tier) { return TIER_COLORS[tier] || '#585b70'; }
 
 // priority_watchlist tier → marker radius (px). Tier 1 (at a terminal) reads
@@ -139,11 +139,11 @@ export function fmtTimeFull(iso) {
 
 // Color per event_type (Catppuccin Mocha; stays in sync with the .et-* CSS classes).
 export const EVENT_COLORS = {
-  zone_entry:      '#a6e3a1', // green
-  anchorage_entry: '#74c7ec', // sapphire
-  anchored:        '#89b4fa', // blue
-  anchorage_exit:  '#94e2d5', // teal
-  moored:          '#fab387', // peach
-  departed:        '#eba0ac', // maroon
-  zone_exit:       '#f38ba8', // red
+  zone_entry:      '#6cc28d', // green
+  anchorage_entry: '#5b8fc9', // blue
+  anchored:        '#5fb0a8', // teal
+  anchorage_exit:  '#7bb38e', // sage
+  moored:          '#cf9a63', // amber
+  departed:        '#c98a8a', // dusty rose
+  zone_exit:       '#dd8079', // brick red
 };

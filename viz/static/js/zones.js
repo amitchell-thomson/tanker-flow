@@ -12,9 +12,9 @@ function daysSince(iso) { return iso ? (Date.now() - new Date(iso).getTime()) / 
 function healthColor(iso) {
   const d = daysSince(iso);
   if (d == null) return '#6c7086';   // grey — no events ever
-  if (d <= 2) return '#a6e3a1';      // green — active
-  if (d <= 7) return '#f9e2af';      // yellow — slowing
-  return '#f38ba8';                  // red — silent >7d (likely outage)
+  if (d <= 2) return '#6cc28d';      // green — active
+  if (d <= 7) return '#d8b75f';      // yellow — slowing
+  return '#dd8079';                  // red — silent >7d (likely outage)
 }
 function healthLabel(iso) {
   const d = daysSince(iso);

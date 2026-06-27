@@ -18,6 +18,7 @@ import numpy as np
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 from matplotlib.colors import LinearSegmentedColormap
 from PIL import Image
 from starlette.concurrency import run_in_threadpool
@@ -45,11 +46,12 @@ from pipeline.visits import compute_visits
 
 STATIC_DIR = Path(__file__).parent / "static"
 
-# Catppuccin Mocha density ramp (low → high traffic): pale blue end to end (no
-# grey low end), so a lone track already reads as soft sky and the busiest
-# overlaps deepen to the accent blue. Intensity is carried by alpha (see below).
-_MOCHA_DENSITY = LinearSegmentedColormap.from_list(
-    "mocha_density", ["#b4befe", "#89dceb", "#74c7ec", "#89b4fa"]
+# Density heat ramp (low → high traffic) tuned to the Oxford-navy basemap: a lone
+# lane reads as a cool slate-blue, busier lanes warm through teal to gold, and the
+# densest overlaps glow pale cream — so high-overlap areas POP off the navy instead
+# of saturating into an indistinct blue blob (the old all-blue ramp's failing).
+_DENSITY_CMAP = LinearSegmentedColormap.from_list(
+    "tf_density", ["#2c4f78", "#4a93a8", "#c8ac72", "#f6edcf"]
 )
 
 
@@ -83,6 +85,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+# Compress responses (the signals panel is multi-MB of numeric JSON that gzips
+# ~5–10×; also shrinks /api/vessels and /api/port-events). minimum_size skips
+# tiny bodies where the header overhead isn't worth it.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -671,12 +677,12 @@ async def _build_density_source(pool: asyncpg.Pool) -> dict:
 
 
 def _tile_line_width(z: int) -> float:
-    """Antialiased line thickness (px) as a function of zoom. Fat at low zoom so
-    the many individual tracks merge into clean, smooth lanes that reveal the
-    pattern; tapering to 1px at high zoom so the exact paths show. It's pure
-    antialiased line rendering, so the result never pixelates at any zoom."""
-    z_fat, z_thin = 4, 11
-    w_fat, w_thin = 5.0, 1.0
+    """Antialiased line thickness (px) as a function of zoom. Held to ~1px even when
+    zoomed out so lanes stay crisp (a wider line over a world-spanning low-zoom tile
+    smears tracks into an indistinct blur). Tapers slightly toward high zoom for
+    exact paths. Pure antialiased rendering — never pixelates."""
+    z_fat, z_thin = 4, 12
+    w_fat, w_thin = 1.0, 0.7
     if z <= z_fat:
         return w_fat
     if z >= z_thin:
@@ -715,11 +721,11 @@ def _render_density(
         grid = grid.reshape(h, ss, w, ss).mean(axis=(1, 3))
 
     normed = np.clip(np.log1p(grid) / p99, 0.0, 1.0)
-    rgba = _MOCHA_DENSITY(normed)
-    # Alpha floor so even a single (non-overlapping) track reads clearly as a
-    # pale blue line, ramping to opaque accent blue where many overlap. Empty
-    # pixels stay fully transparent so the ocean is untouched.
-    alpha = np.clip(0.45 + 0.55 * np.sqrt(normed), 0.0, 1.0)
+    rgba = _DENSITY_CMAP(normed)
+    # Alpha floor so even a single (non-overlapping) track reads clearly as a cool
+    # lane, ramping to opaque cream where many overlap. Empty pixels stay fully
+    # transparent so the ocean is untouched.
+    alpha = np.clip(0.5 + 0.5 * np.sqrt(normed), 0.0, 1.0)
     alpha[grid <= 0] = 0.0
     rgba[:, :, 3] = alpha
     img = Image.fromarray((rgba * 255).astype(np.uint8), "RGBA")
@@ -1085,8 +1091,7 @@ async def signals(
     sql = f"""
         SELECT sd.signal_key, sd.bucket_date, sd.zone_scope, sd.regime,
                sd.value, sd.n_legs,
-               sd.value_dispersion, sd.open_fraction, sd.estimated_fraction,
-               sd.basis, sd.computed_at
+               sd.value_dispersion, sd.open_fraction, sd.estimated_fraction
         FROM signal_daily sd
         WHERE {" AND ".join(where)}
         ORDER BY sd.signal_key, sd.zone_scope, sd.regime, sd.bucket_date
@@ -1375,37 +1380,3 @@ async def signals_contributors(
         return {"kind": "visits", "rows": rows}
 
     return {"kind": "legs", "rows": []}
-
-
-@app.get("/api/vessel/{mmsi}/signals")
-async def vessel_signals(mmsi: int, pool: asyncpg.Pool = Depends(get_pool)):
-    """Which signal_keys this vessel currently feeds — the map→signals
-    cross-highlight. Reuses the same leg/visit membership the dashboard uses."""
-    now, legs, visits, lane, _, _ = await _signal_context(pool)
-    today = now.date()
-    feeds: list[str] = []
-
-    if any(
-        lg.mmsi == mmsi
-        for lg in items_live_on(lane_legs(legs, lane), today, leg_interval)
-    ):
-        feeds.append("gas_in_transit_volume")
-    if any(
-        lg.mmsi == mmsi
-        for lg in items_live_on(ballast_to_us_legs(legs, lane), today, leg_interval)
-    ):
-        feeds.append("gas_ballast_to_us")
-    if any(
-        v.mmsi == mmsi
-        for v in items_live_on(discharging_eu_visits(visits), today, visit_interval)
-    ):
-        feeds.append("gas_discharging_eu")
-    if any(
-        v.mmsi == mmsi
-        for v in items_live_on(loading_us_visits(visits), today, visit_interval)
-    ):
-        feeds.append("gas_loading_us")
-
-    seen: set[str] = set()
-    ordered = [f for f in feeds if not (f in seen or seen.add(f))]
-    return {"mmsi": mmsi, "signals": ordered}

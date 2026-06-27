@@ -1,10 +1,10 @@
-// Vessel track polyline + per-event markers + signal-leg arcs.
+// Vessel track polyline + per-event markers.
 import { map } from './map.js';
-import { greatCircle, bearingDeg, haversineNm, fmtTimeShort } from './config.js';
+import { bearingDeg, haversineNm, fmtTimeShort } from './config.js';
 
 const GAP_HOURS = 6;          // dt above this between fixes = AIS dropout
-const TRACK_OLD = '#585b70';  // surface2 — oldest fix
-const TRACK_NEW = '#89dceb';  // sky — newest (reads as "now")
+const TRACK_OLD = '#3a4c6e';  // surface2 — oldest fix
+const TRACK_NEW = '#c8ac72';  // sky — newest (reads as "now")
 // Teleport gate — mirrors pipeline/port_events.py (_drop_teleports). The history
 // endpoint serves raw ais_fixes, which carry MMSI-collision/spoof spikes; drop
 // any fix implying > TELEPORT_MAX_KN from the last *accepted* fix, gated by a
@@ -41,7 +41,6 @@ const gapLabel = h => (h < 24 ? `${Math.round(h)}h` : `${Math.round(h / 24)}d`);
 
 let trackLayer = null;
 let eventMarkersLayer = null;
-let arcLayer = null;
 
 // Per-fix markers (arrows + gap flags + latest dot), each tagged with its fix
 // time and sorted, so playback can show only the ones inside its trailing window
@@ -50,7 +49,7 @@ let arcLayer = null;
 let trackPoints = [];
 let winLo = 0, winHi = 0;
 
-export function hasTrack() { return trackLayer !== null || eventMarkersLayer !== null || arcLayer !== null; }
+export function hasTrack() { return trackLayer !== null || eventMarkersLayer !== null; }
 
 export function clearTrackAndEvents() {
   if (trackLayer)        { map.removeLayer(trackLayer);        trackLayer = null; }
@@ -94,42 +93,6 @@ export function setTrackWindow(tStart, tEnd) {
   winLo = newLo; winHi = newHi;
 }
 
-export function clearSignalArcs() {
-  if (arcLayer) { map.removeLayer(arcLayer); arcLayer = null; }
-}
-
-// Draw a signal's contributing legs as great-circle arcs: width ∝ dwt. A closed
-// leg draws origin → observed arrival (solid); an open leg draws origin → the
-// vessel's current position (dashed, the voyage so far — destination unknown).
-// The origin is always marked so a bucket of all-open legs (most recent days)
-// still renders something and can be fit-to. Returns the bounds for fit-to.
-export function drawSignalArcs(legs, { color = '#89b4fa' } = {}) {
-  clearSignalArcs();
-  arcLayer = L.layerGroup();
-  const bounds = [];
-  for (const lg of legs) {
-    if (lg.departed_lat == null) continue;  // need at least an origin
-    const name = (lg.vessel_name || '').trim() || `MMSI ${lg.mmsi}`;
-    const open = lg.dist_source !== 'observed';
-    if (lg.dest_lat != null && lg.dest_lon != null) {
-      const pts = greatCircle(lg.departed_lat, lg.departed_lon, lg.dest_lat, lg.dest_lon);
-      const weight = lg.dwt ? Math.max(1, Math.min(5, lg.dwt / 45000)) : 1.5;
-      const head = open ? 'in transit · position so far' : (lg.dest_zone || '?');
-      L.polyline(pts, {
-        color, weight, opacity: 0.6, dashArray: open ? '4 7' : null, bubblingMouseEvents: false,
-      }).bindTooltip(`${name} · ${lg.origin_zone}→${head}`, { sticky: true }).addTo(arcLayer);
-      pts.forEach(p => bounds.push(p));
-    }
-    const origin = [lg.departed_lat, lg.departed_lon];
-    L.circleMarker(origin, {
-      radius: 3, color, fillColor: color, fillOpacity: 0.9, weight: 0, bubblingMouseEvents: false,
-    }).bindTooltip(`${name} · departed ${lg.origin_zone}`, { sticky: true }).addTo(arcLayer);
-    bounds.push(origin);
-  }
-  arcLayer.addTo(map);
-  return bounds;
-}
-
 export function drawTrack(fixes, { windowMs = null } = {}) {
   // /api/vessel/{mmsi}/history returns newest-first; sort to chronological,
   // then strip teleport spikes so the drawn track follows the real vessel.
@@ -158,7 +121,7 @@ export function drawTrack(fixes, { windowMs = null } = {}) {
     trackPoints.push({ ts: new Date(b.fix_ts).getTime(), marker: seg });
     if (gap) {
       const gm = L.circleMarker([(a.lat + b.lat) / 2, (a.lon + b.lon) / 2], {
-        radius: 4, color: '#f9e2af', fillColor: '#11111b',
+        radius: 4, color: '#d8b75f', fillColor: '#0a111e',
         fillOpacity: 1, weight: 1.5, bubblingMouseEvents: false,
       }).bindTooltip(`⚠ AIS gap · dark ${gapLabel(dtH)}`, { sticky: true });
       trackPoints.push({ ts: new Date(b.fix_ts).getTime(), marker: gm });
@@ -179,20 +142,20 @@ export function drawTrack(fixes, { windowMs = null } = {}) {
 
     if (newest) {
       const nd = L.circleMarker([f.lat, f.lon], {
-        radius: 5, color: '#a6e3a1', weight: 0,
-        fillColor: '#a6e3a1', fillOpacity: 0.95, bubblingMouseEvents: false,
+        radius: 5, color: '#6cc28d', weight: 0,
+        fillColor: '#6cc28d', fillOpacity: 0.95, bubblingMouseEvents: false,
       }).bindTooltip(tip, { sticky: true });
       trackPoints.push({ ts: new Date(f.fix_ts).getTime(), marker: nd });
       return;
     }
 
     const brg = bearingDeg(f.lat, f.lon, s[i + 1].lat, s[i + 1].lon);
-    const fill = rescue ? '#f5c2e7' : lerpHex(TRACK_OLD, TRACK_NEW, i / Math.max(1, n - 1));
+    const fill = rescue ? '#d18fb0' : lerpHex(TRACK_OLD, TRACK_NEW, i / Math.max(1, n - 1));
     const sz = rescue ? 16 : 12;
     const icon = L.divIcon({
       className: 'track-arrow',
       html: `<svg width="${sz}" height="${sz}" viewBox="0 0 14 14" style="transform:rotate(${brg}deg)">`
-        + `<path d="M7 1 L11 12 L7 9 L3 12 Z" fill="${fill}"${rescue ? ' stroke="#11111b" stroke-width="1"' : ''}/></svg>`,
+        + `<path d="M7 1 L11 12 L7 9 L3 12 Z" fill="${fill}"${rescue ? ' stroke="#0a111e" stroke-width="1"' : ''}/></svg>`,
       iconSize: [sz, sz], iconAnchor: [sz / 2, sz / 2],
     });
     const m = L.marker([f.lat, f.lon], { icon }).bindTooltip(tip, { sticky: true });

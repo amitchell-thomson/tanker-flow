@@ -48,7 +48,13 @@ viz:
 	# Bind all interfaces so the viz is reachable over the tailnet (one URL for
 	# every device: http://compute-node:8000) as well as localhost. Traffic to
 	# other devices rides the encrypted tailnet; keep this host behind a firewall.
-	uv run uvicorn viz.app:app --host 0.0.0.0 --port 8000 --reload
+	#
+	# --reload-exclude 'viz/_*.py': underscore-prefixed scripts in viz/ are dev
+	# helpers (e.g. viz/_shot.py, the Playwright screenshotter). app.py imports
+	# datashader + matplotlib, so every reload is a ~20-25s restart — excluding the
+	# helpers keeps the screenshot/iterate loop fast. (Static JS/CSS edits never
+	# trigger a reload; only .py files do.)
+	uv run uvicorn viz.app:app --host 0.0.0.0 --port 8000 --reload --reload-exclude 'viz/_*.py'
 
 port-events:
 	uv run python -m pipeline.port_events

@@ -13,3 +13,7 @@ data/noaa_archive/
 *.aiscatcher_page.html
 # Regenerable on-disk render cache (density shipping-lane tiles)
 .cache/
+design-inspo/
+
+# viz dev-helper screenshot output (viz/_shot.py)
+viz/_shots/

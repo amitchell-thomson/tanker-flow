@@ -4,7 +4,7 @@
 // (play/pause · scrub · speed · time). Self-contained: owns its Leaflet layer and
 // wires the static #playback-bar markup in index.html.
 import { map } from './map.js';
-import { fmtTimeShort, PLAYBACK_WINDOW_MS } from './config.js';
+import { fmtTimeShort } from './config.js';
 import { setTrackWindow } from './track.js';
 
 const BASE_DURATION_MS = 88000;        // wall-clock ms to play the whole track at 1×
@@ -51,9 +51,9 @@ export function startPlayback(cleanFixes) {
   // Use the map's shared canvas renderer — never mint one per playback, or it
   // leaks an orphaned <canvas> on the map each time (see map.js).
   layer = L.layerGroup().addTo(map);
-  trail = L.polyline([], { color: '#89b4fa', weight: 3, opacity: 0.9, bubblingMouseEvents: false }).addTo(layer);
-  halo = L.circleMarker(latlngs[0], { radius: 12, color: '#89b4fa', weight: 0, fillColor: '#89b4fa', fillOpacity: 0.22, bubblingMouseEvents: false }).addTo(layer);
-  dot = L.circleMarker(latlngs[0], { radius: 6, color: '#11111b', weight: 2, fillColor: '#89b4fa', fillOpacity: 1, bubblingMouseEvents: false }).addTo(layer);
+  trail = L.polyline([], { color: '#c8ac72', weight: 3, opacity: 0.9, bubblingMouseEvents: false }).addTo(layer);
+  halo = L.circleMarker(latlngs[0], { radius: 12, color: '#c8ac72', weight: 0, fillColor: '#c8ac72', fillOpacity: 0.22, bubblingMouseEvents: false }).addTo(layer);
+  dot = L.circleMarker(latlngs[0], { radius: 6, color: '#0a111e', weight: 2, fillColor: '#c8ac72', fillOpacity: 1, bubblingMouseEvents: false }).addTo(layer);
 
   ensureBar();
   bar.hidden = false;
@@ -84,11 +84,9 @@ function renderAt(t) {
   const p = sampleAt(t);
   dot.setLatLng([p.lat, p.lon]);
   halo.setLatLng([p.lat, p.lon]);
-  // Trail = only the path within the last TRAIL_WINDOW_MS behind t (a receding
-  // tail), not the whole voyage from the start. The tail's far end is
-  // interpolated at exactly t − window so it recedes smoothly instead of snapping
-  // fix-to-fix; clamped to the track start when the window reaches past it.
-  const wStart = Math.max(t0, t - PLAYBACK_WINDOW_MS);
+  // Trail = the whole path from the leg's start up to t (it grows as it plays, so
+  // the voyage draws itself), rather than a receding fixed-length tail.
+  const wStart = t0;
   const s = sampleAt(wStart);
   const tail = [[s.lat, s.lon]];
   for (let i = s.i + 1; i <= p.i; i++) tail.push(latlngs[i]);

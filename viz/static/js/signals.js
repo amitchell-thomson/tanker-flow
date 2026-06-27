@@ -22,24 +22,25 @@ try {
   if (anno) Chart.register(anno);
 } catch (_) { /* already registered */ }
 
-// ── Catppuccin Mocha for charts ──
+// ── "Oxford" navy + gold palette for charts (mirrors css :root) ──
 const C = {
-  text: '#cdd6f4', subtext0: '#a6adc8', overlay0: '#6c7086',
-  surface0: '#313244', surface1: '#45475a',
-  blue: '#89b4fa', teal: '#94e2d5', peach: '#fab387',
-  green: '#a6e3a1', mauve: '#cba6f7', red: '#f38ba8',
+  text: '#eef2f8', subtext0: '#99a6bc', overlay0: '#65718a',
+  surface0: '#1e2c45', surface1: '#2a3a58',
+  blue: '#5b8fc9', teal: '#5fb0a8', peach: '#cf9a63',
+  green: '#6cc28d', mauve: '#a892d8', red: '#d9776f',
 };
 Chart.defaults.color = C.subtext0;
-Chart.defaults.borderColor = 'rgba(205,214,244,0.06)';
-Chart.defaults.font.family = "'JetBrains Mono', ui-monospace, monospace";
+Chart.defaults.borderColor = 'rgba(190,205,230,0.06)';
+Chart.defaults.font.family = "'IBM Plex Mono', ui-monospace, monospace";
 Chart.defaults.font.size = 10;
 
-// Stable colours for the destination-zone bands so a zone reads the same across
-// every chart. Terminal/lane bands cycle PALETTE instead.
+// Stable colours for the destination-zone bands — a signal-flag coding harmonized
+// to the navy canvas, so a zone reads the same across every chart. Terminal/lane
+// bands cycle PALETTE.
 const ZONE_COLORS = {
-  usgulf: '#89b4fa', usatlantic: '#74c7ec',
-  nweurope: '#a6e3a1', baltic: '#94e2d5', iberian: '#f9e2af',
-  wmed: '#fab387', emed: '#eba0ac', unknown: '#6c7086',
+  usgulf: '#5b8fc9', usatlantic: '#84b0e0',
+  nweurope: '#7bb38e', baltic: '#5fb0a8', iberian: '#d8b75f',
+  wmed: '#cf9a63', emed: '#d3786f', unknown: '#65718a',
 };
 const ZONE_LABELS = {
   usgulf: 'US Gulf', usatlantic: 'US Atlantic', nweurope: 'NW Europe',
@@ -47,8 +48,8 @@ const ZONE_LABELS = {
   unknown: 'unknown dest',
 };
 const PALETTE = [
-  '#89b4fa', '#a6e3a1', '#fab387', '#cba6f7', '#94e2d5', '#f9e2af',
-  '#eba0ac', '#f38ba8', '#74c7ec', '#b4befe', '#f5c2e7', '#89dceb',
+  '#c8ac72', '#5b8fc9', '#7bb38e', '#84b0e0', '#cf9a63', '#a892d8',
+  '#5fb0a8', '#d3786f', '#d8b75f', '#9fb0e0', '#d18fb0', '#7fc0b8',
 ];
 
 // ── The 34-signal catalogue (analysis/SIGNALS.md §3). One entry per signal_key.
@@ -184,9 +185,12 @@ let panelStartMs = null;
 let panelEndMs = null;
 let TERMINALS = {};       // terminal_id -> {terminal_name, zone, flow_direction}
 let basis = 'physical';   // physical (validation) | knowable (model input)
-let filterText = '';
 let headlineOnly = false;
-let windowDays = 365;     // 0 = full history; the default keeps the payload small
+// 0 = full history. Phones default to a tighter window so first paint stays
+// small over a cellular link; desktop keeps a year. The range <select> is
+// synced to this in initSignals so the control reflects the active window.
+const PHONE = window.matchMedia('(max-width: 640px)').matches;
+let windowDays = PHONE ? 90 : 365;
 // Lazy chart instantiation: build a card's Chart only when it nears the viewport
 // (the whole-panel payload + 34 charts up-front was the source of the lag).
 let io = null;
@@ -364,26 +368,29 @@ function seamAnnotation() {
       type: 'line', scaleID: 'x', value: SEAM_MS,
       borderColor: 'rgba(108,112,134,0.7)', borderWidth: 1, borderDash: [3, 3],
       label: { display: true, content: 'regime change', position: 'start', rotation: 0,
-        backgroundColor: 'rgba(24,24,37,0.85)', color: C.overlay0, font: { size: 8 }, padding: 2, yAdjust: -2 },
+        backgroundColor: 'rgba(21,33,56,0.92)', color: C.overlay0, font: { size: 8 }, padding: 2, yAdjust: -2 },
     },
   };
 }
 function xScale() {
-  return { type: 'time', time: { unit: 'week', tooltipFormat: 'yyyy-MM-dd' }, ticks: { maxRotation: 0, color: C.overlay0 }, grid: { color: 'rgba(205,214,244,0.04)' } };
+  return { type: 'time', time: { unit: 'week', tooltipFormat: 'yyyy-MM-dd' }, ticks: { maxRotation: 0, color: C.overlay0 }, grid: { color: 'rgba(190,205,230,0.04)' } };
 }
 
 // ── stacked-area chart (the four gas-volume headlines; click-to-trace) ──
-function stackedOptions(spec, onClick) {
+// showLegend toggles Chart.js's built-in bottom legend: off for cards (they use
+// the custom collapsible band dropdown built in buildCardLegend), on for the
+// roomy fullscreen modal.
+function stackedOptions(spec, onClick, showLegend) {
   return {
     responsive: true, maintainAspectRatio: false, animation: false,
     interaction: { mode: 'index', intersect: false }, onClick,
     onHover: (e, els) => { e.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
     scales: {
       x: xScale(),
-      y: { stacked: true, beginAtZero: true, ticks: { callback: (v) => fmtCompact(v), color: C.overlay0 }, grid: { color: 'rgba(205,214,244,0.05)' } },
+      y: { stacked: true, beginAtZero: true, ticks: { callback: (v) => fmtCompact(v), color: C.overlay0 }, grid: { color: 'rgba(190,205,230,0.05)' } },
     },
     plugins: {
-      legend: { display: true, position: 'bottom', labels: { boxWidth: 9, font: { size: 9 }, padding: 6 } },
+      legend: { display: showLegend, position: 'bottom', labels: { boxWidth: 9, font: { size: 9 }, padding: 6 } },
       tooltip: {
         filter: (item) => item.parsed.y > 0,
         callbacks: {
@@ -435,19 +442,19 @@ function buildStackedArea(canvas, key, spec, byScope, regime, openFor) {
 
 // ── generic multi-line chart (every non-stack shape) ──
 const MAX_BANDS = 10;  // cap legend/line clutter on lane/terminal-banded signals
-function lineOptions(spec, nBands) {
-  const y = { ticks: { color: C.overlay0, callback: (v) => spec.shape === 'fraction' ? Math.round(v * 100) + '%' : fmtCompact(v) }, grid: { color: 'rgba(205,214,244,0.05)' } };
+function lineOptions(spec, nBands, showLegend) {
+  const y = { ticks: { color: C.overlay0, callback: (v) => spec.shape === 'fraction' ? Math.round(v * 100) + '%' : fmtCompact(v) }, grid: { color: 'rgba(190,205,230,0.05)' } };
   if (spec.shape === 'fraction') { y.min = 0; y.max = 1; }
   else if (spec.shape !== 'diverging') { y.beginAtZero = true; }
   const ann = seamAnnotation();
-  if (spec.shape === 'diverging') ann.zero = { type: 'line', scaleID: 'y', value: 0, borderColor: 'rgba(205,214,244,0.18)', borderWidth: 1 };
+  if (spec.shape === 'diverging') ann.zero = { type: 'line', scaleID: 'y', value: 0, borderColor: 'rgba(190,205,230,0.18)', borderWidth: 1 };
   return {
     responsive: true, maintainAspectRatio: false, animation: false,
     interaction: { mode: 'index', intersect: false },
     onHover: (e) => { e.native.target.style.cursor = 'default'; },
     scales: { x: xScale(), y },
     plugins: {
-      legend: { display: nBands > 1 && nBands <= MAX_BANDS, position: 'bottom', labels: { boxWidth: 9, font: { size: 9 }, padding: 6 } },
+      legend: { display: showLegend && nBands > 1, position: 'bottom', labels: { boxWidth: 9, font: { size: 9 }, padding: 6 } },
       tooltip: { callbacks: { label: (c) => `${c.dataset.label}: ${fmtTip(c.parsed.y, spec)}` } },
       annotation: { annotations: ann },
     },
@@ -474,18 +481,65 @@ function buildLineChart(canvas, key, spec, byScope, regime) {
   return chart;
 }
 
+// Custom band legend below a card's chart — a full-width toggle bar showing the
+// band count (collapsed), expanding to a tight row-by-row table: swatch · name ·
+// latest value. Each row toggles its series' visibility (mirrors Chart.js).
+// nBands is the true band count (a line chart caps drawn series at MAX_BANDS, so
+// the table can be shorter than nBands → a "+k more" note keeps the count honest).
+function buildCardLegend(card, chart, spec, nBands) {
+  const host = card.querySelector('.chart-legend');
+  if (!host) return;
+  const ds = chart.data.datasets;
+  if (ds.length <= 1) { host.remove(); return; }  // single series → no legend
+  const word = BAND_WORD[spec.bandType] || 'series';
+  host.classList.add('collapsed');
+  const more = nBands > ds.length ? `<span class="legend-more">+${nBands - ds.length}</span>` : '';
+  host.innerHTML = `
+    <button class="legend-toggle" type="button" aria-expanded="false">
+      <span class="legend-count">${nBands} ${word}</span>${more}
+      <span class="legend-caret">▾</span>
+    </button>
+    <div class="legend-items"></div>`;
+  const items = host.querySelector('.legend-items');
+  const fmtLatest = (y) => y == null ? '' : (spec.shape === 'fraction' ? Math.round(y * 100) + '%' : fmtCompact(y));
+  ds.forEach((d, i) => {
+    const last = d.data.length ? d.data[d.data.length - 1] : null;
+    const it = document.createElement('button');
+    it.type = 'button';
+    it.className = 'legend-item';
+    it.title = 'Toggle series';
+    it.innerHTML = `<span class="li-swatch" style="background:${d.borderColor};"></span>`
+      + `<span class="li-label">${d.label}</span>`
+      + `<span class="li-val">${fmtLatest(last && last.y)}</span>`;
+    it.addEventListener('click', () => {
+      const vis = chart.isDatasetVisible(i);
+      chart.setDatasetVisibility(i, !vis);
+      it.classList.toggle('off', vis);
+      chart.update();
+    });
+    items.appendChild(it);
+  });
+  const toggle = host.querySelector('.legend-toggle');
+  toggle.addEventListener('click', () => {
+    const open = host.classList.toggle('collapsed');
+    toggle.setAttribute('aria-expanded', String(!open));
+  });
+}
+
 // Shared Chart config for both the card chart and the fullscreen modal. Pass
 // openFor to make a stack click-to-trace; pass null for a non-interactive view
-// (the modal, where a trace would open the drawer behind the overlay).
-function chartConfig(key, spec, byScope, regime, openFor) {
+// (the modal, where a trace would open the drawer behind the overlay). showLegend
+// turns on Chart.js's built-in legend (modal only); cards pass false and render
+// the custom collapsible band dropdown instead.
+function chartConfig(key, spec, byScope, regime, openFor, showLegend = false) {
   if (spec.shape === 'stack') {
     return {
       type: 'line', data: { datasets: stackDatasets(spec, byScope, regime) },
-      options: stackedOptions(spec, openFor ? stackOnClick(key, regime, openFor) : null),
+      options: stackedOptions(spec, openFor ? stackOnClick(key, regime, openFor) : null, showLegend),
     };
   }
   const datasets = lineDatasets(spec, byScope, regime);
-  return { type: 'line', data: { datasets }, options: lineOptions(spec, datasets.length) };
+  return { type: 'line', data: { datasets }, options: lineOptions(spec, datasets.length, showLegend) };
 }
 
 // ── fullscreen chart modal ──
@@ -500,7 +554,7 @@ function openChartModal(key) {
   document.getElementById('cm-title').textContent = spec.label || key;
   document.getElementById('cm-sub').textContent = `${key} · ${spec.unit}` + (regime && regime !== 'all' ? ` · ${regime}` : '');
   if (modalChart) modalChart.destroy();
-  modalChart = new Chart(document.getElementById('cm-canvas'), chartConfig(key, spec, byScope, regime, null));
+  modalChart = new Chart(document.getElementById('cm-canvas'), chartConfig(key, spec, byScope, regime, null, true));
   modal.hidden = false;
 }
 function closeChartModal() {
@@ -513,7 +567,6 @@ function closeChartModal() {
 function renderCard(parent, key, spec, byScope, regime, openFor) {
   const { cur, prev } = headlineFor(spec, byScope, regime);
   const delta = deltaTag(cur, prev, spec);
-  const nBands = Object.keys(byScope).length;
   const chips = [...extraFlags(key, byScope, regime, cur), ...confChips(spec, byScope, regime)];
 
   const card = document.createElement('div');
@@ -535,11 +588,11 @@ function renderCard(parent, key, spec, byScope, regime, openFor) {
     <div class="signal-value-row">
       <span class="signal-value">${fmtValue(cur, spec)}</span>
       <span class="signal-unit">${spec.unit}</span>
-      <span class="signal-n">${nBands} ${BAND_WORD[spec.bandType] || 'series'}</span>
       <span class="signal-delta ${delta.cls}">${delta.text}</span>
     </div>
     <div class="signal-flags">${chips.join('')}</div>
     <div class="signal-chart-wrap"><canvas></canvas></div>
+    <div class="chart-legend collapsed"></div>
     ${spec.mech ? `<details class="signal-why"><summary>why it matters</summary><div class="signal-mechanism">${spec.mech}</div></details>` : ''}
   `;
   parent.appendChild(card);
@@ -557,6 +610,11 @@ function renderCard(parent, key, spec, byScope, regime, openFor) {
 // IntersectionObserver the first time the card scrolls near the viewport.
 function buildChartFor(entry) {
   const { key, spec, card } = entry;
+  // Never build into a hidden card (a collapsed section's grid is display:none):
+  // Chart.js would size the canvas to 0×0 and render permanently blank. The chart
+  // builds instead when the section is expanded (its head handler / jump re-calls
+  // this once the card is laid out). Guards the blank-chart-on-mobile bug.
+  if (card.offsetParent === null) return;
   const byScope = curGrouped && curGrouped[key];
   if (!byScope) return;
   const rg = chooseRegime(byScope, curRegime);
@@ -564,6 +622,7 @@ function buildChartFor(entry) {
   entry.chart = spec.shape === 'stack'
     ? buildStackedArea(canvas, key, spec, byScope, rg, openFor)
     : buildLineChart(canvas, key, spec, byScope, rg);
+  buildCardLegend(card, entry.chart, spec, Object.keys(byScope).length);
 }
 // Refresh a rendered card's headline + chart in place (no DOM/chart rebuild) —
 // used by the 60 s poll when the structure is unchanged so the page never
@@ -625,9 +684,10 @@ async function openFor(key, sel, bandValue) {
   catch (_) { body.innerHTML = '<div class="empty">Failed to load.</div>'; return; }
 
   const rows = data.rows || [];
-  const actions = document.getElementById('drawer-actions');
-  const day = sel.day || null;
-  if (!rows.length) { actions.innerHTML = ''; body.innerHTML = '<div class="empty">No contributors for this band/day.</div>'; return; }
+  // The drawer is a read-only roster of the vessels behind the clicked value —
+  // no map trace-out (that cross-view bridge was removed).
+  document.getElementById('drawer-actions').innerHTML = '';
+  if (!rows.length) { body.innerHTML = '<div class="empty">No contributors for this band/day.</div>'; return; }
   body.innerHTML = '';
 
   const unit = data.kind === 'visits' ? 'm³/d' : 'm³';
@@ -638,14 +698,6 @@ async function openFor(key, sel, bandValue) {
   const chartTxt = bandValue != null ? `charted <b>${fmtCompact(bandValue)} ${unit}</b> · ` : '';
   recon.innerHTML = `${chartTxt}${rows.length} vessel${rows.length === 1 ? '' : 's'} = <b>${fmtCompact(sum)} ${unit}</b>`;
   body.appendChild(recon);
-
-  if (data.kind === 'legs') {
-    actions.innerHTML = `<button class="drawer-action" id="trace-all">⟿ Show ${rows.length} legs on the map</button>`;
-    document.getElementById('trace-all').addEventListener('click', () => {
-      window.dispatchEvent(new CustomEvent('app:trace-arcs', { detail: { legs: rows, label: `${spec.label || key}`.trim(), day } }));
-      closeDrawer();
-    });
-  } else { actions.innerHTML = ''; }
 
   for (const r of rows) {
     const name = (r.vessel_name || '').trim() || `MMSI ${r.mmsi}`;
@@ -660,7 +712,6 @@ async function openFor(key, sel, bandValue) {
         <div class="contrib-meta">
           <span>${r.terminal_name || ''} · ${r.zone}</span>
           <span>${dep} <span class="contrib-dim">/ ${gas} cargo</span></span>
-          <span class="contrib-arrow">trace on map →</span>
         </div>`;
     } else {
       const ladenTag = r.laden === false ? '<span class="tag ballast">ballast</span>' : '<span class="tag laden">laden</span>';
@@ -671,13 +722,8 @@ async function openFor(key, sel, bandValue) {
           ${ladenTag}
           <span class="tag ${r.status}">${r.status.replace('open_in_transit', 'in transit')}</span>
           <span>${gas}</span>
-          <span class="contrib-arrow">trace on map →</span>
         </div>`;
     }
-    row.addEventListener('click', () => {
-      window.dispatchEvent(new CustomEvent('app:trace', { detail: { mmsi: r.mmsi, label: name, day } }));
-      closeDrawer();
-    });
     body.appendChild(row);
   }
 }
@@ -685,11 +731,6 @@ async function openFor(key, sel, bandValue) {
 // ── render + load ──
 function loadCollapsed() { try { return JSON.parse(localStorage.getItem(LS_COLLAPSED)) || {}; } catch (_) { return {}; } }
 function saveCollapsed(c) { try { localStorage.setItem(LS_COLLAPSED, JSON.stringify(c)); } catch (_) {} }
-function matchesFilter(key, spec) {
-  if (!filterText) return true;
-  const q = filterText.toLowerCase();
-  return key.toLowerCase().includes(q) || (spec.label || '').toLowerCase().includes(q) || (spec.cat || '').includes(q);
-}
 
 // Shape rows into {grouped, regime}; set the panel x-range as a side effect.
 function prepare(rows) {
@@ -711,16 +752,118 @@ function visibleLayout(grouped) {
   const out = [];
   for (const fam of FAMILIES) {
     if (headlineOnly && !fam.headline) continue;
-    const keys = fam.keys.filter((k) => grouped[k] && matchesFilter(k, SPECS[k] || {}));
+    const keys = fam.keys.filter((k) => grouped[k]);
     if (keys.length) out.push({ fam, keys });
   }
   return out;
 }
 function signatureOf(grouped, regime) {
   return JSON.stringify({
-    basis, regime, filterText, headlineOnly, ps: panelStartMs, pe: panelEndMs,
+    basis, regime, headlineOnly, ps: panelStartMs, pe: panelEndMs,
     layout: visibleLayout(grouped).map(({ fam, keys }) => [fam.id, keys.map((k) => [k, Object.keys(grouped[k]).sort(), chooseRegime(grouped[k], regime)])]),
   });
+}
+
+// ── headline ribbon (a compact tape over the grid) ──
+// spread_thrust leads as the hero (the model's headline output), then the four
+// gas-volume headlines. Values come from the same headlineFor() the cards use.
+const RIBBON_KEYS = ['spread_thrust', 'gas_loading_us', 'gas_in_transit_volume', 'gas_discharging_eu', 'gas_ballast_to_us'];
+function renderRibbon(grouped) {
+  const host = document.getElementById('headline-ribbon');
+  if (!host) return;
+  host.innerHTML = '';
+  for (const key of RIBBON_KEYS) {
+    const spec = SPECS[key], byScope = grouped[key];
+    if (!spec || !byScope) continue;
+    const rg = chooseRegime(byScope, curRegime);
+    const { cur, prev } = headlineFor(spec, byScope, rg);
+    const delta = deltaTag(cur, prev, spec);
+    const hero = key === 'spread_thrust';
+    const tile = document.createElement('button');
+    tile.className = 'kpi' + (hero ? ' kpi-hero' : '');
+    tile.dataset.key = key;
+    tile.title = `Jump to ${spec.label}`;
+    tile.innerHTML = `
+      <span class="kpi-label">${hero ? '◤ ' : ''}${spec.label}</span>
+      <span class="kpi-value">${fmtValue(cur, spec)} <span class="kpi-unit">${spec.unit}</span></span>
+      <span class="kpi-delta ${delta.cls}">${delta.text}</span>`;
+    tile.addEventListener('click', () => jumpToCard(key));
+    host.appendChild(tile);
+  }
+}
+
+// ── family jump-rail (sticky chips) + scroll-spy ──
+function expandSection(sec) {
+  if (sec.classList.contains('collapsed')) {
+    sec.classList.remove('collapsed');
+    const c = loadCollapsed(); delete c[sec.dataset.fam]; saveCollapsed(c);
+    sec.querySelectorAll('.signal-card').forEach((cd) => { if (cd._entry && !cd._entry.chart) buildChartFor(cd._entry); });
+  }
+}
+// Build every not-yet-built chart in the target section and all sections ABOVE it,
+// so their heights are final before we scroll. Without this the lazy
+// IntersectionObserver builds charts mid-scroll, grows the sections above the
+// target, and the smooth scroll undershoots (lands on the wrong section).
+function buildChartsUpTo(targetSec) {
+  const root = document.getElementById('signal-sections');
+  const sections = [...root.querySelectorAll('.signal-section')];
+  const idx = sections.indexOf(targetSec);
+  for (let i = 0; i <= idx; i++) {
+    sections[i].querySelectorAll('.signal-card').forEach((cd) => { if (cd._entry && !cd._entry.chart) buildChartFor(cd._entry); });
+  }
+}
+// Pin a family's chip immediately on a jump. The scroll-spy is debounced (runs only
+// after scrolling STOPS — see initSignals), so this pin holds through the whole
+// smooth-scroll and the spy then confirms it once the scroll settles on the target.
+function setActiveFamily(famId) {
+  const rail = document.getElementById('family-rail');
+  if (rail) rail.querySelectorAll('.rail-chip').forEach((c) => c.classList.toggle('active', c.dataset.fam === famId));
+}
+function jumpToCard(key) {
+  const card = document.querySelector(`.signal-card[data-key="${key}"]`);
+  if (!card) return;
+  const sec = card.closest('.signal-section');
+  expandSection(sec);
+  buildChartsUpTo(sec);
+  setActiveFamily(sec.dataset.fam);
+  // Defer to the next frame so the just-built charts have laid out before we scroll.
+  requestAnimationFrame(() => {
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.classList.remove('flash'); void card.offsetWidth; card.classList.add('flash');
+  });
+}
+function jumpToSection(sec) {
+  expandSection(sec);
+  buildChartsUpTo(sec);
+  setActiveFamily(sec.dataset.fam);
+  requestAnimationFrame(() => sec.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+}
+function renderRail(layout) {
+  const host = document.getElementById('family-rail');
+  if (!host) return;
+  host.innerHTML = '';
+  for (const { fam } of layout) {
+    const chip = document.createElement('button');
+    chip.className = 'rail-chip'; chip.dataset.fam = fam.id;
+    chip.textContent = fam.name;
+    chip.addEventListener('click', () => {
+      const sec = document.querySelector(`.signal-section[data-fam="${fam.id}"]`);
+      if (sec) jumpToSection(sec);
+    });
+    host.appendChild(chip);
+  }
+}
+// Highlight the rail chip for whichever section currently sits at the scroll top.
+function updateActiveFamily() {
+  const root = document.getElementById('signal-sections');
+  const rail = document.getElementById('family-rail');
+  if (!root || !rail) return;
+  const secs = [...root.querySelectorAll('.signal-section')];
+  if (!secs.length) return;
+  const top = root.scrollTop + 90;
+  let active = secs[0];
+  for (const s of secs) if (s.offsetTop <= top) active = s;
+  rail.querySelectorAll('.rail-chip').forEach((c) => c.classList.toggle('active', c.dataset.fam === active.dataset.fam));
 }
 
 function render(rows) {
@@ -735,7 +878,9 @@ function render(rows) {
   const { grouped, regime } = prepare(rows);
   curGrouped = grouped; curRegime = regime;
   const layout = visibleLayout(grouped);
-  if (!layout.length) { root.innerHTML = '<div class="empty">No signals match the filter.</div>'; return; }
+  renderRibbon(grouped);
+  if (!layout.length) { document.getElementById('family-rail').innerHTML = ''; root.innerHTML = '<div class="empty">No signals match the filter.</div>'; return; }
+  renderRail(layout);
   const collapsed = loadCollapsed();
 
   // Build a chart only when its card scrolls near view (root = the scroll
@@ -777,6 +922,7 @@ function render(rows) {
     root.appendChild(sec);
   }
   renderedSig = signatureOf(grouped, regime);
+  updateActiveFamily();
 }
 
 // Poll refresh: update in place when the structure matches, else full re-render.
@@ -786,6 +932,7 @@ function refresh(rows) {
   if (signatureOf(grouped, regime) !== renderedSig) { render(rows); return; }
   curGrouped = grouped; curRegime = regime;  // so not-yet-built cards build from fresh data
   for (const entry of rendered) updateCard(entry, grouped[entry.key], regime);
+  renderRibbon(grouped);
 }
 
 // Fetch only what the view renders: the pooled view needs regime='all' alone;
@@ -832,23 +979,6 @@ async function pollOverview() {
   } catch (_) { /* keep the last frame */ }
 }
 
-// Scroll to + flash a signal card by key (map→signals cross-highlight target).
-export function focusSignalCard(key) {
-  const card = document.querySelector(`.signal-card[data-key="${key}"]`);
-  if (!card) return false;
-  const sec = card.closest('.signal-section');
-  if (sec && sec.classList.contains('collapsed')) {  // expand its family first
-    sec.classList.remove('collapsed');
-    const c = loadCollapsed(); delete c[sec.dataset.fam]; saveCollapsed(c);
-  }
-  if (card._entry && !card._entry.chart) buildChartFor(card._entry);  // ensure its chart exists
-  card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  card.classList.remove('flash');
-  void card.offsetWidth;  // restart the animation
-  card.classList.add('flash');
-  return true;
-}
-
 // Exposed to the app shell; runs once when the signals view is first shown
 // (not at import, so it doesn't poll while the map view is up).
 let started = false;
@@ -858,14 +988,20 @@ export function initSignals() {
   // split-regime + range + basis change the *fetch* (regime / window), so reload;
   // filter + headline-only are client-side, so just re-render the cached rows.
   document.getElementById('split-regime').addEventListener('change', loadAll);
+  // Scroll-spy: keep the family rail's active chip in sync — debounced so it fires
+  // only after scrolling STOPS. This lets a jump's immediate chip-pin hold through
+  // the whole smooth-scroll (the spy would otherwise re-light mid-scroll sections).
+  const sectionsEl = document.getElementById('signal-sections');
+  if (sectionsEl) {
+    let spyTimer;
+    sectionsEl.addEventListener('scroll', () => { clearTimeout(spyTimer); spyTimer = setTimeout(updateActiveFamily, 150); }, { passive: true });
+  }
   const basisSel = document.getElementById('basis-select');
   if (basisSel) basisSel.addEventListener('change', (e) => { basis = e.target.value; loadAll(); });
   const rangeSel = document.getElementById('signal-range');
-  if (rangeSel) { windowDays = parseInt(rangeSel.value, 10) || 0; rangeSel.addEventListener('change', (e) => { windowDays = parseInt(e.target.value, 10) || 0; loadAll(); }); }
-  const filterEl = document.getElementById('signal-filter');
-  if (filterEl) {
-    let t;
-    filterEl.addEventListener('input', (e) => { filterText = e.target.value.trim(); clearTimeout(t); t = setTimeout(() => { if (lastRows) render(lastRows); }, 160); });
+  if (rangeSel) {
+    rangeSel.value = String(windowDays);  // reflect the viewport-aware default
+    rangeSel.addEventListener('change', (e) => { windowDays = parseInt(e.target.value, 10) || 0; loadAll(); });
   }
   const headlineEl = document.getElementById('headline-only');
   if (headlineEl) headlineEl.addEventListener('change', (e) => { headlineOnly = e.target.checked; if (lastRows) render(lastRows); });
