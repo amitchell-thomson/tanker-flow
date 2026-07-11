@@ -2,7 +2,7 @@
 import { map, registerLayer } from './map.js';
 import {
   FSRU_COLOR, CARRIER_COLOR, SOG_UNDERWAY_KN, bearingDeg, EVENT_COLORS,
-  tierColor, tierRadius, freshnessOpacity, fmtAge, fmtTimeFull,
+  tierRadius, freshnessOpacity, fmtAge, fmtTimeFull,
 } from './config.js';
 import { drawTrack, clearTrackAndEvents, setEventMarkers } from './track.js';
 import { startPlayback, stopPlayback } from './playback.js';
@@ -29,7 +29,9 @@ function vesselSpec(v) {
   return {
     kind, heading,
     color: v.is_fsru ? FSRU_COLOR : CARRIER_COLOR,
-    stroke: tierColor(v.tier),
+    // Neutral dark hairline just for crispness/separation in clusters — the old
+    // tier-coloured ring was dropped (redundant now vessels are a single fill).
+    stroke: '#0a111e',
     fresh: freshnessOpacity(v.fix_ts),
     r: tierRadius(v.tier),
   };
@@ -53,7 +55,7 @@ function triIcon({ r, color, stroke, heading }) {
     html: `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" `
       + `style="display:block;transform:rotate(${heading}deg);transform-origin:50% 50%;">`
       + `<polygon points="${pts}" fill="${color}" stroke="${stroke}" `
-      + `stroke-width="2" stroke-linejoin="round"/></svg>`,
+      + `stroke-width="1" stroke-linejoin="round"/></svg>`,
     iconSize: [size, size], iconAnchor: [half, half],
   });
 }
@@ -63,7 +65,7 @@ function fsruIcon({ r, color, stroke }) {
   const box = Math.round(r * 1.9);
   return L.divIcon({
     className: 'fsru-icon',
-    html: `<div style="width:${box}px;height:${box}px;background:${color};border:2px solid ${stroke};"></div>`,
+    html: `<div style="width:${box}px;height:${box}px;background:${color};border:1px solid ${stroke};"></div>`,
     iconSize: [box, box], iconAnchor: [box / 2, box / 2],
   });
 }
@@ -125,7 +127,7 @@ function createMarker(v, spec) {
   } else {
     marker = L.circleMarker([v.lat, v.lon], {
       radius: spec.r, color: spec.stroke, fillColor: spec.color,
-      fillOpacity: spec.fresh, opacity: Math.max(0.7, spec.fresh), weight: 2,
+      fillOpacity: spec.fresh, opacity: Math.max(0.7, spec.fresh), weight: 1,
       className: 'vessel-dot', bubblingMouseEvents: false,
     });
   }
@@ -147,7 +149,7 @@ function updateMarker(marker, v, spec) {
   if (spec.kind === 'circle') {
     marker.setStyle({
       radius: spec.r, color: spec.stroke, fillColor: spec.color,
-      fillOpacity: spec.fresh, opacity: Math.max(0.7, spec.fresh), weight: 2,
+      fillOpacity: spec.fresh, opacity: Math.max(0.7, spec.fresh), weight: 1,
     });
   } else {
     // Re-stamp the SVG only when its visual inputs changed; otherwise just

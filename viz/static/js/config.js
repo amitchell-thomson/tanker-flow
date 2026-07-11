@@ -40,7 +40,7 @@ export const BASEMAPS = {
 // Vessel class → fill color (Catppuccin Mocha). Only LNG carriers and FSRUs
 // reach the map.
 export const FSRU_COLOR = '#dd8079';     // brick red
-export const CARRIER_COLOR = '#b9a3e0';  // muted violet — vivid + distinct over navy
+export const CARRIER_COLOR = '#ff3b30';  // bright red — pops off the navy; freshness fade (fillOpacity) still dims stale fixes
 
 // priority_watchlist tier → marker stroke color (Mocha). Tier 1 (in a terminal
 // zone) is hottest, tier 5 (stale) coldest; null = not on the watchlist.

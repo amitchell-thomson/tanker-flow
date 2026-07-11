@@ -7,8 +7,12 @@ import { initMap } from './main.js';
 import { map } from './map.js';
 import { selectVessel } from './vessels.js';
 import { initSignals } from './signals.js';
+import { initHealth } from './health.js';
 
 let signalsReady = false;
+let healthReady = false;
+
+const PATHS = { signals: '/signals', health: '/health' };
 
 function setView(view, { push = true } = {}) {
   document.body.dataset.view = view;
@@ -19,15 +23,19 @@ function setView(view, { push = true } = {}) {
   });
   if (view === 'signals') {
     if (!signalsReady) { initSignals(); signalsReady = true; }
+  } else if (view === 'health') {
+    if (!healthReady) { initHealth(); healthReady = true; }
   } else {
     // The map was display:none while hidden; Leaflet must recompute its size.
     requestAnimationFrame(() => map.invalidateSize());
   }
-  if (push) history.pushState({ view }, '', view === 'signals' ? '/signals' : '/');
+  if (push) history.pushState({ view }, '', PATHS[view] || '/');
 }
 
 function viewFromPath() {
-  return location.pathname === '/signals' ? 'signals' : 'map';
+  if (location.pathname === '/signals') return 'signals';
+  if (location.pathname === '/health') return 'health';
+  return 'map';
 }
 
 // ── nav (top bar + bottom tab bar) + history ──

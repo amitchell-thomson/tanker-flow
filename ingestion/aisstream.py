@@ -704,7 +704,8 @@ async def connect_and_drain(
     Tasks: drain_socket, parser, flusher, watchdog, planned_reconnect. No rotation
     within a connection; the caller's loop builds a fresh subscription on each
     reconnect. Liveness is derived downstream from `ingestion_stats_minute` per
-    source (see viz/tui.py) rather than from a separate heartbeat table.
+    source (see data/pipeline_health.py + the web Health tab) rather than from a
+    separate heartbeat table.
     """
     minute_agg = MinuteAggregator(source=source_name)
 

@@ -39,7 +39,7 @@ eia_series + events ──► data/capture_rate.py ──────► capture
 | Ingestion | Python / asyncpg / websockets / httpx |
 | Enrichment | VesselFinder masterdata + live-position API |
 | Terminal zones | QGIS → GeoPackage → PostGIS |
-| Monitoring | Textual TUI + FastAPI |
+| Monitoring | FastAPI web (Health tab) |
 | Config | pydantic-settings / `.env` |
 | Package manager | uv |
 
@@ -53,15 +53,15 @@ eia_series + events ──► data/capture_rate.py ──────► capture
 - **`terminals`** — 35 LNG export/import terminals with scope and type metadata. `unlocode` column (e.g. `NLRTM`) is used by `pipeline/dest_parser.py` to resolve free-text `vessel_state.dest` strings to a terminal_id. `flow_direction` (`export` / `import`) labels each terminal's role.
 - **`terminal_zones`** — berth, anchorage, and approach polygons (MultiPolygon/4326) linked to terminals. Drawn in QGIS, imported via `make seed-zones`. The `approach` macro-zone contains anchorage + channel + berth as one envelope so a single port visit stays "open" while the vessel transits between them. See `qgis/README.md` for coverage.
 - **`priority_watchlist`** — derived hourly by `pipeline/scoring.py`. One row per LNG/FSRU vessel, ranked into 5 tiers based on current zone proximity / declared destination / activity. The ingester reads this to pick which 150 of ~780 vessels to subscribe to each cycle (100 persistent + 50 scan rotation). `slot_kind` (`persistent` / `pinned` / `scan`) and `in_slot` record who is currently subscribed; `last_scan_window_at` drives scan rotation fairness.
-- **`tier_promotions`** — append-only log of vessels promoted **up into** the persistent band (tiers 1-3), written by `scoring.py` (`via='scoring'`) and the inline state machine (`via='inline'`). Powers the TUI promotions panel.
+- **`tier_promotions`** — append-only log of vessels promoted **up into** the persistent band (tiers 1-3), written by `scoring.py` (`via='scoring'`) and the inline state machine (`via='inline'`). Powers the Health tab's promotions panel.
 - **`port_events`** — derived table, recomputable from `ais_fixes` via `make port-events`. One row per per-vessel transition: `zone_entry → [anchorage_entry → [anchored] → anchorage_exit]* → [moored → departed]? → zone_exit`. `anchorage_entry`/`anchorage_exit` are raw polygon-crossing markers (no dwell, no SOG filter) — bracket every visit to the anchorage polygon, so `queue_time = anchorage_exit - anchorage_entry`. `anchored` is the dwell-confirmed sibling (≥30 min stationary). Combined: presence of `anchorage_entry` answers "did this vessel queue?"; presence of `anchored` answers "did it queue meaningfully?". Each row also carries `terminal_id`, `lat`/`lon` (for great-circle distance downstream), `laden_flag` (forward-filled draught vs `design_draught`), `cold_start` (vessel already in a polygon at first observation), and `regime` (a stored fidelity tag: `noaa` / `gfw` / `bbox` / `mmsi_filter`).
 - **`signal_daily`** — the derived signal panel, rebuilt by `make signals` (TRUNCATE + swap). One row per `(signal_key, bucket_date, zone_scope, regime, basis)` carrying `value`, `n_legs`, and the confidence columns (`value_dispersion`, `open_fraction`, `estimated_fraction`). 34 signals across loading/discharge, in-transit, queues, voyage speed/age, fleet and outage detection — each built in both a `physical` (validation) and `knowable` (leakage-safe, model-ready) basis. `signal_daily_live_vintage` logs the live values as-printed for the point-in-time self-validation. **The full catalogue is [`analysis/SIGNALS.md`](analysis/SIGNALS.md).**
 - **`eia_series`** — US LNG-export volumes from the EIA v2 API (`data/eia.py`), the external ground truth for `data/capture_rate.py`'s NOAA-vs-EIA capture-rate check.
 - **`vf_rescue_log`** — append-only audit trail **and** restart-safe credit ledger for `ingestion/vf_rescue.py`. One row per VF live-position lookup attempt: `rescue_class`, `result` (`rescued` / `no_position` / `rejected_stale` / `rejected_teleport` / `error` / `dry_run`), `credits` billed, and `recheck_at` (the per-vessel cooldown). Today's `SUM(credits)` gates the daily cap; the latest row per MMSI is the cooldown.
-- **`vf_account_status`** — VesselFinder account-balance snapshots from the free `/status` endpoint, appended each rescue run. The TUI shows the latest `credits` + `expiration_date`; consecutive rows give the true burn rate.
+- **`vf_account_status`** — VesselFinder account-balance snapshots from the free `/status` endpoint, appended each rescue run. The Health tab shows the latest `credits` + `expiration_date`; consecutive rows give the true burn rate.
 - **`ingestion_events`** — append-only lifecycle log (connect / subscribe / planned_reconnect / watchdog_reconnect / disconnect / error). Per-connection liveness is derived from `ingestion_stats_minute` instead of a dedicated heartbeat table.
-- **`ingestion_stats_minute` / `ingestion_zone_minute`** — per-minute ingestion stats written by the in-process `MinuteAggregator`: lag mean/p95, distinct MMSI, queue saturation, and connection age per source (and per zone in the latter). Drive the TUI health and field zones.
-- **`fixes_per_minute` / `fixes_per_hour`** — TimescaleDB continuous aggregates for the monitoring TUI.
+- **`ingestion_stats_minute` / `ingestion_zone_minute`** — per-minute ingestion stats written by the in-process `MinuteAggregator`: lag mean/p95, distinct MMSI, queue saturation, and connection age per source (and per zone in the latter). Drive the Health tab's ingestion panels.
+- **`fixes_per_minute` / `fixes_per_hour`** — TimescaleDB continuous aggregates for the Health tab's fixes/hour chart.
 
 ---
 
@@ -102,7 +102,7 @@ make seed-zones      # Import terminal zone polygons from QGIS GeoPackage (upser
 make seed-unlocodes  # Seed terminals.unlocode from db/seed/terminal_unlocodes.sql
 
 # Ingestion
-make ingest          # Run AIS ingestion + monitoring TUI
+make ingest          # Run AIS ingestion (foreground)
 make enrich          # Run VesselFinder enrichment batch
 make refresh-fleet   # Re-parse the latest IGU PDF and import any newly-listed IMOs
 

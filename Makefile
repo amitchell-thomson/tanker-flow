@@ -36,10 +36,7 @@ seed-zones:
 
 ingest:
 	@mkdir -p logs
-	@uv run python -m ingestion.aisstream >> logs/ingestion.log 2>&1 & \
-	INGEST_PID=$$!; \
-	uv run python -m viz.tui; \
-	kill $$INGEST_PID 2>/dev/null || true
+	uv run python -m ingestion.aisstream 2>&1 | tee -a logs/ingestion.log
 
 enrich:
 	uv run python -m ingestion.vesselfinder --terminal-only

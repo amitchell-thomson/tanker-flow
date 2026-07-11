@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Sans+Condensed:wght@500;600;700&display=swap">
   <link rel="stylesheet" href="/static/css/style.css">
   <link rel="stylesheet" href="/static/css/signals.css">
+  <link rel="stylesheet" href="/static/css/health.css">
 </head>
 <body data-view="map">
   <!-- ── Shared top bar: wordmark · view nav · provenance chip · live pulse ── -->
@@ -24,6 +25,7 @@
     <nav id="view-nav">
       <button class="nav-btn active" data-view="map">Map</button>
       <button class="nav-btn" data-view="signals">Signals</button>
+      <button class="nav-btn" data-view="health">Health</button>
     </nav>
     <div id="live-hud"><span id="live-dot"></span><span id="live-text">…</span></div>
   </header>
@@ -162,6 +164,110 @@
       <nav id="family-rail"></nav>
       <main id="signal-sections"></main>
     </section>
+
+    <!-- ── Health view (pipeline ops — ported from the retired TUI) ── -->
+    <section id="view-health" class="view">
+      <div id="health-subhead">
+        <span class="subhead-title">Pipeline health</span>
+        <span id="health-clock">—</span>
+      </div>
+
+      <div id="health-strip">
+        <div class="stat"><span class="stat-label">connections</span><span class="stat-val" id="hs-conn">—</span></div>
+        <div class="stat"><span class="stat-label">watchlist</span><span class="stat-val" id="hs-watch">—</span></div>
+        <div class="stat"><span class="stat-label">scoring</span><span class="stat-val" id="hs-scoring">—</span></div>
+        <div class="stat"><span class="stat-label">vessel_state</span><span class="stat-val" id="hs-vstate">—</span></div>
+        <div class="stat"><span class="stat-label">fleet heard</span><span class="stat-val" id="hs-heard">—</span></div>
+        <div class="stat"><span class="stat-label">unmet rescue</span><span class="stat-val" id="hs-unmet">—</span></div>
+      </div>
+
+      <div id="health-grid">
+        <!-- Row 1: connections (4/6) + errors (2/6) -->
+        <section class="hpanel span4" id="hp-connections">
+          <div class="hpanel-head"><span class="hpanel-title">WebSocket connections</span><span class="hpanel-sub" id="hp-conn-sub"></span></div>
+          <div class="htable-wrap"><table class="htable" id="conn-table"><thead><tr>
+            <th></th><th>Connection</th><th>Egress</th><th>Role</th><th>Covers</th>
+            <th>Fix · lag 5m</th><th>Fix · miss 12h</th><th>Reconn p·wd</th>
+          </tr></thead><tbody></tbody></table></div>
+        </section>
+
+        <section class="hpanel span2" id="hp-errors">
+          <div class="hpanel-head"><span class="hpanel-title">Recent errors</span><span class="hpanel-sub">ingestion_events · 24h</span></div>
+          <div class="htable-wrap"><table class="htable" id="errors-table"><thead><tr>
+            <th>Age</th><th>Source</th><th>Kind</th><th>Message</th>
+          </tr></thead><tbody></tbody></table>
+          <div class="hempty" id="errors-empty" hidden>✓ no errors in last 24h</div></div>
+        </section>
+
+        <!-- Row 2: fixes/hour 3d + fixes/hour 15d, half and half -->
+        <section class="hpanel span3" id="hp-fixes3d">
+          <div class="hpanel-head"><span class="hpanel-title">Fixes / hour · 3d</span><span class="hpanel-sub" id="hp-fixes3d-sub"></span></div>
+          <div class="hchart"><canvas id="fixes3d-chart"></canvas></div>
+        </section>
+
+        <section class="hpanel span3" id="hp-fixes15d">
+          <div class="hpanel-head"><span class="hpanel-title">Fixes / hour · 15d</span><span class="hpanel-sub" id="hp-fixes15d-sub"></span></div>
+          <div class="hchart"><canvas id="fixes15d-chart"></canvas></div>
+        </section>
+
+        <!-- Row 3: coverage + promotions + vf rescue (2/6 each) -->
+        <section class="hpanel span2" id="hp-coverage">
+          <div class="hpanel-head"><span class="hpanel-title">Fleet coverage</span><span class="hpanel-sub">data/coverage</span></div>
+          <div id="coverage-body" class="hbody"></div>
+        </section>
+
+        <section class="hpanel span2" id="hp-promos">
+          <div class="hpanel-head"><span class="hpanel-title">Promotions</span><span class="hpanel-sub">tier_promotions</span></div>
+          <div class="htable-wrap"><table class="htable" id="promo-table"><thead><tr>
+            <th>When</th><th>Vessel</th><th>Tier</th><th>Via</th><th>Where</th>
+          </tr></thead><tbody></tbody></table></div>
+        </section>
+
+        <section class="hpanel span2" id="hp-vf">
+          <div class="hpanel-head"><span class="hpanel-title">VF rescue</span><span class="hpanel-sub">live-position backstop</span></div>
+          <div id="vf-credit" class="hbody"></div>
+          <div class="htable-wrap"><table class="htable" id="vf-table"><thead><tr>
+            <th>When</th><th>Vessel</th><th>Class</th><th>Src</th><th>Cr</th><th>Result</th>
+          </tr></thead><tbody></tbody></table></div>
+        </section>
+
+        <!-- Row 4: watchlist tiers (2/6) + watchlist explorer (4/6) -->
+        <section class="hpanel span2" id="hp-tiers">
+          <div class="hpanel-head"><span class="hpanel-title">Watchlist tiers</span><span class="hpanel-sub" id="hp-scan-sub"></span></div>
+          <div class="htable-wrap"><table class="htable" id="tier-table"><thead><tr>
+            <th>Tier</th><th>Count</th><th>In slot</th><th>Description</th>
+          </tr></thead><tbody></tbody></table></div>
+        </section>
+
+        <section class="hpanel span4" id="hp-explorer">
+          <div class="hpanel-head">
+            <span class="hpanel-title">Watchlist explorer</span>
+            <div id="explorer-ctl">
+              <div id="explorer-tiers">
+                <button class="tchip" data-tier="">all</button>
+                <button class="tchip" data-tier="1">1</button>
+                <button class="tchip" data-tier="2">2</button>
+                <button class="tchip" data-tier="3">3</button>
+                <button class="tchip" data-tier="4">4</button>
+                <button class="tchip" data-tier="5">5</button>
+              </div>
+              <select id="explorer-sort" title="Sort">
+                <option value="tier">tier</option>
+                <option value="score">score</option>
+                <option value="last_fix">last fix</option>
+                <option value="dest">dest</option>
+                <option value="name">name</option>
+              </select>
+              <input id="explorer-name" type="search" placeholder="name…" spellcheck="false">
+              <span class="hpanel-sub" id="explorer-count"></span>
+            </div>
+          </div>
+          <div class="htable-wrap"><table class="htable" id="explorer-table"><thead><tr>
+            <th>T</th><th>Vessel</th><th>MMSI</th><th>Reason</th><th>Last fix</th><th>Dest</th><th>ETA</th><th>Slot</th>
+          </tr></thead><tbody></tbody></table></div>
+        </section>
+      </div>
+    </section>
   </div>
 
   <!-- ── Phone bottom tab bar (hidden on desktop; mirrors #view-nav) ── -->
@@ -173,6 +279,10 @@
     <button class="tabbar-btn" data-view="signals">
       <svg class="tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="m19 9-5 5-4-4-3 3"/></svg>
       <span class="tab-lbl">Signals</span>
+    </button>
+    <button class="tabbar-btn" data-view="health">
+      <svg class="tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/></svg>
+      <span class="tab-lbl">Health</span>
     </button>
   </nav>
 

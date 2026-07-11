@@ -24,6 +24,9 @@ from PIL import Image
 from starlette.concurrency import run_in_threadpool
 
 from config import AIS_BOUNDING_BOXES, regime_of, settings
+from data import coverage as cov
+from data import pipeline_health as ph
+from ingestion import vf_rescue
 from pipeline.legs import compute_legs
 from pipeline.signal import (
     TERMINAL_METADATA_SQL,
@@ -116,6 +119,12 @@ async def index():
 @app.get("/signals")
 async def signals_page():
     # Same single-page shell as "/"; the client router shows the signals view.
+    return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/health")
+async def health_page():
+    # Same single-page shell as "/"; the client router shows the health view.
     return FileResponse(STATIC_DIR / "index.html")
 
 
@@ -765,9 +774,7 @@ async def density_image(pool: asyncpg.Pool = Depends(get_pool)):
         _render_density, df, w_px, h_px, (x_w, x_e), (y_s, y_n), src["p99"]
     )
     _density_cache[cache_key] = {"data": png, "ts": time.time()}
-    return Response(
-        content=png, media_type="image/webp", headers=_TILE_CACHE_HEADERS
-    )
+    return Response(content=png, media_type="image/webp", headers=_TILE_CACHE_HEADERS)
 
 
 # Fully transparent 256×256 WebP for tiles outside the footprint — lets us skip
@@ -903,7 +910,12 @@ def _render_tile(src: dict, z: int, x: int, y: int) -> bytes:
     sy[0::3], sy[1::3], sy[2::3] = ya[seg], ya[seg + 1], np.nan
     df = pd.DataFrame({"x": sx, "y": sy})
     return _render_density(
-        df, 256, 256, (x_w, x_e), (y_s, y_n), src["p99"],
+        df,
+        256,
+        256,
+        (x_w, x_e),
+        (y_s, y_n),
+        src["p99"],
         _tile_line_width(z),
         2,  # 2× supersample → silky lines, never grainy
     )
@@ -988,9 +1000,7 @@ async def density_tile(z: int, x: int, y: int, pool: asyncpg.Pool = Depends(get_
     png = await run_in_threadpool(_render_tile, src, z, x, y)
     _tile_cache[key] = {"png": png}
     _write_tile_disk(version, z, x, y, png)
-    return Response(
-        content=png, media_type="image/webp", headers=_TILE_CACHE_HEADERS
-    )
+    return Response(content=png, media_type="image/webp", headers=_TILE_CACHE_HEADERS)
 
 
 @app.get("/api/density-bounds")
@@ -1380,3 +1390,491 @@ async def signals_contributors(
         return {"kind": "visits", "rows": rows}
 
     return {"kind": "legs", "rows": []}
+
+
+# ---------------------------------------------------------------------------
+# Pipeline-health tab (viz/static/js/health.js). Ports the retired Textual TUI
+# (viz/tui.py) into the web app: connection liveness, ingest lag / fixes-per-hour
+# charts, fleet coverage, watchlist tiers/explorer, and the VF-rescue ledger.
+# The config-derived roster + pure classifiers live in data/pipeline_health.py so
+# the surfaces read the same states; here we just run the SQL and serialize.
+# ---------------------------------------------------------------------------
+
+# 12h overnight/reconnect rollup is heavier than the fast per-source gathers it
+# rides with, so cache it briefly and reuse across the /connections poll.
+_health_overnight_cache: dict = {}
+_HEALTH_OVERNIGHT_TTL = 30.0
+
+
+async def _health_overnight(pool: asyncpg.Pool) -> dict[str, dict]:
+    """Per-source 12h rollup: total fixes, minutes-with-data (→ missing%), worst
+    gap, and reconnect counts (watchdog / planned / disconnect). Cached 30s."""
+    now = time.monotonic()
+    hit = _health_overnight_cache.get("data")
+    if hit is not None and now - _health_overnight_cache["ts"] < _HEALTH_OVERNIGHT_TTL:
+        return hit
+    rc_rows, ov_rows = await asyncio.gather(
+        pool.fetch(
+            """
+            SELECT source,
+                   COUNT(*) FILTER (WHERE event_type='watchdog_reconnect') AS wd,
+                   COUNT(*) FILTER (WHERE event_type='planned_reconnect') AS planned,
+                   COUNT(*) FILTER (WHERE event_type='disconnect') AS dc
+            FROM ingestion_events
+            WHERE event_ts > now() - INTERVAL '12 hours'
+              AND source LIKE 'aisstream%'
+              AND event_type IN ('watchdog_reconnect', 'planned_reconnect', 'disconnect')
+            GROUP BY source
+            """
+        ),
+        pool.fetch(
+            """
+            WITH per_src AS (
+                SELECT bucket, source, fix_count,
+                       EXTRACT(EPOCH FROM (
+                         bucket - LAG(bucket) OVER (PARTITION BY source ORDER BY bucket)
+                       ))/60 AS gap_min
+                FROM ingestion_stats_minute
+                WHERE bucket > now() - INTERVAL '12 hours'
+                  AND source LIKE 'aisstream%'
+            )
+            SELECT source,
+                   COALESCE(SUM(fix_count), 0)::bigint AS fixes_12h,
+                   COUNT(DISTINCT bucket) AS minutes_with_data,
+                   COALESCE(MAX(gap_min), 0)::int AS worst_gap_min
+            FROM per_src
+            GROUP BY source
+            """
+        ),
+    )
+    rc_by = {r["source"]: r for r in rc_rows}
+    ov_by = {r["source"]: r for r in ov_rows}
+    out: dict[str, dict] = {}
+    for src in ph.EXPECTED_SOURCES:
+        o = ov_by.get(src)
+        rc = rc_by.get(src)
+        min_with_data = int(o["minutes_with_data"]) if o else 0
+        out[src] = {
+            "fixes_12h": int(o["fixes_12h"]) if o else 0,
+            "missing_min": max(0, 720 - min_with_data),  # 12h = 720 minutes
+            "worst_gap_min": int(o["worst_gap_min"]) if o else 0,
+            "watchdog_12h": int(rc["wd"]) if rc else 0,
+            "planned_12h": int(rc["planned"]) if rc else 0,
+            "disconnects_12h": int(rc["dc"]) if rc else 0,
+        }
+    _health_overnight_cache["data"] = out
+    _health_overnight_cache["ts"] = now
+    return out
+
+
+@app.get("/api/health/connections")
+async def health_connections(pool: asyncpg.Pool = Depends(get_pool)):
+    """Panel 1 + the status-strip connection/vessel_state segments: one row per
+    WebSocket with live 5m + 12h stats and a role-aware liveness state, plus the
+    aggregate word (live/alive/degraded/down) and the vessel_state ingest rate."""
+    (
+        conn_age_rows,
+        lifecycle_age_rows,
+        per_source_rows,
+        vstate_row,
+    ) = await asyncio.gather(
+        pool.fetch(
+            """
+                SELECT source,
+                       EXTRACT(EPOCH FROM (now() - MAX(bucket)))::int AS age_s
+                FROM ingestion_stats_minute
+                WHERE source LIKE 'aisstream%' AND bucket > now() - INTERVAL '15 minutes'
+                GROUP BY source
+                """
+        ),
+        pool.fetch(
+            """
+                SELECT source,
+                       EXTRACT(EPOCH FROM (now() - MAX(event_ts)))::int AS age_s
+                FROM ingestion_events
+                WHERE source LIKE 'aisstream%'
+                  AND event_type IN ('connect','subscribed','planned_reconnect','watchdog_reconnect')
+                  AND event_ts > now() - INTERVAL '75 minutes'
+                GROUP BY source
+                """
+        ),
+        pool.fetch(
+            """
+                SELECT source,
+                       SUM(mean_lag_s * fix_count) / NULLIF(SUM(fix_count), 0) AS mean_s,
+                       MAX(p95_lag_s) AS p95_s,
+                       MAX(distinct_mmsi) AS distinct_mmsi,
+                       MAX(max_raw_q) AS max_raw_q,
+                       SUM(fix_count) AS fix_count
+                FROM ingestion_stats_minute
+                WHERE source LIKE 'aisstream%' AND bucket > now() - INTERVAL '5 minutes'
+                GROUP BY source
+                """
+        ),
+        pool.fetchrow(
+            """
+                SELECT COUNT(*)::int AS rows_1h,
+                       EXTRACT(EPOCH FROM (now() - MAX(state_ts)))::int AS last_age_s
+                FROM vessel_state
+                WHERE state_ts > now() - INTERVAL '1 hour'
+                """
+        ),
+    )
+    overnight = await _health_overnight(pool)
+
+    fix_ages = {r["source"]: r["age_s"] for r in conn_age_rows}
+    evt_ages = {r["source"]: r["age_s"] for r in lifecycle_age_rows}
+    ps_map = {r["source"]: r for r in per_source_rows}
+
+    conns = []
+    states = []
+    for c in ph.CONNECTIONS:
+        state = ph.conn_state(
+            c.role, fix_ages.get(c.source, 1e9), evt_ages.get(c.source, 1e9)
+        )
+        states.append(state)
+        row = ps_map.get(c.source)
+        ov = overnight.get(c.source, {})
+        fix_count = int(row["fix_count"]) if row and row["fix_count"] else 0
+        p95 = float(row["p95_s"] or 0.0) if row else 0.0
+        mean_lag = float(row["mean_s"] or 0.0) if row else 0.0
+        missing_pct = (int(ov.get("missing_min", 720)) * 100.0) / 720
+        wd = int(ov.get("watchdog_12h", 0))
+        planned = int(ov.get("planned_12h", 0))
+        conns.append(
+            {
+                "source": c.source,
+                "label": c.source.replace("aisstream-", ""),
+                "egress": c.egress,
+                "role": c.role,
+                "covers": c.covers,
+                "sparse": c.sparse,
+                "state": state,
+                "fix_count_5m": fix_count,
+                "p95_lag_s": p95,
+                "mean_lag_s": mean_lag,
+                "lag_color": ph.lag_color(p95) if fix_count else "dim",
+                "distinct_mmsi": int(row["distinct_mmsi"] or 0) if row else 0,
+                "max_raw_q": int(row["max_raw_q"] or 0) if row else 0,
+                "fixes_12h": int(ov.get("fixes_12h", 0)),
+                "missing_pct": round(missing_pct, 1),
+                "missing_color": ph.missing_color(missing_pct, c.sparse),
+                "worst_gap_min": int(ov.get("worst_gap_min", 0)),
+                "watchdog_12h": wd,
+                "planned_12h": planned,
+                "disconnects_12h": int(ov.get("disconnects_12h", 0)),
+                "watchdog_ok": ph.watchdog_ok(wd, planned, c.sparse),
+            }
+        )
+
+    n_persistent = sum(1 for c in ph.CONNECTIONS if c.role == "persistent")
+    vs_rows = int(vstate_row["rows_1h"] or 0) if vstate_row else 0
+    vs_age = (
+        int(vstate_row["last_age_s"])
+        if vstate_row and vstate_row["last_age_s"] is not None
+        else None
+    )
+    return {
+        "connections": conns,
+        "aggregate": {
+            "word": ph.aggregate_liveness(states),
+            "up": states.count("up"),
+            "idle": states.count("idle"),
+            "down": states.count("down"),
+            "total": len(states),
+            "persistent": n_persistent,
+            "approx_vessels": n_persistent * 50,
+            "egress_ips": ph.WORKER_COUNT,
+        },
+        "vessel_state": {"rows_1h": vs_rows, "last_age_s": vs_age},
+    }
+
+
+@app.get("/api/health/snapshot")
+async def health_snapshot(pool: asyncpg.Pool = Depends(get_pool)):
+    """The 30s panels: watchlist coverage bucket + scoring heartbeat (status
+    strip), tiers / scan rotation / promotions (Panel 6), and the VF-rescue
+    ledger with the derived glide cap + surplus (Panel 8)."""
+    now = datetime.now(timezone.utc)
+    (
+        wl_rows,
+        tier_rows,
+        scan_event,
+        in_slot_summary,
+        scoring_row,
+        promo_rows,
+        budget_row,
+        lifetime_row,
+        status_row,
+        rescues,
+    ) = await asyncio.gather(
+        pool.fetch(
+            """
+            WITH wl AS (
+                SELECT mmsi, vessel_name FROM vessel_registry
+                WHERE (is_lng_carrier OR is_fsru) AND NOT excluded
+            ),
+            last_fix AS (
+                SELECT DISTINCT ON (mmsi) mmsi, fix_ts AS ts, lat, lon, sog
+                FROM ais_fixes
+                WHERE fix_ts > now() - INTERVAL '24 hours'
+                ORDER BY mmsi, fix_ts DESC
+            )
+            SELECT wl.mmsi, lf.ts, lf.sog,
+                   CASE WHEN lf.lat IS NOT NULL THEN EXISTS (
+                     SELECT 1 FROM terminal_zones tz
+                     WHERE ST_DWithin(
+                       ST_SetSRID(ST_Point(lf.lon, lf.lat), 4326), tz.geom, 0.5)
+                   ) ELSE FALSE END AS near_terminal
+            FROM wl LEFT JOIN last_fix lf USING (mmsi)
+            """
+        ),
+        pool.fetch(
+            """
+            SELECT tier, COUNT(*) AS n, COUNT(*) FILTER (WHERE in_slot) AS n_in_slot
+            FROM priority_watchlist GROUP BY tier ORDER BY tier
+            """
+        ),
+        pool.fetchrow(
+            """
+            SELECT MAX(event_ts) AS last_sub FROM ingestion_events
+            WHERE source = $1 AND event_type = 'subscribed'
+            """,
+            ph.HOME_SCAN_SOURCE,
+        ),
+        pool.fetchrow(
+            """
+            SELECT
+                COUNT(*) FILTER (WHERE slot_kind IN ('persistent','pinned')) AS n_persistent,
+                COUNT(*) FILTER (WHERE slot_kind = 'pinned') AS n_pinned,
+                COUNT(*) FILTER (WHERE slot_kind = 'scan') AS n_scan
+            FROM priority_watchlist
+            """
+        ),
+        pool.fetchrow(
+            "SELECT MAX(computed_at) AS last_scoring FROM priority_watchlist"
+        ),
+        pool.fetch(
+            """
+            SELECT promoted_at, mmsi, vessel_name, old_tier, new_tier, via, zone, reason
+            FROM tier_promotions ORDER BY promoted_at DESC LIMIT 40
+            """
+        ),
+        pool.fetchrow(
+            """
+            SELECT COALESCE(SUM(credits), 0) AS spent FROM vf_rescue_log
+            WHERE requested_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+            """
+        ),
+        pool.fetchrow(
+            "SELECT COALESCE(SUM(credits), 0) AS lifetime FROM vf_rescue_log"
+        ),
+        pool.fetchrow(
+            "SELECT credits, expiration_date, checked_at "
+            "FROM vf_account_status ORDER BY checked_at DESC LIMIT 1"
+        ),
+        pool.fetch(
+            """
+            SELECT requested_at, mmsi, vessel_name, rescue_class, src, credits, result
+            FROM vf_rescue_log ORDER BY requested_at DESC LIMIT 20
+            """
+        ),
+    )
+
+    # --- Watchlist coverage bucketing (status strip) ---
+    reporting = silent = dormant = 0
+    for r in wl_rows:
+        ts = r["ts"]
+        age_s = None if ts is None else int((now - ts).total_seconds())
+        bucket = ph.watchlist_bucket(age_s, r["near_terminal"], r["sog"])
+        if bucket == "reporting":
+            reporting += 1
+        elif bucket == "silent":
+            silent += 1
+        else:
+            dormant += 1
+
+    scoring_age = (
+        int((now - scoring_row["last_scoring"]).total_seconds())
+        if scoring_row and scoring_row["last_scoring"] is not None
+        else None
+    )
+
+    # --- Scan rotation countdown ---
+    last_sub = scan_event["last_sub"] if scan_event else None
+    scan_age_s = int((now - last_sub).total_seconds()) if last_sub else None
+    scan = {
+        "last_sub": last_sub,
+        "age_s": scan_age_s,
+        "next_rotation_s": max(0, 3600 - scan_age_s)
+        if scan_age_s is not None
+        else None,
+        "n_persistent": in_slot_summary["n_persistent"] if in_slot_summary else 0,
+        "n_pinned": in_slot_summary["n_pinned"] if in_slot_summary else 0,
+        "n_scan": in_slot_summary["n_scan"] if in_slot_summary else 0,
+    }
+
+    # --- VF rescue: derived glide cap + surplus from the canonical loaders ---
+    try:
+        async with pool.acquire() as conn:
+            cap = await vf_rescue.load_glide_cap(conn, now)
+            surplus = await vf_rescue.load_glide_surplus(conn, now)
+    except Exception:
+        cap, surplus = vf_rescue.DAILY_CREDIT_CAP, 0.0
+    glide_target = None
+    if status_row and status_row["expiration_date"]:
+        glide_target = status_row["expiration_date"] - timedelta(
+            days=vf_rescue.GLIDE_HEADROOM_DAYS
+        )
+
+    return {
+        "watchlist_coverage": {
+            "watched": len(wl_rows),
+            "reporting": reporting,
+            "silent": silent,
+            "dormant": dormant,
+        },
+        "scoring": {"age_s": scoring_age, "color": ph.scoring_health(scoring_age)},
+        "tiers": [
+            {
+                "tier": r["tier"],
+                "n": r["n"],
+                "n_in_slot": r["n_in_slot"],
+                "label": ph.TIER_LABELS.get(r["tier"], "?"),
+            }
+            for r in tier_rows
+        ],
+        "scan": scan,
+        "promotions": [dict(r) for r in promo_rows],
+        "vf_rescue": {
+            "spent_today": int(budget_row["spent"]) if budget_row else 0,
+            "lifetime": int(lifetime_row["lifetime"]) if lifetime_row else 0,
+            "cap": cap,
+            "surplus": round(surplus, 1),
+            "glide_ceiling": vf_rescue.GLIDE_CAP_CEILING,
+            "glide_headroom_days": vf_rescue.GLIDE_HEADROOM_DAYS,
+            "glide_target": glide_target,
+            "balance": dict(status_row) if status_row else None,
+            "recent": [dict(r) for r in rescues],
+        },
+    }
+
+
+@app.get("/api/health/coverage")
+async def health_coverage(pool: asyncpg.Pool = Depends(get_pool)):
+    """Panel 3 — fleet coverage. Reuses data.coverage.compute so this and
+    `make coverage` never drift."""
+    s = await cov.compute(pool, now=datetime.now(timezone.utc))
+    cold_rate = s.cold_start_rate
+    return {
+        "fleet_total": s.fleet_total,
+        "buckets": s.buckets,
+        "heard_rate": s.heard_rate,
+        "heard_within_days": cov.STALE_MAX_DAYS,
+        "in_slot_total": s.in_slot_total,
+        "cold_start_rate": cold_rate,
+        "cold_start_color": (
+            "red" if (cold_rate or 0) >= 0.15 else "yellow" if cold_rate else "green"
+        ),
+        "cold_starts": s.cold_starts,
+        "moored_recent": s.moored_recent,
+        "coldstart_window_days": cov.COLDSTART_WINDOW_DAYS,
+        "unmet_today": s.unmet_today,
+        "unmet_week": s.unmet_week,
+    }
+
+
+@app.get("/api/health/errors")
+async def health_errors(pool: asyncpg.Pool = Depends(get_pool)):
+    """Panel 2 — the recent ingestion errors feed (last 24h)."""
+    rows = await pool.fetch(
+        """
+        SELECT event_ts, source, detail->>'kind' AS kind, detail->>'msg' AS msg
+        FROM ingestion_events
+        WHERE event_type = 'error' AND event_ts > now() - INTERVAL '24 hours'
+        ORDER BY event_ts DESC LIMIT 10
+        """
+    )
+    return {"errors": [dict(r) for r in rows], "empty": len(rows) == 0}
+
+
+_health_fixes_cache: dict = {}
+
+
+@app.get("/api/health/fixes")
+async def health_fixes(hours: int = 72, pool: asyncpg.Pool = Depends(get_pool)):
+    """Fixes/hour over the last `hours`. The Health tab draws two fixed spans —
+    3d (72h) recent detail and 15d (360h) long-horizon — so `hours` is clamped to
+    a small whitelist rather than free-form (bounds the cache + the query)."""
+    hours = min((12, 72, 360), key=lambda h: abs(h - hours))
+    ck = _health_fixes_cache.get(hours)
+    if ck is not None and time.monotonic() - ck["ts"] < _HEALTH_OVERNIGHT_TTL:
+        return ck["data"]
+    rows = await pool.fetch(
+        """
+        SELECT bucket, cnt FROM fixes_per_hour
+        WHERE bucket > now() - $1 * INTERVAL '1 hour'
+        ORDER BY bucket ASC
+        """,
+        hours,
+    )
+    now_floor = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    points = []
+    for r in rows:
+        hr_ago = int((now_floor - r["bucket"]).total_seconds() // 3600)
+        if 0 <= hr_ago < hours:
+            points.append({"hr_ago": hr_ago, "cnt": int(r["cnt"])})
+    points.sort(key=lambda p: p["hr_ago"], reverse=True)  # oldest → newest
+    cnts = [p["cnt"] for p in points]
+    data = {
+        "hours": hours,
+        "points": points,
+        "peak": max(cnts) if cnts else 0,
+        "mean": round(sum(cnts) / len(cnts)) if cnts else 0,
+    }
+    _health_fixes_cache[hours] = {"data": data, "ts": time.monotonic()}
+    return data
+
+
+@app.get("/api/health/explorer")
+async def health_explorer(
+    tier: int | None = None,
+    sort: str = "tier",
+    name: str | None = None,
+    pool: asyncpg.Pool = Depends(get_pool),
+):
+    """Panel 7 — the priority_watchlist explorer with tier / sort / name filters.
+    `sort` is whitelisted against pipeline_health.EXPLORER_SORTS (the ORDER BY is
+    interpolated); an unknown key is a 400."""
+    order_by = ph.EXPLORER_SORTS.get(sort)
+    if order_by is None:
+        return Response(
+            content=json.dumps(
+                {"error": f"unknown sort '{sort}'", "allowed": list(ph.EXPLORER_SORTS)}
+            ),
+            status_code=400,
+            media_type="application/json",
+        )
+    clauses = []
+    params: list = []
+    if tier is not None:
+        params.append(int(tier))
+        clauses.append(f"pw.tier = ${len(params)}")
+    if name:
+        params.append(f"%{name}%")
+        clauses.append(f"vr.vessel_name ILIKE ${len(params)}")
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = await pool.fetch(
+        f"""
+        SELECT pw.mmsi, vr.vessel_name, pw.tier, pw.score, pw.score_reason,
+               pw.last_fix_ts, pw.parsed_eta, pw.in_slot, pw.slot_kind,
+               t.terminal_name AS dest_terminal_name
+        FROM priority_watchlist pw
+        LEFT JOIN vessel_registry vr USING (mmsi)
+        LEFT JOIN terminals t ON t.terminal_id = pw.parsed_dest_terminal_id
+        {where}
+        ORDER BY {order_by}
+        """,
+        *params,
+    )
+    return {"rows": [dict(r) for r in rows], "sort": sort, "count": len(rows)}

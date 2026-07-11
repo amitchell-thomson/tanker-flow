@@ -29,6 +29,8 @@ def main() -> int:
         ("desktop-signals", "/signals", None),
         ("mobile-signals", "/signals", (390, 844)),
         ("mobile-map", "/", (390, 844)),
+        ("desktop-health", "/health", None),
+        ("mobile-health", "/health", (390, 844)),
     ]
     if mmsi:
         shots.append(("mobile-map-track", f"/?focus={mmsi}", (390, 844)))
