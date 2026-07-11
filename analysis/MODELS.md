@@ -225,19 +225,27 @@ laden leg has a known origin and (declared/assumed) destination; forecast arriva
 great-circle distance and observed speed, `t̂ = t_dep + d_gc/v̄`, and convolve per-leg
 arrival densities into a weekly **arrival-count distribution** (Poisson-binomial,
 closed-form mean/variance). Feeds off `gas_in_transit_volume` + `laden_voyage_age_d` +
-`voyage_speed_kn`. No fitted parameter — validate within weeks as legs complete.
+`voyage_speed_kn`. No fitted parameter — validate within weeks as legs complete. A3
+(below) upgrades the point `t̂` to a fitted per-O-D arrival-time *distribution*; A1 stays
+the no-training baseline it must beat.
 
 **A2 · Count regression — Poisson / Negative Binomial GLM.** Weekly arrivals/loadings
 per terminal: `log λ = β₀ + xᵀβ + log(exposure)`; NB adds dispersion `k`
 (`Var = μ + μ²/k`) for the clustering. Few parameters, count-matched likelihood,
 exposure offset for unequal windows. Targets `us_loadings_count` / `od_flow_count`.
 
-**A3 · Survival models — queue and berth time.** Cox PH `h(t|x)=h₀(t)·exp(xᵀβ)`
+**A3 · Survival models — queue, berth, and voyage time.** Cox PH `h(t|x)=h₀(t)·exp(xᵀβ)`
 (partial likelihood cancels the baseline) or Weibull AFT for a parametric small-data
 fit. The unit is the *event* (hundreds, not dozens of days), and right-censoring
 handles in-progress visits natively — which is exactly what `open_fraction` /
-`estimated_fraction` flag on `load_queue_h` / `*_berth_turn_h`. **Pool across terminals
-hierarchically** (Part C) — the highest-leverage move here.
+`estimated_fraction` flag on `load_queue_h` / `*_berth_turn_h`. **The same machinery
+fits voyage time-to-arrival per O-D**, turning A1's point ETA into a fitted arrival-time
+*distribution*: the right-censored unit is the open laden leg, with `legs.py`'s
+`open_floating` / `open_arrival_gap` / `open_censored` classes supplying the censoring
+(an open leg past its window is *censored, not missing*), and the per-leg posterior
+densities convolve into A1's Poisson-binomial arrival-count distribution — so the
+censoring the kinematic baseline ignores becomes the likelihood. **Pool across
+terminals / O-D pairs hierarchically** (Part C) — the highest-leverage move here.
 
 **A4 · Kalman / state-space — latent flow-rate nowcast.** Treat "true current export
 rate" as a hidden state observed noisily through daily counts: `x_t=Fx_{t−1}+w`,
@@ -300,6 +308,24 @@ first-class scoring axis.
 >   as the existing rescue classes).
 > - **Acceptance** — live Florida-NE recall rises from ~5 % toward the ~59 % historical,
 >   measured by re-running this validation on the live tail as it accrues.
+
+**A7 · Live vintage de-bias — nowcast the firmed value, not the first print.** Every live
+`knowable` rebuild snapshots `signal_daily_live_vintage`; the eventual `physical` series is
+what that print firms to as late fixes land and capture fills in. The pair *(as-printed,
+as-firmed)* is a supervised revision dataset — fit `E[physical | knowable_t, x]` per
+`(signal_key, regime)` with a band (a multiplicative capture-style correction, or a Kalman
+level state à la A4 with `R` from the confidence columns) and apply it to today's print.
+This is the **live analogue of the §0·2 historical recovery**: where §0·2 de-attenuates
+pre-2022 *levels* offline via NOAA×GFW×EIA triangulation, A7 de-attenuates the *live tail*
+online — `capture_rate.py`'s observed ÷ EIA-implied becomes a live `1/capture` scale-up
+rather than a passive validator. The payoff is **negative-latency lead**: print the firmed
+level now instead of waiting out weeks of revision, and it is robust to dropped fixes *by
+construction* — it models the observation process instead of imputing positions (the reason
+the per-vessel position filter was not worth building). Leakage-safe: the revision model at
+day `d` is fit only on legs/visits whose target windows close before `d` (purge + embargo,
+Part C #1), and the corrected output is still `knowable`. Validate by replaying the vintage
+log against `physical` and reporting the revision-RMSE reduction over the raw print; it
+extends Part C #3 from confidence-*weighting* to confidence-*correcting*.
 
 ---
 
@@ -402,16 +428,23 @@ one assembler joins all onto the `signal_daily` daily grid into a new `model_pan
 ### Track 2 — Part A physical nowcasts (start now, in parallel; validate on the decade)
 Walk-forward CV, `basis='knowable'`, confidence columns as observation variance.
 7. **A1 kinematic ETA** — no training; physics baseline; validates within weeks.
-8. **A2 Poisson/NB arrivals**, **A3 Cox/Weibull survival** on queue/berth with **C2
-   hierarchical pooling across terminals** (highest-leverage move), **A4 Kalman flow-rate**.
+8. **A2 Poisson/NB arrivals**, **A3 Cox/Weibull survival** on queue/berth — *then extend
+   the same A3 fit to per-O-D voyage time-to-arrival* (open-leg `legs.py` censoring as the
+   right-censored unit, posteriors convolved into A1's arrival-count distribution) — with
+   **C2 hierarchical pooling across terminals/O-D pairs** (highest-leverage move), **A4
+   Kalman flow-rate**.
 9. **A5 BOCPD outage nowcast** — cheap, online, asymmetric payoff (Freeport-2022 labelled).
+10. **A7 live vintage de-bias** — fit `E[physical | knowable_t]` per `(signal_key, regime)`
+    from the `signal_daily_live_vintage` ↔ `physical` pairing (+ `capture_rate.py` as the
+    live `1/capture` scale-up); replay the vintage log against `physical` for the
+    revision-RMSE win. Needs vintage history to have accrued, so it trails A1–A5.
 
 ### Track 3 — Part B spread model (after Tracks 1 & 2)
-10. **AR(1)+controls baseline** — the null; FWL partial-effect harness.
-11. **BSTS (B2)** with spike-and-slab over the pre-registered signals + controls,
+11. **AR(1)+controls baseline** — the null; FWL partial-effect harness.
+12. **BSTS (B2)** with spike-and-slab over the pre-registered signals + controls,
     confidence-weighted; cross-check Elastic Net (B1) + PLS (B3). Report posterior
     inclusion probabilities + predictive intervals. Two-stage: feed the Part A nowcast in.
-12. **Defer** constrained LightGBM (B5) and cross-exciting Hawkes until the event count is
+13. **Defer** constrained LightGBM (B5) and cross-exciting Hawkes until the event count is
     in the tens of thousands.
 
 ### First moves (decision-free)
