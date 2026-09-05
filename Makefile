@@ -1,4 +1,4 @@
-.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events backfill-noaa backfill-noaa-reload backfill-gfw backfill-gfw-dry reconcile reconcile-dry scoring signals a1-replay a1-h1 a2-replay a5-replay a4-replay validate-signals vf-rescue vf-rescue-dry vf-status refresh-fleet discover discover-dry discover-berths discover-berths-dry complete-registry complete-registry-dry complete-registry-sample retire-stale retire-stale-dry backup eia eia-full market market-full model-panel check-ttf-roll b0-replay mechanisms b0-coverage mechanisms-coverage paper-results paper-tables paper-figures paper capture-rate coverage
+.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events backfill-noaa backfill-noaa-reload backfill-gfw backfill-gfw-dry reconcile reconcile-dry scoring signals a1-replay a1-h1 a2-replay a5-replay a4-replay validate-signals vf-rescue vf-rescue-dry vf-status refresh-fleet discover discover-dry discover-berths discover-berths-dry complete-registry complete-registry-dry complete-registry-sample retire-stale retire-stale-dry backup eia eia-full market market-full model-panel check-ttf-roll b0-replay mechanisms b0-coverage mechanisms-coverage paper-results paper-tables paper-figures paper-pdf paper capture-rate coverage
 
 up:
 	docker compose up -d
@@ -217,7 +217,16 @@ paper-tables:
 paper-figures:
 	uv run python -m paper.figures --full-panel-too
 
-paper: paper-results paper-tables paper-figures
+# Compile locally. Tectonic (installed in ~/.local/bin, no root) is the
+# default; pdflatex is used when present so the local build matches
+# Overleaf/arXiv exactly.
+paper-pdf:
+	@if command -v pdflatex >/dev/null; then \
+	  cd paper && pdflatex -interaction=nonstopmode main >/dev/null && bibtex main >/dev/null && \
+	  pdflatex -interaction=nonstopmode main >/dev/null && pdflatex -interaction=nonstopmode main | tail -3; \
+	else cd paper && $$HOME/.local/bin/tectonic --keep-logs main.tex; fi
+
+paper: paper-results paper-tables paper-figures paper-pdf
 	uv run python -m paper.package
 	@echo "wrote tanker-flow-paper.zip — upload to Overleaf (New Project -> Upload Project)"
 

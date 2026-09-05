@@ -50,7 +50,9 @@ def fmt_pct(x: float, nd: int = 1) -> str:
 
 
 def fmt_signed_pct(x: float, nd: int = 1) -> str:
-    return f"{100 * x:+.{nd}f}\\%"
+    """Signed percentage with a real minus: a text-mode "-" is a hyphen."""
+    sign = "$-$" if x < 0 else "+"
+    return f"{sign}{abs(100 * x):.{nd}f}\\%"
 
 
 def fmt_num(x: float, nd: int = 3) -> str:

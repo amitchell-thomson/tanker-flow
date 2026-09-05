@@ -244,7 +244,7 @@ async def fig_fwl(pool: asyncpg.Pool, end: date | None = None) -> None:
     ax.invert_yaxis()
     ax.set_xlabel("Newey–West HAC $t$-statistic on the FWL partial effect")
     ax.set_xlim(-3.0, 3.0)
-    ax.legend(fontsize=7.5, loc="lower right")
+    ax.legend(fontsize=7.5, loc="upper left")
     _save(fig, "fig3_fwl_scan" + _suffix(end))
 
 
