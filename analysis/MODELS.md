@@ -729,7 +729,7 @@ Walk-forward CV, `basis='knowable'`, confidence columns as observation variance.
    not carry) **and are therefore not Part B features.** The decade-deep
    primitives plus `net_export_pressure` (1,770 rows) carry the same information,
    with the weights fitted rather than imposed.
-11. **AR(1)+controls baseline** — the null; FWL partial-effect harness. **Next.**
+11. ✅ **AR(1)+controls baseline + FWL harness** — **DONE 2026-09-05, negative result** (spec D-028, result D-029). `analysis/b0.py` (OLS+Newey-West HAC, purged walk-forward, the M0/M1/M2 ladder) + `analysis/fwl.py` (partial effects, graded against pre-registered signs). `make b0-replay`. **M2 loses to no-change** (−10.4% h=1, −19.2% h=4) ⇒ **M0 is the operative null**; **no tanker signal is significant** at either horizon (max |HAC t| 1.72 vs 1.96, max partial R² 0.009). Closes the linear, contemporaneous claim; non-linearity, regimes, joint fits and signal lags remain untested.
 12. **BSTS (B2)** with spike-and-slab over the pre-registered signals + controls,
     confidence-weighted; cross-check Elastic Net (B1) + PLS (B3). Report posterior
     inclusion probabilities + predictive intervals. Two-stage: feed the Part A nowcast in.

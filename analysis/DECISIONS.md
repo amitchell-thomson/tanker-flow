@@ -275,6 +275,211 @@ digit. 341 tests pass, ruff clean; 16 new tests in `tests/test_a1.py`.
 
 ---
 
+## D-029 · 2026-09-05 · **RESULT — the spread is a random walk at h = 1-4 w, and no tanker signal survives FWL**
+
+**Context.** First run of the D-028 protocol. Nothing was changed after the
+pre-registration; `make b0-replay` reproduces every number below.
+
+**Sample.** 395 complete weekly Mondays, 2018-01-01 → 2026-08-03 (55 of 450 weeks
+dropped for an incomplete row, 12 %). 288 scored weeks at h = 1, 282 at h = 4,
+after the 104-week training floor and the purge.
+
+### Result 1 — the controls make the forecast *worse*. M0 is the operative null.
+
+| h | model | MAE | RMSE | 80 % cov | skill vs M0 |
+|---|---|---|---|---|---|
+| 1 w | **M0 no-change** | **1.997** | 4.371 | 82.3 % | — |
+| 1 w | M1 AR(1) | 2.023 | 4.473 | 82.3 % | **−1.3 %** |
+| 1 w | M2 AR(1)+controls | 2.205 | 4.542 | 83.0 % | **−10.4 %** |
+| 4 w | **M0 no-change** | **3.947** | 7.090 | 73.8 % | — |
+| 4 w | M1 AR(1) | 4.168 | 7.444 | 72.0 % | **−5.6 %** |
+| 4 w | M2 AR(1)+controls | 4.705 | 7.378 | 69.1 % | **−19.2 %** |
+
+**M2 does not merely fail to beat M0 — it is monotonically worse, and worse at
+the longer horizon.** Weather, storage and oil, fitted walk-forward with a
+104-week window, subtract skill from "assume no change". Per-year MAE shows this
+is not a 2022 artefact: M2 is worse than M0 in 2023, 2024, 2025 and 2026
+(1.45/1.27/1.16/1.97 vs 1.26/0.97/0.94/1.39 at h = 1).
+
+**Reading.** This is what an efficient, highly persistent price series looks like:
+the level already embeds the fundamentals, so re-adding them as regressors only
+imports estimation noise. **D-028's acceptance test for M2 is failed**, and the
+consequence is that **M0 — no change — is the null Part B's signals must beat.**
+That is a harder bar than the pre-registered one, and it is the right one.
+
+### Result 2 — no tanker signal carries information, at either horizon
+
+FWL partial effects, net of AR(1) + weather + storage + Brent + winter, HAC
+(Newey-West, lag h + 1):
+
+| signal | prior | h = 1 t | h = 4 t | best partial R² |
+|---|---|---|---|---|
+| `gas_in_transit_eu` | + | 0.08 | 1.03 | 0.004 |
+| `gas_discharging_eu` | + | 0.84 | 0.46 | 0.001 |
+| `gas_loading_us` | + | −0.19 | 0.63 | 0.001 |
+| `gas_ballast_to_us` | + | 0.14 | 0.31 | 0.000 |
+| `load_queue_h` | − | 1.01 | 0.55 | 0.001 |
+| `laden_voyage_age_d` | − | −0.04 | −1.26 | 0.005 |
+| `net_export_pressure` | + | −0.82 | −1.60 | 0.009 |
+| `gas_in_transit_unknown` | none | −0.74 | −1.72 | 0.009 |
+
+**Every verdict is "not significant".** The largest |t| anywhere is **1.72**
+against a 1.96 bar, and the largest partial R² is **0.009** — nine parts in a
+thousand of the residual variance. No sign was falsified, because nothing reached
+significance to falsify. Year-consistency was mostly below the ⅔ bar too, so even
+the near-misses were not stable.
+
+**Two honest notes, neither a result.** (a) `net_export_pressure` came out
+**negative at both horizons**, the sign SIGNALS.md §9 #40 originally stated and
+D-028 overruled. At |t| ≤ 1.60 this is not evidence and **does not resolve the
+D-028 inconsistency** — recorded only so a future run that does reach significance
+is not read as a surprise. (b) The two largest |t| values are the two signals with
+the weakest priors, which is what noise looks like.
+
+### What this does and does not close
+
+**Closed:** the pre-registered *linear, contemporaneous* claim. Tanker signals as
+levels at week `t`, entering linearly, net of the standard controls, do not
+predict the 1- or 4-week change in the HH-TTF spread over 2018-2026.
+
+**Not closed, and deliberately not tested here:**
+- **Non-linearity and interactions** — B5's monotonic-constrained trees, regime
+  dependence. An effect that only bites when EU storage is low would be invisible
+  to this scan.
+- **B2/B3 proper** — spike-and-slab BSTS and PLS see the features *jointly*; this
+  scan tests them one at a time. Collinear features can be individually
+  insignificant and jointly informative.
+- **Regime-switching (B4)** — MODELS.md argues the spread lives in outage/freeze
+  regimes; a pooled linear fit averages across them.
+- **Lags of the signal** — only the contemporaneous value was tested. D-025's H1
+  is precisely the hypothesis that the lead is longer than tested.
+- **The 26 signal keys not in the panel**, and the four live-only composites
+  (D-027).
+
+**Prior update, stated plainly.** Before this run my honest prior on Part B was
+"small effect or none". It should now move toward the null end: the cleanest
+mechanical story (at-sea cargo → EU arrivals → TTF) was tested directly as
+`gas_in_transit_eu` and produced t = 0.08 at h = 1 and 1.03 at h = 4. That is not
+a marginal miss. **A negative Part B is a publishable, pre-registered finding**,
+and the §0·3 discipline is what makes it one rather than a failed project.
+
+**Sequencing consequence.** D-025 deferred H1 (longer horizons) on the grounds
+that "Part B tells you whether H1 is worth running at all". It now has said
+something: the h = 4 partial effects are uniformly larger in |t| than h = 1
+(1.03 vs 0.08 for `gas_in_transit_eu`; 1.72 vs 0.74 for the unknown band) —
+weakly consistent with H1's direction, though every value is inside the noise
+band. **That is the one thread this result leaves live**, and it is cheap to pull.
+
+---
+
+## D-028 · 2026-09-05 · **Part B null + FWL harness — pre-registration (binding, before any fit)**
+
+**Context.** Track 3 item 11. Everything below is committed **before a single
+regression is run**, per §0·3 #3. Nothing here may be changed in response to a
+result; a change is a dated superseding entry.
+
+### Target
+`spread = HH − TTF` in $/MMBtu from `model_panel`, sampled **weekly on Mondays**
+from **2018-01-01** (the Part A grid, so the two are comparable).
+
+Modelled **weekly, not daily**, deliberately. The daily spread has ρ ≈ 0.99: a
+daily AR(1) is a random walk in disguise and would report enormous, meaningless
+R². Weekly also matches the cadence at which legs and visits actually resolve.
+The *data* stays daily (D-026's "spread cadence = daily") — this is a modelling
+choice about the sampling grid, not a retreat to a coarser series.
+
+**Primary target = the h-week-ahead change**, `Δ_h = spread(t+7h) − spread(t)`,
+at **h = 1 and h = 4 weeks** (MODELS.md §Part B). The level is *not* the primary
+target: the spread is highly persistent, so a level fit scores well by predicting
+"about the same as now" and hides whether anything was learned. The change is the
+honest question and the one a hedger asks.
+
+### The model ladder — each rung is the null for the next
+| rung | specification | role |
+|---|---|---|
+| **M0** | `spread(t+7h) = spread(t)` — no change | the random-walk null; brutal, and correct to fear |
+| **M1** | `spread(t+7h) = a + ρ·spread(t)` | AR(1); nests M0 at ρ = 1 |
+| **M2** | M1 + controls | **"AR(1)+controls" — the null Part B's signals must beat** |
+| M3 | M2 + tanker signals | *not built here*; D-028 defines only what it must beat |
+
+**M2 controls** (all from `model_panel`, already publication-lagged):
+`hdd_us`, `cdd_us`, `hdd_nwe`, `cdd_nwe`, `us_storage_bcf`, `eu_storage_pct`,
+`brent`, plus a **winter dummy** (Nov–Mar) per MODELS.md §2. The price legs
+(`hh_spot`, `ttf_eur_mwh`, `eurusd`) are **excluded as regressors** — they
+construct the target and would be mechanically circular.
+
+### Validation protocol
+- **Expanding-window walk-forward**, refit at every weekly step; minimum
+  **104 training weeks** (the A2/A4 floor, so Part A and Part B share it).
+- **Purge + embargo** (Part C #1): a training row is kept only if its target is
+  fully realised strictly before the test date, plus a **1-week embargo**. With
+  h = 4 the weekly grid overlaps by 3 weeks; without purging, training targets
+  would straddle the test point and manufacture skill.
+- **Overlapping windows ⇒ HAC everywhere.** Every reported standard error is
+  **Newey–West with lag = h + 1 weeks**. An OLS SE on overlapping h-week changes
+  is roughly √h too small and would turn noise into significance.
+
+### Metrics and the bar
+MAE (primary, matching Part A), RMSE, and 80 % predictive-interval coverage.
+Reported **overall, per-year, and per-horizon** (§0·3 #1). Per-year is not
+decoration: 2022 alone spans −90 to −25 $/MMBtu and will dominate any pooled
+average, so a "win" driven only by 2022 is not a win.
+
+**M2 is judged useful iff it beats M0 and M1 on MAE at both horizons.** Stated in
+advance: the honest prior is that **M2 will *not* beat M0 at h = 1**, because a
+persistent price series' one-step change is near-unforecastable. That is a
+finding, not a failure — it establishes the bar the tanker signals face.
+
+### FWL harness — and the pre-registered signs
+`analysis/fwl.py` implements Frisch–Waugh–Lovell: residualise `spread(t+7h)` on
+M2's regressors, residualise one tanker signal on the same, regress residual on
+residual. The coefficient is the signal's effect **net of persistence, weather,
+storage and oil** — and by the FWL theorem it equals its coefficient in the full
+multiple regression, which is the harness's own correctness test.
+
+**Sign convention:** `spread = HH − TTF` is negative in nearly every period, so
+"the spread **narrows**" (SIGNALS.md §0) means it rises toward zero — a
+**positive** Δ. "Widens" means a more negative Δ.
+
+**Pre-registered signs — committed now, before any fit:**
+
+| feature | mechanism | prior |
+|---|---|---|
+| `gas_in_transit_eu` | more cargo landing in EU soon ⇒ TTF falls | **+** |
+| `gas_discharging_eu` | EU absorbing gas now ⇒ TTF falls | **+** |
+| `gas_loading_us` | gas leaves US (HH firms) *and* reaches EU (TTF falls) | **+** |
+| `gas_ballast_to_us` | tonnage returning to load ⇒ future exports up | **+** (weaker, longer lead) |
+| `load_queue_h` | US cannot export ⇒ HH softens, EU starved ⇒ TTF firms | **−** |
+| `laden_voyage_age_d` | cargo floating, not landing ⇒ EU stays tight | **−** |
+| `net_export_pressure` | z(loadings) − z(queue); both legs point the same way | **+** |
+| `gas_in_transit_unknown` | destination unresolved | **no prior — two-sided, exploratory** |
+
+**A signal is deemed to carry information iff all three hold:** |HAC t| > 1.96,
+**and** the sign matches the prior above, **and** the sign holds in ≥ ⅔ of
+individual years. The third condition is the one that kills 2022-driven artefacts,
+and it is the reason a sign is committed here rather than read off afterwards.
+
+### Finding — SIGNALS.md contradicts itself on `net_export_pressure`'s sign
+Assembling the priors surfaced a genuine inconsistency in the catalogue, logged
+because it would otherwise have been resolved silently by whoever fit the model.
+
+- SIGNALS.md §9 (#40): high `net_export_pressure` ⇒ "HH **soft** relative to TTF"
+  — i.e. HH − TTF **falls**, a negative sign.
+- SIGNALS.md §9 (#42): `spread_thrust` = #40 − #41, and "supply outrunning demand
+  (positive → spread **narrows**)" — i.e. driven by #40, HH − TTF **rises**, a
+  positive sign.
+
+The two cannot both hold. **Resolved in favour of positive**, on economics that
+run the same way through both channels: heavy US loading removes gas from the US
+balance (HH firms) *and* delivers cargo to Europe within the 14-18 d voyage
+(TTF falls). Both push HH − TTF up. The #40 wording is judged to be the error; it
+is also the rung inconsistent with the composite built on top of it. **This is a
+prior, not a result** — if the data says otherwise at |t| > 1.96 with the sign
+holding across years, that is a falsified pre-registered sign and gets its own
+entry, exactly as D-018 recorded for A2.
+
+---
+
 ## D-027 · 2026-09-05 · Panel assembled; the TTF roll is benign; four composites are unusable
 
 **Context.** Building `data/model_panel.py`, the single aligned daily grid Part B
