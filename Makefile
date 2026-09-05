@@ -222,8 +222,9 @@ paper-figures:
 # Overleaf/arXiv exactly.
 paper-pdf:
 	@if command -v pdflatex >/dev/null; then \
-	  cd paper && pdflatex -interaction=nonstopmode main >/dev/null && bibtex main >/dev/null && \
-	  pdflatex -interaction=nonstopmode main >/dev/null && pdflatex -interaction=nonstopmode main | tail -3; \
+	  cd paper && pdflatex -interaction=nonstopmode main >/dev/null; bibtex main >/dev/null; \
+	  pdflatex -interaction=nonstopmode main >/dev/null; pdflatex -interaction=nonstopmode main >/dev/null; \
+	  grep -n -A3 '^!' main.log && exit 1; grep -c 'Output written' main.log >/dev/null && echo 'main.pdf built'; \
 	else cd paper && $$HOME/.local/bin/tectonic --keep-logs main.tex; fi
 
 paper: paper-results paper-tables paper-figures paper-pdf
