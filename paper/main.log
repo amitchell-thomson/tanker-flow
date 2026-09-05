@@ -49,6 +49,44 @@ Package: iftex 2022/02/03 v1.0f TeX engine tests
 \Gm@layoutvoffset=\dimen148
 \Gm@dimlist=\toks18
 )
+(/usr/share/texlive/texmf-dist/tex/latex/base/fontenc.sty
+Package: fontenc 2021/04/29 v2.0v Standard LaTeX package
+)
+(/usr/share/texmf/tex/latex/lm/lmodern.sty
+Package: lmodern 2015/05/01 v1.6.1 Latin Modern Fonts
+LaTeX Font Info:    Overwriting symbol font `operators' in version `normal'
+(Font)                  OT1/cmr/m/n --> OT1/lmr/m/n on input line 22.
+LaTeX Font Info:    Overwriting symbol font `letters' in version `normal'
+(Font)                  OML/cmm/m/it --> OML/lmm/m/it on input line 23.
+LaTeX Font Info:    Overwriting symbol font `symbols' in version `normal'
+(Font)                  OMS/cmsy/m/n --> OMS/lmsy/m/n on input line 24.
+LaTeX Font Info:    Overwriting symbol font `largesymbols' in version `normal'
+(Font)                  OMX/cmex/m/n --> OMX/lmex/m/n on input line 25.
+LaTeX Font Info:    Overwriting symbol font `operators' in version `bold'
+(Font)                  OT1/cmr/bx/n --> OT1/lmr/bx/n on input line 26.
+LaTeX Font Info:    Overwriting symbol font `letters' in version `bold'
+(Font)                  OML/cmm/b/it --> OML/lmm/b/it on input line 27.
+LaTeX Font Info:    Overwriting symbol font `symbols' in version `bold'
+(Font)                  OMS/cmsy/b/n --> OMS/lmsy/b/n on input line 28.
+LaTeX Font Info:    Overwriting symbol font `largesymbols' in version `bold'
+(Font)                  OMX/cmex/m/n --> OMX/lmex/m/n on input line 29.
+LaTeX Font Info:    Overwriting math alphabet `\mathbf' in version `normal'
+(Font)                  OT1/cmr/bx/n --> OT1/lmr/bx/n on input line 31.
+LaTeX Font Info:    Overwriting math alphabet `\mathsf' in version `normal'
+(Font)                  OT1/cmss/m/n --> OT1/lmss/m/n on input line 32.
+LaTeX Font Info:    Overwriting math alphabet `\mathit' in version `normal'
+(Font)                  OT1/cmr/m/it --> OT1/lmr/m/it on input line 33.
+LaTeX Font Info:    Overwriting math alphabet `\mathtt' in version `normal'
+(Font)                  OT1/cmtt/m/n --> OT1/lmtt/m/n on input line 34.
+LaTeX Font Info:    Overwriting math alphabet `\mathbf' in version `bold'
+(Font)                  OT1/cmr/bx/n --> OT1/lmr/bx/n on input line 35.
+LaTeX Font Info:    Overwriting math alphabet `\mathsf' in version `bold'
+(Font)                  OT1/cmss/bx/n --> OT1/lmss/bx/n on input line 36.
+LaTeX Font Info:    Overwriting math alphabet `\mathit' in version `bold'
+(Font)                  OT1/cmr/bx/it --> OT1/lmr/bx/it on input line 37.
+LaTeX Font Info:    Overwriting math alphabet `\mathtt' in version `bold'
+(Font)                  OT1/cmtt/m/n --> OT1/lmtt/m/n on input line 38.
+)
 (/usr/share/texlive/texmf-dist/tex/latex/amsmath/amsmath.sty
 Package: amsmath 2023/05/13 v2.17o AMS math features
 \@mathmargin=\skip50
@@ -386,32 +424,38 @@ Package uniquecounter Info: New unique counter `rerunfilecheck' on input line 2
 \Hy@SectionHShift=\skip58
 )
 (./numbers.tex)
+LaTeX Font Info:    Trying to load font information for T1+lmr on input line 36
+.
+ (/usr/share/texmf/tex/latex/lm/t1lmr.fd
+File: t1lmr.fd 2015/05/01 v1.6.1 Font defs for Latin Modern
+)
 (/usr/share/texlive/texmf-dist/tex/latex/l3backend/l3backend-pdftex.def
 File: l3backend-pdftex.def 2024-01-04 L3 backend support: PDF output (pdfTeX)
 \l__color_backend_stack_int=\count297
 \l__pdf_internal_box=\box56
 )
-No file main.aux.
+(./main.aux)
 \openout1 = `main.aux'.
 
-LaTeX Font Info:    Checking defaults for OML/cmm/m/it on input line 34.
-LaTeX Font Info:    ... okay on input line 34.
-LaTeX Font Info:    Checking defaults for OMS/cmsy/m/n on input line 34.
-LaTeX Font Info:    ... okay on input line 34.
-LaTeX Font Info:    Checking defaults for OT1/cmr/m/n on input line 34.
-LaTeX Font Info:    ... okay on input line 34.
-LaTeX Font Info:    Checking defaults for T1/cmr/m/n on input line 34.
-LaTeX Font Info:    ... okay on input line 34.
-LaTeX Font Info:    Checking defaults for TS1/cmr/m/n on input line 34.
-LaTeX Font Info:    ... okay on input line 34.
-LaTeX Font Info:    Checking defaults for OMX/cmex/m/n on input line 34.
-LaTeX Font Info:    ... okay on input line 34.
-LaTeX Font Info:    Checking defaults for U/cmr/m/n on input line 34.
-LaTeX Font Info:    ... okay on input line 34.
-LaTeX Font Info:    Checking defaults for PD1/pdf/m/n on input line 34.
-LaTeX Font Info:    ... okay on input line 34.
-LaTeX Font Info:    Checking defaults for PU/pdf/m/n on input line 34.
-LaTeX Font Info:    ... okay on input line 34.
+LaTeX Font Info:    Checking defaults for OML/cmm/m/it on input line 36.
+LaTeX Font Info:    ... okay on input line 36.
+LaTeX Font Info:    Checking defaults for OMS/cmsy/m/n on input line 36.
+LaTeX Font Info:    ... okay on input line 36.
+LaTeX Font Info:    Checking defaults for OT1/cmr/m/n on input line 36.
+LaTeX Font Info:    ... okay on input line 36.
+LaTeX Font Info:    Checking defaults for T1/cmr/m/n on input line 36.
+LaTeX Font Info:    ... okay on input line 36.
+LaTeX Font Info:    Checking defaults for TS1/cmr/m/n on input line 36.
+LaTeX Font Info:    ... okay on input line 36.
+LaTeX Font Info:    Checking defaults for OMX/cmex/m/n on input line 36.
+LaTeX Font Info:    ... okay on input line 36.
+LaTeX Font Info:    Checking defaults for U/cmr/m/n on input line 36.
+LaTeX Font Info:    ... okay on input line 36.
+LaTeX Font Info:    Checking defaults for PD1/pdf/m/n on input line 36.
+LaTeX Font Info:    ... okay on input line 36.
+LaTeX Font Info:    Checking defaults for PU/pdf/m/n on input line 36.
+LaTeX Font Info:    ... okay on input line 36.
+
 *geometry* driver: auto-detecting
 *geometry* detected driver: pdftex
 *geometry* verbose mode - [ preamble ] result:
@@ -471,19 +515,19 @@ e
 Package caption Info: Begin \AtBeginDocument code.
 Package caption Info: hyperref package is loaded.
 Package caption Info: End \AtBeginDocument code.
-LaTeX Info: Redefining \microtypecontext on input line 34.
-Package microtype Info: Applying patch `item' on input line 34.
-Package microtype Info: Applying patch `toc' on input line 34.
-Package microtype Info: Applying patch `eqnum' on input line 34.
-Package microtype Info: Applying patch `footnote' on input line 34.
-Package microtype Info: Applying patch `verbatim' on input line 34.
+LaTeX Info: Redefining \microtypecontext on input line 36.
+Package microtype Info: Applying patch `item' on input line 36.
+Package microtype Info: Applying patch `toc' on input line 36.
+Package microtype Info: Applying patch `eqnum' on input line 36.
+Package microtype Info: Applying patch `footnote' on input line 36.
+Package microtype Info: Applying patch `verbatim' on input line 36.
 Package microtype Info: Generating PDF output.
 Package microtype Info: Character protrusion enabled (level 2).
 Package microtype Info: Using default protrusion set `alltext'.
 Package microtype Info: Automatic font expansion enabled (level 2),
 (microtype)             stretch: 20, shrink: 20, step: 1, non-selected.
 Package microtype Info: Using default expansion set `alltext-nott'.
-LaTeX Info: Redefining \showhyphens on input line 34.
+LaTeX Info: Redefining \showhyphens on input line 36.
 Package microtype Info: No adjustment of tracking.
 Package microtype Info: No adjustment of interword spacing.
 Package microtype Info: No adjustment of character kerning.
@@ -492,11 +536,42 @@ Package microtype Info: No adjustment of character kerning.
 File: mt-cmr.cfg 2013/05/19 v2.2 microtype config. file: Computer Modern Roman 
 (RS)
 )
-Package hyperref Info: Link coloring ON on input line 34.
+Package hyperref Info: Link coloring ON on input line 36.
+ (./main.out)
+(./main.out)
 \@outlinefile=\write3
 \openout3 = `main.out'.
 
-LaTeX Font Info:    Trying to load font information for U+msa on input line 36.
+LaTeX Font Info:    Trying to load font information for OT1+lmr on input line 3
+8.
+ (/usr/share/texmf/tex/latex/lm/ot1lmr.fd
+File: ot1lmr.fd 2015/05/01 v1.6.1 Font defs for Latin Modern
+)
+LaTeX Font Info:    Trying to load font information for OML+lmm on input line 3
+8.
+
+(/usr/share/texmf/tex/latex/lm/omllmm.fd
+File: omllmm.fd 2015/05/01 v1.6.1 Font defs for Latin Modern
+)
+LaTeX Font Info:    Trying to load font information for OMS+lmsy on input line 
+38.
+
+(/usr/share/texmf/tex/latex/lm/omslmsy.fd
+File: omslmsy.fd 2015/05/01 v1.6.1 Font defs for Latin Modern
+)
+LaTeX Font Info:    Trying to load font information for OMX+lmex on input line 
+38.
+
+(/usr/share/texmf/tex/latex/lm/omxlmex.fd
+File: omxlmex.fd 2015/05/01 v1.6.1 Font defs for Latin Modern
+)
+LaTeX Font Info:    External font `lmex10' loaded for size
+(Font)              <12> on input line 38.
+LaTeX Font Info:    External font `lmex10' loaded for size
+(Font)              <8> on input line 38.
+LaTeX Font Info:    External font `lmex10' loaded for size
+(Font)              <6> on input line 38.
+LaTeX Font Info:    Trying to load font information for U+msa on input line 38.
 
 
 (/usr/share/texlive/texmf-dist/tex/latex/amsfonts/umsa.fd
@@ -505,7 +580,7 @@ File: umsa.fd 2013/01/14 v3.01 AMS symbols A
 (/usr/share/texlive/texmf-dist/tex/latex/microtype/mt-msa.cfg
 File: mt-msa.cfg 2006/02/04 v1.1 microtype config. file: AMS symbols (a) (RS)
 )
-LaTeX Font Info:    Trying to load font information for U+msb on input line 36.
+LaTeX Font Info:    Trying to load font information for U+msb on input line 38.
 
 
 (/usr/share/texlive/texmf-dist/tex/latex/amsfonts/umsb.fd
@@ -514,186 +589,137 @@ File: umsb.fd 2013/01/14 v3.01 AMS symbols B
 (/usr/share/texlive/texmf-dist/tex/latex/microtype/mt-msb.cfg
 File: mt-msb.cfg 2005/06/01 v1.0 microtype config. file: AMS symbols (b) (RS)
 )
-(./sections/00_abstract.tex) (./sections/01_intro.tex [1
+(./sections/00_abstract.tex
+LaTeX Font Info:    External font `lmex10' loaded for size
+(Font)              <10> on input line 14.
+LaTeX Font Info:    External font `lmex10' loaded for size
+(Font)              <7> on input line 14.
+LaTeX Font Info:    External font `lmex10' loaded for size
+(Font)              <5> on input line 14.
+) (./sections/01_intro.tex
+LaTeX Font Info:    External font `lmex10' loaded for size
+(Font)              <10.95> on input line 23.
+ [1
 
-{/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map}]
+{/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map}{/usr/share/texmf/fonts/enc/
+dvips/lm/lm-ec.enc}{/usr/share/texmf/fonts/enc/dvips/lm/lm-mathsy.enc}{/usr/sha
+re/texmf/fonts/enc/dvips/lm/lm-mathit.enc}]) (./sections/02_data.tex [2{/usr/sh
+are/texmf/fonts/enc/dvips/lm/lm-rm.enc}] (./tables/inventory.tex
+LaTeX Font Info:    Trying to load font information for T1+lmtt on input line 1
+3.
 
-LaTeX Warning: Reference `sec:data' on page 2 undefined on input line 44.
-
-
-LaTeX Warning: Reference `sec:panel' on page 2 undefined on input line 45.
-
-
-LaTeX Warning: Reference `sec:prereg' on page 2 undefined on input line 46.
-
-
-LaTeX Warning: Reference `sec:parta' on page 2 undefined on input line 47.
-
-
-LaTeX Warning: Reference `sec:partb' on page 2 undefined on input line 48.
-
-
-LaTeX Warning: Reference `sec:power' on page 2 undefined on input line 49.
-
-
-LaTeX Warning: Reference `sec:discussion' on page 2 undefined on input line 49.
-
-
-
-LaTeX Warning: Reference `sec:limitations' on page 2 undefined on input line 50
-.
-
-) (./sections/02_data.tex
-
-Package natbib Warning: Citation `noaa_ais' on page 2 undefined on input line 7
-.
-
-
-Package natbib Warning: Citation `gfw' on page 2 undefined on input line 9.
-
-
-LaTeX Warning: Reference `sec:panel' on page 2 undefined on input line 13.
-
-
-Package natbib Warning: Citation `eia_api' on page 2 undefined on input line 16
-.
-
-
-Package natbib Warning: Citation `worldbank_cmo' on page 2 undefined on input l
-ine 18.
-
-
-Package natbib Warning: Citation `fred' on page 2 undefined on input line 20.
-
-
-Package natbib Warning: Citation `agsi' on page 2 undefined on input line 20.
-
-
-Package natbib Warning: Citation `openmeteo' on page 2 undefined on input line 
-22.
-
-
-LaTeX Warning: Reference `tab:inventory' on page 2 undefined on input line 26.
-
-[2]
-
-LaTeX Warning: Reference `sec:partb' on page 3 undefined on input line 41.
-
-
-LaTeX Warning: Reference `sec:partb' on page 3 undefined on input line 41.
-
-(./tables/inventory.tex
+(/usr/share/texmf/tex/latex/lm/t1lmtt.fd
+File: t1lmtt.fd 2015/05/01 v1.6.1 Font defs for Latin Modern
+)
 Package microtype Info: Loading generic protrusion settings for font family
-(microtype)             `cmtt' (encoding: OT1).
+(microtype)             `lmtt' (encoding: T1).
 (microtype)             For optimal results, create family-specific settings.
 (microtype)             See the microtype manual for details.
-)
-
-LaTeX Warning: Reference `tab:capture' on page 3 undefined on input line 51.
-
-(./tables/capture.tex)
-
-LaTeX Warning: Reference `fig:spread' on page 3 undefined on input line 68.
-
-<figures/fig1_spread_and_stock.pdf, id=25, 466.72556pt x 286.21205pt>
+) (./tables/capture.tex)
+<figures/fig1_spread_and_stock.pdf, id=147, 466.72556pt x 286.21205pt>
 File: figures/fig1_spread_and_stock.pdf Graphic file (type pdf)
 <use figures/fig1_spread_and_stock.pdf>
 Package pdftex.def Info: figures/fig1_spread_and_stock.pdf  used on input line 
 75.
 (pdftex.def)             Requested size: 449.55322pt x 275.68193pt.
-) (./sections/03_panel.tex [3]
-
-LaTeX Warning: Reference `fig:leakage' on page 4 undefined on input line 15.
-
-<figures/fig2_leakage.pdf, id=35, 421.48528pt x 216.45311pt>
+)
+(./sections/03_panel.tex [3]
+<figures/fig2_leakage.pdf, id=157, 421.48528pt x 216.45311pt>
 File: figures/fig2_leakage.pdf Graphic file (type pdf)
 <use figures/fig2_leakage.pdf>
 Package pdftex.def Info: figures/fig2_leakage.pdf  used on input line 28.
 (pdftex.def)             Requested size: 382.12297pt x 196.24269pt.
-[4 <./figures/fig1_spread_and_stock.pdf>]
+ [4 <./figures/fig1_spread_and_stock.pdf>] [5 <./figures/fig2_leakage.pdf>]) (.
+/sections/04_prereg.tex (./tables/prereg.tex))
+(./sections/05_part_a.tex [6] (./tables/part_a.tex) (./tables/part_a5.tex)
+[7] (./tables/h1.tex)) (./sections/06_part_b.tex (./tables/laddercov.tex)
+[8]
+<figures/fig3_fwl_scan.pdf, id=305, 485.79962pt x 243.61288pt>
+File: figures/fig3_fwl_scan.pdf Graphic file (type pdf)
+<use figures/fig3_fwl_scan.pdf>
+Package pdftex.def Info: figures/fig3_fwl_scan.pdf  used on input line 57.
+(pdftex.def)             Requested size: 404.59515pt x 202.89746pt.
+ (./tables/fwlcov.tex) [9 <./figures/fig3_fwl_scan.pdf>]
+(./tables/mechanismscov.tex
+LaTeX Font Info:    External font `lmex10' loaded for size
+(Font)              <9> on input line 1.
+)) (./sections/07_power.tex [10]
+<figures/fig4_power.pdf, id=396, 403.93156pt x 230.07092pt>
+File: figures/fig4_power.pdf Graphic file (type pdf)
+<use figures/fig4_power.pdf>
+Package pdftex.def Info: figures/fig4_power.pdf  used on input line 13.
+(pdftex.def)             Requested size: 359.64394pt x 204.85724pt.
+)
+(./sections/08_discussion.tex [11 <./figures/fig4_power.pdf>])
+(./sections/09_limitations.tex [12]) (./main.bbl)
+(./sections/appendix_a_signals.tex [13]
+Overfull \hbox (4.04715pt too wide) in paragraph at lines 12--12
+[]|\T1/lmr/m/n/10 (-20) aggregation|  
+ []
 
-LaTeX Warning: Reference `sec:partb' on page 5 undefined on input line 64.
+) (./sections/appendix_b_full_panel.tex (./tables/ladderfull.tex)
 
-[5 <./figures/fig2_leakage.pdf>]
+LaTeX Warning: `h' float specifier changed to `ht'.
 
-LaTeX Warning: Reference `fig:spread' on page 6 undefined on input line 88.
+(./tables/fwlfull.tex)
 
+LaTeX Warning: `h' float specifier changed to `ht'.
 
-LaTeX Warning: Reference `app:fullpanel' on page 6 undefined on input line 91.
+(./tables/mechanismsfull.tex)
 
-) (./sections/04_prereg.tex
+LaTeX Warning: `h' float specifier changed to `ht'.
 
-LaTeX Warning: Reference `tab:prereg' on page 6 undefined on input line 8.
+<figures/fig1_spread_and_stock_fullpanel.pdf, id=487, 476.70348pt x 286.21205pt
+>
+File: figures/fig1_spread_and_stock_fullpanel.pdf Graphic file (type pdf)
+<use figures/fig1_spread_and_stock_fullpanel.pdf>
+Package pdftex.def Info: figures/fig1_spread_and_stock_fullpanel.pdf  used on i
+nput line 32.
+(pdftex.def)             Requested size: 449.55322pt x 269.91718pt.
 
-(./tables/prereg.tex)
+LaTeX Warning: `h' float specifier changed to `ht'.
 
-LaTeX Warning: Reference `sec:parta' on page 6 undefined on input line 18.
+<figures/fig3_fwl_scan_fullpanel.pdf, id=490, 485.79962pt x 243.61288pt>
+File: figures/fig3_fwl_scan_fullpanel.pdf Graphic file (type pdf)
+<use figures/fig3_fwl_scan_fullpanel.pdf>
+Package pdftex.def Info: figures/fig3_fwl_scan_fullpanel.pdf  used on input lin
+e 40.
+(pdftex.def)             Requested size: 404.59515pt x 202.89746pt.
 
+LaTeX Warning: `h' float specifier changed to `ht'.
 
-LaTeX Warning: Reference `sec:parta' on page 6 undefined on input line 20.
-
-) (./sections/05_part_a.tex
-
-LaTeX Warning: Reference `tab:parta' on page 6 undefined on input line 10.
-
-[6] (./tables/part_a.tex)
-
-Package natbib Warning: Citation `muth1960' on page 7 undefined on input line 3
-1.
-
-
-Package natbib Warning: Citation `adams2007' on page 7 undefined on input line 
-37.
-
-
-LaTeX Warning: Reference `tab:parta5' on page 7 undefined on input line 39.
-
-(./tables/part_a5.tex)
-
-LaTeX Warning: Reference `tab:h1' on page 7 undefined on input line 57.
-
-[7] (./tables/h1.tex)) (./sections/06_part_b.tex
-
-LaTeX Warning: Reference `sec:panel' on page 8 undefined on input line 11.
-
-
-Package natbib Warning: Citation `neweywest1987' on page 8 undefined on input l
-ine 16.
-
-
-Package natbib Warning: Citation `lopezdeprado2018' on page 8 undefined on inpu
-t line 21.
-
-
-LaTeX Warning: Reference `tab:ladder' on page 8 undefined on input line 27.
-
-(./tables/laddercov.tex)
-
-Package natbib Warning: Citation `frischwaugh1933' on page 8 undefined on input
- line 48.
-
-
-Package natbib Warning: Citation `lovell1963' on page 8 undefined on input line
- 48.
-
-
-LaTeX Warning: Reference `app:signals' on page 8 undefined on input line 51.
-
-[8
-! pdfTeX error (font expansion): auto expansion is only possible with scalable 
-fonts.
-<argument> ...shipout:D \box_use:N \l_shipout_box 
-                                                  \__shipout_drop_firstpage_...
-l.54 
-     
-
- 
+) (./sections/appendix_c_repro_ai.tex [14]) [15] [16 <./figures/fig1_spread_and
+_stock_fullpanel.pdf> <./figures/fig3_fwl_scan_fullpanel.pdf>] (./main.aux)
+ ***********
+LaTeX2e <2023-11-01> patch level 1
+L3 programming layer <2024-01-22>
+ ***********
+Package rerunfilecheck Info: File `main.out' has not changed.
+(rerunfilecheck)             Checksum: 653F208BCAF17FF4F733B75D6A1480FD;4402.
+ ) 
 Here is how much of TeX's memory you used:
- 14718 strings out of 476182
- 230447 string characters out of 5795596
- 1938975 words of memory out of 5000000
- 36302 multiletter control sequences out of 15000+600000
- 573800 words of font info for 170 fonts, out of 8000000 for 9000
+ 15459 strings out of 476182
+ 244891 string characters out of 5795596
+ 1949975 words of memory out of 5000000
+ 36843 multiletter control sequences out of 15000+600000
+ 642930 words of font info for 216 fonts, out of 8000000 for 9000
  14 hyphenation exceptions out of 8191
- 75i,10n,79p,997b,476s stack positions out of 10000i,1000n,20000p,200000b,200000s
-!  ==> Fatal error occurred, no output PDF file produced!
+ 75i,11n,79p,997b,476s stack positions out of 10000i,1000n,20000p,200000b,200000s
+</usr/share/texmf/fonts/type1/public/lm/lmbx10.pfb></usr/share/texmf/fonts/ty
+pe1/public/lm/lmbx12.pfb></usr/share/texmf/fonts/type1/public/lm/lmmi10.pfb></u
+sr/share/texmf/fonts/type1/public/lm/lmmi8.pfb></usr/share/texmf/fonts/type1/pu
+blic/lm/lmmi9.pfb></usr/share/texmf/fonts/type1/public/lm/lmr10.pfb></usr/share
+/texmf/fonts/type1/public/lm/lmr12.pfb></usr/share/texmf/fonts/type1/public/lm/
+lmr17.pfb></usr/share/texmf/fonts/type1/public/lm/lmr6.pfb></usr/share/texmf/fo
+nts/type1/public/lm/lmr7.pfb></usr/share/texmf/fonts/type1/public/lm/lmr8.pfb><
+/usr/share/texmf/fonts/type1/public/lm/lmr9.pfb></usr/share/texmf/fonts/type1/p
+ublic/lm/lmri10.pfb></usr/share/texmf/fonts/type1/public/lm/lmsy10.pfb></usr/sh
+are/texmf/fonts/type1/public/lm/lmsy6.pfb></usr/share/texmf/fonts/type1/public/
+lm/lmsy9.pfb></usr/share/texmf/fonts/type1/public/lm/lmtt10.pfb>
+Output written on main.pdf (16 pages, 622804 bytes).
+PDF statistics:
+ 738 PDF objects out of 1000 (max. 8388607)
+ 392 compressed objects within 4 object streams
+ 88 named destinations out of 1000 (max. 500000)
+ 44255 words of extra memory for PDF output out of 51595 (max. 10000000)
+

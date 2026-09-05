@@ -1,0 +1,78 @@
+\begin{thebibliography}{13}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Adams and MacKay(2007)]{adams2007}
+Ryan~Prescott Adams and David J.~C. MacKay.
+\newblock Bayesian online changepoint detection.
+\newblock \emph{arXiv preprint arXiv:0710.3742}, 2007.
+
+\bibitem[{Federal Reserve Bank of St.\ Louis}(2026)]{fred}
+{Federal Reserve Bank of St.\ Louis}.
+\newblock Fred economic data.
+\newblock \url{https://fred.stlouisfed.org/}, 2026.
+
+\bibitem[Frisch and Waugh(1933)]{frischwaugh1933}
+Ragnar Frisch and Frederick~V. Waugh.
+\newblock Partial time regressions as compared with individual trends.
+\newblock \emph{Econometrica}, 1\penalty0 (4):\penalty0 387--401, 1933.
+
+\bibitem[{Gas Infrastructure Europe}(2026)]{agsi}
+{Gas Infrastructure Europe}.
+\newblock Agsi+ transparency platform.
+\newblock \url{https://agsi.gie.eu/}, 2026.
+
+\bibitem[{Global Fishing Watch}(2026)]{gfw}
+{Global Fishing Watch}.
+\newblock Global fishing watch data and apis.
+\newblock \url{https://globalfishingwatch.org/}, 2026.
+
+\bibitem[L{\'o}pez~de Prado(2018)]{lopezdeprado2018}
+Marcos L{\'o}pez~de Prado.
+\newblock \emph{Advances in Financial Machine Learning}.
+\newblock Wiley, 2018.
+
+\bibitem[Lovell(1963)]{lovell1963}
+Michael~C. Lovell.
+\newblock Seasonal adjustment of economic time series and multiple regression
+  analysis.
+\newblock \emph{Journal of the American Statistical Association}, 58\penalty0
+  (304):\penalty0 993--1010, 1963.
+
+\bibitem[Muth(1960)]{muth1960}
+John~F. Muth.
+\newblock Optimal properties of exponentially weighted forecasts.
+\newblock \emph{Journal of the American Statistical Association}, 55\penalty0
+  (290):\penalty0 299--306, 1960.
+
+\bibitem[Newey and West(1987)]{neweywest1987}
+Whitney~K. Newey and Kenneth~D. West.
+\newblock A simple, positive semi-definite, heteroskedasticity and
+  autocorrelation consistent covariance matrix.
+\newblock \emph{Econometrica}, 55\penalty0 (3):\penalty0 703--708, 1987.
+
+\bibitem[{NOAA Office for Coastal Management}(2026)]{noaa_ais}
+{NOAA Office for Coastal Management}.
+\newblock Marine cadastre: Automatic identification system (ais) vessel traffic
+  data.
+\newblock \url{https://marinecadastre.gov/ais/}, 2026.
+
+\bibitem[{Open-Meteo}(2026)]{openmeteo}
+{Open-Meteo}.
+\newblock Historical weather api (era5).
+\newblock \url{https://open-meteo.com/en/docs/historical-weather-api}, 2026.
+
+\bibitem[{U.S. Energy Information Administration}(2026)]{eia_api}
+{U.S. Energy Information Administration}.
+\newblock Eia open data api v2.
+\newblock \url{https://www.eia.gov/opendata/}, 2026.
+
+\bibitem[{World Bank}(2026)]{worldbank_cmo}
+{World Bank}.
+\newblock Commodity markets outlook: Monthly prices (``pink sheet'').
+\newblock \url{https://www.worldbank.org/en/research/commodity-markets}, 2026.
+
+\end{thebibliography}
