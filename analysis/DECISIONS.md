@@ -275,6 +275,74 @@ digit. 341 tests pass, ruff clean; 16 new tests in `tests/test_a1.py`.
 
 ---
 
+## D-033 · 2026-09-05 · **Finding + robustness — a coverage break contaminates 24 % of the holdout; the null survives, one D-032 claim does not**
+
+**Context.** Found while generating Figure 1 for the paper: the plotted
+`gas_in_transit_eu` series **collapses at the start of 2026** — 4.80M m³ in
+December 2025 to **0.41M m³ in January 2026**, a ~91 % fall with no physical
+event behind it. Caught by eye on a chart, not by any check in the pipeline.
+
+**Cause.** The decade backfills end before the panel does:
+
+| source | last event | events |
+|---|---|---|
+| `noaa` (US) | **2025-12-31** | 44,363 |
+| `gfw` (EU) | 2026-02-21 | 40,273 |
+| `bbox` (live) | 2026-05-30 | 1,264 |
+| `mmsi_filter` (live) | 2026-08-10 | 1,974 |
+
+Past 2025-12-31 the signals are carried by the live feed alone — 3,238 events
+against 84,636 from the backfill — so the level steps down for **measurement**
+reasons. This is SIGNALS.md §2.1's "never aggregate across the seam" rule, and
+`model_panel` broke it by taking `regime='all'` to the data max.
+
+**Exposure.** 16 of 395 modelling weeks (4.1 %) — but **16 of 68 holdout weeks
+(24 %)**, because the holdout sits at the end of the panel by construction. The
+discovery window (ending 2024-12-30) is entirely unaffected.
+
+**Decision.** `COVERAGE_HORIZON = 2025-12-31` and an `--end coverage` flag on
+both harnesses (`make b0-coverage` / `make mechanisms-coverage`). The published
+D-029/D-032 runs are kept as-is; this is a *robustness* run reported alongside,
+not a silent replacement.
+
+### The null survives, and gets cleaner
+On 379 weeks to 2025-12-29: M2 still loses to no-change (**−9.3 %** at h = 1,
+against −10.4 % published), and **no signal is significant** at either horizon.
+Two things improve:
+- Max |HAC t| falls from **1.72 → 1.50**. The former maximum was
+  `gas_in_transit_unknown` at −1.72; on clean coverage it collapses to **+0.24**.
+  That largest-looking result was the contaminated tail.
+- At h = 4 the four flow signals now all carry their **pre-registered signs**
+  (`gas_in_transit_eu` +1.40, `gas_ballast_to_us` +1.50, `gas_loading_us` +1.14,
+  `gas_discharging_eu` +1.21) — directionally consistent with the mechanism,
+  uniformly and comfortably insignificant. A better-behaved null than the
+  published one.
+
+### One D-032 claim is withdrawn
+D-032 reported that **H2's sign flips between discovery (−2.64) and holdout
+(+8.23)** and read that as the signature of noise. **That flip was an artefact of
+the contaminated holdout.** On clean coverage the holdout coefficient is
+**−2.51**, matching discovery's −2.64.
+
+**Corrected reading of H2:** the estimate is *stable* and consistently **negative
+— the opposite of the pre-registered `+` prior — and never near significance**
+(|t| = 0.89 vs a 2.394 bar). That is still a failed hypothesis, and arguably a
+tidier one: a stable wrong-signed near-zero rather than a sign that wanders.
+H3 and H4's verdicts are unchanged; every discovery-window number in D-032 is
+unchanged, since discovery ends before the break.
+
+**Consequence for the write-up.** The paper reports the coverage-truncated run as
+primary and the full-panel run as a robustness appendix, not the other way round.
+The withdrawn sign-flip claim must not appear.
+
+**Process lesson, recorded because it is the useful part.** Nothing in the
+validation sweep, the 591 tests, or any decision entry caught this — it was found
+by *plotting the data* while making a figure. `model_panel` should carry a
+coverage-regime guard, and a level-break check belongs in `make validate-signals`.
+Logged as open work rather than fixed in passing.
+
+---
+
 ## D-032 · 2026-09-05 · **RESULT — all three mechanism tests fail; Part B's null stands**
 
 **Context.** First and only run of the D-031 protocol. Nothing was changed after

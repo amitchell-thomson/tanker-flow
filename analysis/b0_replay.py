@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from dataclasses import dataclass
+from datetime import date
 
 import asyncpg
 import numpy as np
@@ -27,6 +28,10 @@ from config import settings
 from data.model_panel import load_wide
 
 GRID_START = "2018-01-01"  # a Monday; the Part A grid (D-008/D-028)
+# Last date on which the tanker signals are carried by the decade backfill.
+# NOAA (US) ends 2025-12-31 and GFW (EU) 2026-02-21; past that only the live
+# feed contributes and gas_in_transit_eu falls ~90 % for measurement reasons.
+COVERAGE_HORIZON = date(2025, 12, 31)
 TARGET = "spread_hh_ttf"
 
 # D-028's control block. The price legs are excluded — they construct the target.
@@ -68,8 +73,18 @@ class Weekly:
     signals: dict[str, np.ndarray]
 
 
-async def load_weekly(pool: asyncpg.Pool) -> Weekly:
+async def load_weekly(pool: asyncpg.Pool, *, end: date | None = None) -> Weekly:
+    """Load the weekly modelling frame.
+
+    `end` truncates the panel. The default runs to the data max, but the
+    backfill sources stop long before it — NOAA at 2025-12-31, GFW at
+    2026-02-21 — after which the tanker signals are carried by the thin live
+    feed alone and step down by ~90 %. `end=COVERAGE_HORIZON` restricts the
+    sample to the regime where the signals are measured consistently (D-033).
+    """
     frame = await load_wide(pool, start=np.datetime64(GRID_START).astype("O"))
+    if end is not None:
+        frame = frame.loc[[d for d in frame.index if d <= end]]
     needed = [TARGET, *CONTROLS, *SIGNAL_PRIORS]
     frame = frame[needed].copy()
 
@@ -171,10 +186,10 @@ def report_fwl(weekly: Weekly, horizon: int) -> None:
         )
 
 
-async def run(horizons: list[int]) -> None:
+async def run(horizons: list[int], *, end: date | None = None) -> None:
     pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=3)
     try:
-        weekly = await load_weekly(pool)
+        weekly = await load_weekly(pool, end=end)
     finally:
         await pool.close()
 
@@ -193,13 +208,22 @@ async def run(horizons: list[int]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Part B null + FWL scan (D-028)")
     parser.add_argument(
+        "--end",
+        choices=["data-max", "coverage"],
+        default="data-max",
+        help="Sample end: 'data-max' (default, D-029 as published) or 'coverage' "
+        "(truncate at the backfill horizon 2025-12-31 — the D-033 robustness run)",
+    )
+    parser.add_argument(
         "--horizons",
         nargs="+",
         type=int,
         default=[1, 4],
         help="Forecast horizons in weeks (D-028 pre-registers 1 and 4)",
     )
-    asyncio.run(run(parser.parse_args().horizons))
+    args = parser.parse_args()
+    end = COVERAGE_HORIZON if args.end == "coverage" else None
+    asyncio.run(run(args.horizons, end=end))
 
 
 if __name__ == "__main__":

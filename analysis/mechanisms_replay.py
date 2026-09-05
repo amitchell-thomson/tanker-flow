@@ -12,13 +12,14 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 from datetime import date
 
 import asyncpg
 import numpy as np
 
-from analysis.b0_replay import load_weekly
+from analysis.b0_replay import COVERAGE_HORIZON, load_weekly
 from analysis.fwl import partial_effect, residualise
 from analysis.mechanisms import (
     BONFERRONI_T,
@@ -90,10 +91,10 @@ def _grade(
     )
 
 
-async def run() -> None:
+async def run(end: date | None = None) -> None:
     pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=3)
     try:
-        weekly = await load_weekly(pool)
+        weekly = await load_weekly(pool, end=end)
     finally:
         await pool.close()
 
@@ -231,4 +232,13 @@ async def run() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    ap = argparse.ArgumentParser(description="D-031 mechanism tests")
+    ap.add_argument(
+        "--end",
+        choices=["data-max", "coverage"],
+        default="data-max",
+        help="Sample end: 'data-max' (D-032 as published) or 'coverage' "
+        "(truncate at the backfill horizon 2025-12-31 — the D-033 robustness run)",
+    )
+    _args = ap.parse_args()
+    asyncio.run(run(COVERAGE_HORIZON if _args.end == "coverage" else None))
