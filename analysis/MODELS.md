@@ -731,6 +731,7 @@ Walk-forward CV, `basis='knowable'`, confidence columns as observation variance.
    primitives plus `net_export_pressure` (1,770 rows) carry the same information,
    with the weights fitted rather than imposed.
 11. ✅ **AR(1)+controls baseline + FWL harness** — **DONE 2026-09-05, negative result** (spec D-028, result D-029). `analysis/b0.py` (OLS+Newey-West HAC, purged walk-forward, the M0/M1/M2 ladder) + `analysis/fwl.py` (partial effects, graded against pre-registered signs). `make b0-replay`. **M2 loses to no-change** (−10.4% h=1, −19.2% h=4) ⇒ **M0 is the operative null**; **no tanker signal is significant** at either horizon (max |HAC t| 1.72 vs 1.96, max partial R² 0.009). Closes the linear, contemporaneous claim; non-linearity, regimes, joint fits and signal lags remain untested.
+11b. ✅ **H2/H3/H4 mechanism tests** — **DONE 2026-09-05, all three fail** (spec D-031, result D-032). `analysis/mechanisms.py` + `make mechanisms`: EU-share vs level, a storage interaction, and an observable tightness split — Bonferroni |t| > 2.394 over three primary tests at h = 4, with a held-out 2025+ stretch. Largest |t| 0.89, largest partial R² 0.009; H2's sign flips across the holdout, H3's sign is wrong, H4's conditions both fail. **Part B closed; write-up next.**
 12. **BSTS (B2)** with spike-and-slab over the pre-registered signals + controls,
     confidence-weighted; cross-check Elastic Net (B1) + PLS (B3). Report posterior
     inclusion probabilities + predictive intervals. Two-stage: feed the Part A nowcast in.
