@@ -218,7 +218,7 @@ paper-figures:
 	uv run python -m paper.figures --full-panel-too
 
 paper: paper-results paper-tables paper-figures
-	cd paper && rm -f ../tanker-flow-paper.zip && zip -qr ../tanker-flow-paper.zip main.tex numbers.tex refs.bib sections tables figures/*.pdf
+	uv run python -m paper.package
 	@echo "wrote tanker-flow-paper.zip — upload to Overleaf (New Project -> Upload Project)"
 
 # Read-only capture-rate report: captured US LNG-export departures vs the
