@@ -84,6 +84,20 @@ A `signal_daily_live_vintage` table logs the live-regime values **as printed eac
 day**, so a later `knowable[d]` recompute can be checked against what was actually
 emitted on `d` (the self-validation acceptance test; accrues with the live tail).
 
+> ⚠ **`zone_scope` on the in-transit/ballast stocks is hindsight-banded**
+> (`MODELS.md`/`DECISIONS.md` D-004b, found 2026-08-10). `dest_band()` assigns a
+> closed leg's destination band from its *observed arrival zone* under **both**
+> bases — only the live interval differs by basis — and NOAA/GFW carry no
+> destination broadcasts, so historically the arrival is the *only* band source.
+> Confirmed in-DB: on `gas_in_transit_volume` (`knowable`) the `unknown` band has
+> `open_fraction ≈ 1.0` while every named band sits at ≈ 0 — the named bands *are*
+> the closed legs, banded by an arrival a live observer had not yet seen. The
+> pooled (all-band) total is unaffected and remains leakage-safe; the **band split
+> is not point-in-time**. Binding rule: never use `zone_scope` on these stocks as
+> a live model feature or as a validation target for destination models (A6). The
+> Tier-4 sweep does not test this (it is a consumer-side property, not a
+> data-integrity one), which is why the green gate is not evidence against it.
+
 ### 2.3 · `confidence` — decomposed data-quality metadata
 
 Quality varies enormously across a decade and four feeds. Rather than a single opaque

@@ -1,4 +1,4 @@
-.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events backfill-noaa backfill-noaa-reload backfill-gfw backfill-gfw-dry reconcile reconcile-dry scoring signals validate-signals vf-rescue vf-rescue-dry vf-status refresh-fleet discover discover-dry discover-berths discover-berths-dry complete-registry complete-registry-dry complete-registry-sample retire-stale retire-stale-dry backup eia eia-full capture-rate coverage
+.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events backfill-noaa backfill-noaa-reload backfill-gfw backfill-gfw-dry reconcile reconcile-dry scoring signals a1-replay a2-replay a5-replay a4-replay validate-signals vf-rescue vf-rescue-dry vf-status refresh-fleet discover discover-dry discover-berths discover-berths-dry complete-registry complete-registry-dry complete-registry-sample retire-stale retire-stale-dry backup eia eia-full market market-full capture-rate coverage
 
 up:
 	docker compose up -d
@@ -100,6 +100,27 @@ scoring:
 signals:
 	uv run python -m pipeline.signal
 
+# A1 arrival-count baseline replay (analysis/MODELS.md Part A; result in
+# analysis/DECISIONS.md D-013). Read-only: walks the weekly grid, forecasts,
+# scores against the pre-registered bar. ~2 min.
+a1-replay:
+	uv run python -m analysis.a1_replay
+
+# A2 count-GLM replay (analysis/MODELS.md Part A; result in DECISIONS.md D-018).
+# Read-only: walk-forward refit at each weekly as-of, then score. ~5 min.
+a2-replay:
+	uv run python -m analysis.a2_replay
+
+# A5 outage-detection scorecard (analysis/MODELS.md Part A; result: DECISIONS.md
+# D-021). Read-only, seconds.
+a5-replay:
+	uv run python -m analysis.a5_replay
+
+# A4 Kalman nowcast replay (analysis/MODELS.md Part A; result: DECISIONS.md D-023).
+# Read-only, walk-forward MLE at each weekly as-of. ~4 min.
+a4-replay:
+	uv run python -m analysis.a4_replay
+
 # Signal validation sweep — the model-readiness gate (analysis/VALIDATION.md).
 # Exit non-zero on any blocking (tier 0-5) failure.
 validate-signals:
@@ -126,6 +147,16 @@ eia:
 
 eia-full:
 	uv run python -m data.eia --full
+
+# Non-EIA market + control series for the Part B spread model (TTF, EUR/USD,
+# Brent, EU storage, degree days) -> market_series. `market` is incremental
+# (re-pulls a trailing revision window per provider); `market-full` backfills
+# from 2016-01-01. Check one provider with `python -m data.market --probe ttf_front_month`.
+market:
+	uv run python -m data.market
+
+market-full:
+	uv run python -m data.market --full
 
 # Read-only capture-rate report: captured US LNG-export departures vs the
 # EIA-implied cargo count per month (needs `make eia` first). Lands dark until

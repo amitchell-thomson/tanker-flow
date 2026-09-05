@@ -263,3 +263,270 @@ def test_per_od_window_in_transit_within_window():
     events = [ev(21, "departed", NOW - timedelta(days=12), "usgulf", 1, laden=True)]
     legs = pair_legs(events, NOW, dest_regions={21: "nweurope"})
     assert legs[0].status == "open_in_transit"
+
+
+# ---------------------------------------------------------------------------
+# Point-in-time loader (DECISIONS.md D-004a)
+#
+# `compute_legs` is a thin DB loader, and the bug it fixes lives in *which rows
+# the queries return*, not in the pairing. So these drive it against a recording
+# fake connection: assert the point-in-time path selects the bounded SQL, binds
+# `as_of`, and that the default path is byte-for-byte the original queries.
+# ---------------------------------------------------------------------------
+
+import asyncio  # noqa: E402
+
+from pipeline.legs import (  # noqa: E402
+    DEST_REGION_SQL,
+    DEST_STATE_PIT_SQL,
+    DEST_STATE_WINDOW_DAYS,
+    LAST_FIX_PIT_SQL,
+    LAST_FIX_SQL,
+    LEG_EVENTS_PIT_SQL,
+    LEG_EVENTS_SQL,
+    RECENT_FIX_DAYS,
+    TERMINAL_ZONE_SQL,
+    UNLOCODE_SQL,
+    compute_legs,
+    resolve_dest_regions,
+)
+
+
+class FakeConn:
+    """Records every (sql, args) and replays canned rows keyed by SQL constant."""
+
+    def __init__(self, responses):
+        self.responses = responses
+        self.calls = []
+
+    async def fetch(self, sql, *args):
+        self.calls.append((sql, args))
+        return self.responses.get(sql, [])
+
+    def sql_for(self, sql):
+        return [args for s, args in self.calls if s == sql]
+
+
+class FakePool:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def acquire(self):
+        conn = self.conn
+
+        class _Ctx:
+            async def __aenter__(self):
+                return conn
+
+            async def __aexit__(self, *exc):
+                return False
+
+        return _Ctx()
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+def test_pit_loader_uses_bounded_queries_and_binds_as_of():
+    conn = FakeConn({})
+    _run(compute_legs(FakePool(conn), NOW, point_in_time=True))
+
+    # Bounded variants chosen, each carrying as_of...
+    assert conn.sql_for(LEG_EVENTS_PIT_SQL) == [(NOW,)]
+    assert conn.sql_for(LAST_FIX_PIT_SQL) == []  # no open_censored legs to probe
+    assert conn.sql_for(DEST_STATE_PIT_SQL) == [(NOW, str(DEST_STATE_WINDOW_DAYS))]
+    # ...and the un-replayable current-snapshot sources never touched.
+    assert conn.sql_for(LEG_EVENTS_SQL) == []
+    assert conn.sql_for(LAST_FIX_SQL) == []
+    assert conn.sql_for(DEST_REGION_SQL) == []
+
+
+def test_default_loader_is_unchanged_regression():
+    # The live pipeline / viz / vf_rescue path must be byte-for-byte the original
+    # queries — this is the guard that the fix is additive.
+    conn = FakeConn({})
+    _run(compute_legs(FakePool(conn), NOW))
+
+    assert conn.sql_for(LEG_EVENTS_SQL) == [()]
+    assert conn.sql_for(LAST_FIX_SQL) == [()]
+    assert conn.sql_for(DEST_REGION_SQL) == [()]
+    assert conn.sql_for(LEG_EVENTS_PIT_SQL) == []
+    assert conn.sql_for(LAST_FIX_PIT_SQL) == []
+    assert conn.sql_for(DEST_STATE_PIT_SQL) == []
+
+
+def test_pit_loader_skips_enrichment_when_disabled():
+    conn = FakeConn({})
+    _run(compute_legs(FakePool(conn), NOW, point_in_time=True, enrich=False))
+    assert conn.sql_for(LEG_EVENTS_PIT_SQL) == [(NOW,)]
+    assert conn.sql_for(LAST_FIX_PIT_SQL) == []
+    assert conn.sql_for(DEST_STATE_PIT_SQL) == []
+
+
+def test_pit_loader_classifies_from_bounded_evidence_not_latest_fix():
+    """The actual D-004a bug, end to end.
+
+    A leg departed 40d before as_of (past the 18d NW-Europe window) whose only
+    pre-as_of fix is a stale mid-ocean one is a phantom — `open_censored`. The
+    unbounded loader would hand `_classify_overdue` the vessel's latest-EVER fix
+    (here, one 200d AFTER as_of), which trivially passes the `now - 4d` recency
+    test and mislabels it `open_floating`. The bounded query never returns it.
+    """
+    departed = NOW - timedelta(days=40)
+    stale_midocean = (NOW - timedelta(days=30), 35.0, -40.0)
+    future_fix = (NOW + timedelta(days=200), ROTTERDAM[0], ROTTERDAM[1])
+
+    def rows(fix):
+        return {
+            LEG_EVENTS_PIT_SQL: [
+                {
+                    "mmsi": 99, "event_type": "departed", "event_time": departed,
+                    "zone": "usgulf", "terminal_id": 1,
+                    "lat": SABINE[0], "lon": SABINE[1],
+                    "laden_flag": True, "source": "noaa-ais",
+                }
+            ],
+            LAST_FIX_PIT_SQL: [
+                {"mmsi": 99, "fix_ts": fix[0], "lat": fix[1], "lon": fix[2]}
+            ],
+            UNLOCODE_SQL: [],
+            TERMINAL_ZONE_SQL: [],
+        }
+
+    bounded = _run(
+        compute_legs(FakePool(FakeConn(rows(stale_midocean))), NOW, point_in_time=True)
+    )
+    assert bounded[0].status == "open_censored"
+
+    # Same leg, but with the future fix leaking in (what the unbounded loader did).
+    leaked = _run(
+        compute_legs(FakePool(FakeConn(rows(future_fix))), NOW, point_in_time=True)
+    )
+    assert leaked[0].status == "open_floating"
+    # ...and that leak is exactly a recency test the future fix cannot fail:
+    assert future_fix[0] > NOW - timedelta(days=RECENT_FIX_DAYS)
+
+
+def test_pit_loader_hides_post_as_of_arrival():
+    # An arrival after as_of must leave the leg OPEN, not close it.
+    conn = FakeConn(
+        {
+            LEG_EVENTS_PIT_SQL: [
+                {
+                    "mmsi": 7, "event_type": "departed",
+                    "event_time": NOW - timedelta(days=5),
+                    "zone": "usgulf", "terminal_id": 1,
+                    "lat": SABINE[0], "lon": SABINE[1],
+                    "laden_flag": True, "source": "noaa-ais",
+                }
+                # the zone_entry at NOW+3d is filtered out by the SQL bound
+            ],
+        }
+    )
+    legs = _run(compute_legs(FakePool(conn), NOW, point_in_time=True))
+    assert len(legs) == 1
+    assert legs[0].status == "open_in_transit"
+    assert legs[0].arrived_ts is None
+
+
+# --- resolve_dest_regions (pure) -------------------------------------------
+
+UNLOCODES = {"NLRTM": 10, "USSAB": 1}
+TERMINAL_ZONES = {10: "nweurope", 1: "usgulf"}
+
+
+def test_resolve_dest_regions_parses_locode_to_zone():
+    got = resolve_dest_regions([(1, "NLRTM")], UNLOCODES, TERMINAL_ZONES)
+    assert got == {1: "nweurope"}
+
+
+def test_resolve_dest_regions_uses_rhs_of_chained_declaration():
+    # "USSAB>NLRTM" means next port Rotterdam, not Sabine.
+    got = resolve_dest_regions([(2, "USSAB>NLRTM")], UNLOCODES, TERMINAL_ZONES)
+    assert got == {2: "nweurope"}
+
+
+def test_resolve_dest_regions_drops_unresolvable_declarations():
+    # FOR ORDERS / empty / junk / unknown-terminal all resolve to nothing, and an
+    # absent key is treated by pair_legs exactly like an undeclared vessel.
+    rows = [(3, "FOR ORDERS"), (4, None), (5, ""), (6, "ZZZZZ")]
+    assert resolve_dest_regions(rows, UNLOCODES, TERMINAL_ZONES) == {}
+
+
+def test_resolve_dest_regions_drops_terminal_with_no_zone():
+    got = resolve_dest_regions([(8, "NLRTM")], UNLOCODES, {})
+    assert got == {}
+
+
+def test_pit_last_fix_probe_is_narrowed_to_open_legs():
+    """The two-pass narrowing: probe only vessels with an open leg.
+
+    Vessel 1's leg closed before as_of, so its last fix cannot change anything;
+    vessel 2's is open. Only 2 should reach the (expensive) LATERAL.
+    """
+    def dep(mmsi, days_ago):
+        return {
+            "mmsi": mmsi, "event_type": "departed",
+            "event_time": NOW - timedelta(days=days_ago),
+            "zone": "usgulf", "terminal_id": 1,
+            "lat": SABINE[0], "lon": SABINE[1],
+            "laden_flag": True, "source": "noaa-ais",
+        }
+
+    conn = FakeConn(
+        {
+            LEG_EVENTS_PIT_SQL: [
+                dep(1, 30),
+                {
+                    "mmsi": 1, "event_type": "zone_entry",
+                    "event_time": NOW - timedelta(days=16),
+                    "zone": "nweurope", "terminal_id": 10,
+                    "lat": ROTTERDAM[0], "lon": ROTTERDAM[1],
+                    "laden_flag": None, "source": "noaa-ais",
+                },
+                dep(2, 30),  # no arrival -> open
+            ],
+            UNLOCODE_SQL: [],
+            TERMINAL_ZONE_SQL: [],
+            LAST_FIX_PIT_SQL: [
+                {"mmsi": 2, "fix_ts": NOW - timedelta(days=1),
+                 "lat": ROTTERDAM[0], "lon": ROTTERDAM[1]}
+            ],
+        }
+    )
+    legs = _run(compute_legs(FakePool(conn), NOW, point_in_time=True))
+
+    assert conn.sql_for(LAST_FIX_PIT_SQL) == [(NOW, [2])]
+    by_mmsi = {lg.mmsi: lg for lg in legs}
+    assert by_mmsi[1].status == "closed"
+    # Open leg got its evidence and reclassified off the no-evidence default.
+    assert by_mmsi[2].status == "open_floating"
+    assert by_mmsi[2].last_fix_ts == NOW - timedelta(days=1)
+
+
+def test_pit_open_in_transit_leg_still_carries_last_fix():
+    # Narrowing must not blank `last_fix_*` on non-overdue open legs (they are
+    # within window, so evidence doesn't change status, but the fields are API).
+    fix_ts = NOW - timedelta(hours=6)
+    conn = FakeConn(
+        {
+            LEG_EVENTS_PIT_SQL: [
+                {
+                    "mmsi": 5, "event_type": "departed",
+                    "event_time": NOW - timedelta(days=3),
+                    "zone": "usgulf", "terminal_id": 1,
+                    "lat": SABINE[0], "lon": SABINE[1],
+                    "laden_flag": True, "source": "noaa-ais",
+                }
+            ],
+            UNLOCODE_SQL: [],
+            TERMINAL_ZONE_SQL: [],
+            LAST_FIX_PIT_SQL: [
+                {"mmsi": 5, "fix_ts": fix_ts, "lat": 30.0, "lon": -80.0}
+            ],
+        }
+    )
+    legs = _run(compute_legs(FakePool(conn), NOW, point_in_time=True))
+    assert legs[0].status == "open_in_transit"
+    assert legs[0].last_fix_ts == fix_ts

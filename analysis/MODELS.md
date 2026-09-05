@@ -5,6 +5,12 @@ measured (34 signals in `signal_daily`); this is *how* to turn it into a forecas
 the **Henry Hub / TTF spread**, with the maths per model and the small-sample
 discipline the data demands.
 
+Every design decision, protocol commitment and finding is logged append-only in
+[`DECISIONS.md`](DECISIONS.md) — the pre-registration instrument §0·3 #3 requires,
+and the source of record the final research note is assembled from. A spec below is
+*locked* once its D-entry lands; changes go through a superseding entry, never a
+silent edit.
+
 ---
 
 ## 0 · The corpus
@@ -220,19 +226,197 @@ permutation importance for the *incremental* lift over a controls-only model.
 Target: next-week US exports, EU arrivals 1–2 weeks out, queue/berth durations.
 Mechanically constrained → high SNR, validatable weekly against EIA, on the decade.
 
-**A1 · Kinematic ETA propagation — the physics baseline (no training).** Each open
-laden leg has a known origin and (declared/assumed) destination; forecast arrival from
-great-circle distance and observed speed, `t̂ = t_dep + d_gc/v̄`, and convolve per-leg
-arrival densities into a weekly **arrival-count distribution** (Poisson-binomial,
-closed-form mean/variance). Feeds off `gas_in_transit_volume` + `laden_voyage_age_d` +
-`voyage_speed_kn`. No fitted parameter — validate within weeks as legs complete. A3
-(below) upgrades the point `t̂` to a fitted per-O-D arrival-time *distribution*; A1 stays
-the no-training baseline it must beat.
+**A1 · Arrival-count baseline — at-sea duration climatology (no fitted parameters;
+spec locked 2026-08-10, D-001–D-003).** The physics question: *of the laden cargo at
+sea now, how much lands in Europe next week, and the week after?* Target = the
+**conditional weekly EU arrival count** — laden legs (origin ∈ {usgulf, usatlantic},
+`departed ≤ as_of`) whose first EU `zone_entry` falls in `W₁ = [as_of, +7d)` /
+`W₂ = [+7d, +14d)`, pooled across EU zones. *Not* the unconditional count (the
+not-yet-departed tail is a departure-process model — A2's job, composed later) and
+*not* per-zone (the live stock is ~75–83 % unknown-destination, and the historical
+banded `knowable` is hindsight-banded — D-004b). The original "great-circle ÷ speed"
+framing is this in disguise: `voyage_speed_kn` is *defined* as gc-nm ÷ duration, so
+`d_gc/v̄` cancels to the lane's typical duration — A1 is duration climatology, named
+honestly.
 
-**A2 · Count regression — Poisson / Negative Binomial GLM.** Weekly arrivals/loadings
-per terminal: `log λ = β₀ + xᵀβ + log(exposure)`; NB adds dispersion `k`
-(`Var = μ + μ²/k`) for the clustering. Few parameters, count-matched likelihood,
-exposure offset for unequal windows. Targets `us_loadings_count` / `od_flow_count`.
+Per open laden leg `i` at age `a`, window `(a+u₀, a+u₁]` (form per D-007, which
+superseded D-002's parametric posterior):
+
+    p_i(W) = π(a) · [F_eu(a+u₁) − F_eu(a+u₀)] / (1 − F_eu(a))
+           = N_eu(duration ∈ window) / N(open at a)        ← telescopes (D-009)
+
+Two measured factors, cleanly separating *will it be EU?* from *when?* — and because
+both are estimated from **one** population, the middle terms cancel exactly, so the
+decomposition is a factorisation of a single count ratio rather than two
+approximations multiplied. That is what removes the ratio (hence D-002's `p99` tail
+rule) and guarantees the factors can never be drawn from different windows or regimes:
+
+- **`π(a)`** — the **empirical age-conditional EU-arrival rate**: among matured legs
+  still open at age `a`, the share that produced an observed EU arrival. Estimated on
+  a **365 d rolling** window of departures ≥ 90 d old (`MAX_LEG_PAIR_DAYS` — the age
+  at which `pair_legs` can no longer change the outcome, so maturity is structural
+  rather than tuned). Measured shape: flat ≈ 0.41 to day 10, then collapsing through
+  the 12–18 d voyage window (.393 → .317 → .236 → .172 at 12/14/16/18 d, .052 by 60 d)
+  as EU-bound legs close and the residual pool becomes non-EU / missed-arrival. This
+  curve *is* the destination model; no survival assumption is made.
+- **`F_eu`** — duration CDF over **EU-arriving legs only**, same population. The
+  timing model, and A3's starting point (A3 replaces this ECDF with a fitted,
+  censoring-aware distribution).
+
+The forecast population is **every open laden US-export-origin leg, `open_censored`
+included** — the estimation denominator makes no status distinction either, so
+filtering phantoms from one side only would apply the correction twice.
+
+`π` is deliberately **capture-inclusive** — a leg whose real EU arrival we never saw
+counts in the denominator — so A1 forecasts *observed* arrivals, exactly what the
+D-003 truth series measures. Rolling (not expanding) because `π` drifts ~4× across
+the decade; fallback ladder widens window → origin → regime, tagging every curve with
+its rung and marking unsupported ones. Zero fitted parameters — two trailing empirical
+objects, both point-in-time.
+
+Weekly count = **Poisson-binomial** over the open legs: mean `Σpᵢ`, variance
+`Σpᵢ(1−pᵢ)`, and the **exact PMF** by convolution DP (D-010) — CRPS and PIT read
+masses, not moments. Zero-probability legs drop out exactly, which is what keeps it
+cheap (1,348 open legs but ~129 with `p>0` at a typical date). *Independence across
+legs is an assumption*: an outage or freeze would correlate arrivals and true variance
+would exceed `Σpᵢ(1−pᵢ)` — that is A5's subject, not A1's. Implementation:
+`analysis/a1.py`.
+
+Feeds off **`compute_legs()` legs directly**, not the aggregated `signal_daily` keys
+(a convolution needs per-leg state — D-005); requires the as-of-true replay loader
+(D-004a). Validation is **wholly historical as-of replay** (weekly Monday grid from
+2018-01 — 2016–17 is burn-in, too thin to support `π`, D-008; no live tail accrues
+since the 2026-08-10 ingest stop). **Truth** = `physical` closed-leg arrivals in
+`(as_of+u₀, as_of+u₁]`, *conditional on having departed by `as_of`* — the same
+`is_eu_arrival` event the forecast predicts, so both sides are capture-limited
+identically. The conditioning is material, not pedantic: it moves 156 of 417 W₂
+weeks. **Nulls** = persistence (the last *fully-elapsed* week's count — D-003's
+literal wording leaked the future for W₂; amended in D-011) + the trailing 4-week
+mean. Scored MAE/RMSE + CRPS + PIT/interval coverage, by departure regime and year,
+2021–22 vs rest. **Pre-registered acceptance (D-003): beat both nulls on W₁ MAE over
+the NOAA-departure decade *and* 80 % interval coverage in [70, 90] %** — miss the
+second and A1 stands as a point baseline whose calibration gap is A3's opening. A3
+(below) upgrades `F_eu` to a fitted, censoring-aware per-O-D arrival-time
+distribution; A1 stays the no-training baseline it must beat.
+
+> ### A1 · RESULT — does not meet the bar (2026-08-10, `make a1-replay`, D-013)
+>
+> 448 weekly as-ofs, 2018-01-01 → 2026-07-27, `regime='noaa'`, horizon W₁:
+>
+> | | A1 | persistence | climatology |
+> |---|---|---|---|
+> | **W₁ MAE** | **2.314** | 2.217 | **1.814** |
+>
+> **(a) beat both nulls — FAIL.** **(b) 80 % coverage in [70,90] % — PASS (73.7 %).**
+> Per D-003 a failure on (a) means A1 does not even stand as a point baseline.
+>
+> **Not an artefact.** It loses to climatology in 2022, 2023 *and* 2024 — clean,
+> high-volume years — and in both halves of the §0·3 crisis split. Excluding the one
+> known boundary artefact (30 post-NOAA-tail weeks) makes it marginally *worse*:
+> 2.369 vs 2.366 / 1.871.
+>
+> **Why: staleness, and the bias column proves it.** Forecast − truth by year: 2022
+> **−3.48**, 2024 **+2.76**, 2025 **−2.27**, against ≈0 in flat years. Classic lag —
+> under-shoot on the way up, over-shoot on the way down. `π` is estimated from
+> departures ≥ 90 d old (`MATURITY_DAYS`, structural per D-007) inside a 365 d window,
+> so it trails the market by ~3–15 months. On a market that moved 4× in a decade, a
+> 4-week moving average of actual arrivals simply carries fresher information than
+> mechanism does.
+>
+> **Calibration passes but is not clean.** The PIT histogram is strongly U-shaped (72
+> / 97 in the extreme deciles vs ~45 uniform) — the forecast is **under-dispersed**.
+> (b) survives partly because discreteness makes intervals conservatively wide
+> (D-010). Report the PIT, not just the coverage figure.
+>
+> **Where it does win:** the `gfw` regime (W₁ MAE 0.950 vs 1.199 / 1.006) and 2018 —
+> i.e. where volume is low and the market is flat. Not where it matters, and **not
+> independent corroboration**: up to 65 % of GFW's US departures are the same
+> voyages NOAA already has (D-014).
+>
+> **Read the regime label carefully (D-014).** `regime='noaa'` means *NOAA saw it
+> leave, GFW saw it arrive* — there are **zero** NOAA arrivals in Europe (NOAA is
+> US-only terrestrial AIS), so the target is 100 % GFW-observed in every scorecard.
+> This does not affect the verdict: A1 and both nulls read the same truth series, so
+> any capture limitation deflates all three identically.
+>
+> **Kept as-is.** No parameter retuned, no slice dropped: the bar existed before the
+> number so this could be reported rather than engineered away (§0·3 #3).
+>
+> **Consequence for A3 (pre-registered here, before A3 is built):** A1's ceiling is
+> staleness, and A3's censoring-aware fit runs on **open** legs, so it needs no
+> maturity gate and can use current data. That is the specific, mechanism-level
+> reason A3 should beat A1 — and the thing to check first when it is built. Any
+> Part-B use of an A1-style nowcast must treat it as a *lagging* indicator.
+
+**A2 · Count regression — Negative Binomial GLM (spec locked 2026-08-12, D-016).**
+The direct answer to A1's failure. A1 was mechanism with no knobs, running on inputs
+3–18 months stale; A2 is the first *fitted* model, with features observable **today**
+and coefficients refit weekly.
+
+`log λ = β₀ + Σβⱼxⱼ`, count ~ **Negative Binomial** (`Var = μ + μ²/k`). NB is the
+headline and Poisson a nested weekly cross-check — no data-dependent switching:
+NB nests Poisson (`k→∞`) so it cannot be worse in-sample, and A1's diagnosed failure
+was **under-dispersion**, exactly what Poisson's forced `Var = μ` would repeat.
+
+**Target: weekly US laden loadings** (`departed`, laden, from `usgulf`/`usatlantic`),
+W₁ = (0,7] d and W₂ = (7,14] d — A1's window convention, so the two are comparable.
+Loadings rather than arrivals because it is the one line that is **NOAA-native at
+both ends** (every US→EU leg is NOAA-out/GFW-in, D-014) and it is the supply pulse
+Part B wants. EU arrivals are scored secondary, against A1's W₁ MAE of 2.314.
+
+**Five features, signs pre-registered:** `lag1` (+), `trail4` (+), `in_berth` (+,
+near-deterministic for W₁), `ballast_arrivals_1w` (+, the feedstock — a ship must
+arrive empty before it can leave full), `queue_depth` (+, ⚠ the one ambiguous sign;
+a robustly negative fit **falsifies** the mechanism rather than being reinterpreted).
+Feature 4 is deliberately the **US-side ballast arrival**, not the EU-side ballast
+departure, which is GFW-only and would put a capture-drifting covariate in a
+NOAA-target model. Features are built by reusing `visits.pair_visits` /
+`queues.pair_queues` with the existing open-item ceilings, not reimplemented.
+
+**Protocol:** expanding window (≥104 wk) — unlike A1's rolling one, because βs are
+*ratios* (capture-robust per §0·1) where `π` was a drifting *level*; purge by target
+closure; standardisation on training statistics only; MLE via `scipy.optimize`; refit
+weekly from 2018-01. Nulls are persistence + 4-week climatology — which *are*
+features 1 and 2, so the scorecard's real question is **whether the three physical
+features add anything over the autoregression**. **Acceptance: (a) beat both nulls on
+W₁ MAE, (b) 80 % coverage in [70,90] %; (c) signs hold — a mechanism test binding on
+the narrative, not on pass/fail.** Full pre-registration in D-016.
+
+> ### A2 · RESULT — does not meet the bar (2026-08-12, `make a2-replay`, D-018)
+>
+> 345 scored weeks, `regime='noaa'`, W₁, NB:
+>
+> | | A2 (NB) | persistence | climatology |
+> |---|---|---|---|
+> | **W₁ MAE** | **3.961** | 2.551 | **2.152** |
+>
+> **(a) FAIL** — 84 % worse than climatology. **(b) PASS** (75.7 %).
+> **(c) `ballast_arrivals_1w` FALSIFIED**: fits **−0.049**, negative in 99 % of weeks
+> and stable across all three eras, against a pre-registered **+**. Reported as a
+> falsification per D-016, not reinterpreted. The other three signs hold.
+>
+> **Why — over-extrapolation, the mirror image of A1.** Bias is systematically
+> positive and scales with the level: −5 % of truth in 2020, +11 % in 2024, **+27 %
+> in 2025** (forecast 37.9 vs truth 29.8). The log link on a trending series fitted
+> over an *expanding* window puts current features several sds above the training
+> mean, and `exp()` converts that distance into multiplicative overshoot. **A1 was
+> too stale and under-reacted; A2 over-reacts. Both lose to a 4-week mean, from
+> opposite directions** — a more informative pair of results than either alone.
+> Robust to the one artefact (31 all-zero 2026 weeks, NOAA ends 2025-12-31):
+> excluding them gives 3.828 vs 2.752 / 2.145, unchanged verdict.
+>
+> **The NB prior did not pay off.** Fitted `k` runs to its bound (median 1e6) — the
+> data is not over-dispersed once conditioned on the features, so NB collapses to
+> Poisson (3.961 vs 3.980). The D-016 reasoning was sound and the choice was free,
+> but it did not help.
+>
+> **Consequence — A4 is promoted ahead of A3 (predicted here, before either).** Two
+> independent failures now say the same thing: this series is dominated by a trend
+> that a 4-week mean tracks well and that neither stale mechanism nor log-linear
+> extrapolation handles. A **local-level state-space model (A4)** is designed for
+> precisely that — track the level, don't extrapolate it multiplicatively — so it is
+> the better-motivated next model. Any future count model here must be pre-registered
+> with a rolling window or an explicit level/trend decomposition.
 
 **A3 · Survival models — queue, berth, and voyage time.** Cox PH `h(t|x)=h₀(t)·exp(xᵀβ)`
 (partial likelihood cancels the baseline) or Weibull AFT for a parametric small-data
@@ -247,17 +431,81 @@ densities convolve into A1's Poisson-binomial arrival-count distribution — so 
 censoring the kinematic baseline ignores becomes the likelihood. **Pool across
 terminals / O-D pairs hierarchically** (Part C) — the highest-leverage move here.
 
-**A4 · Kalman / state-space — latent flow-rate nowcast.** Treat "true current export
-rate" as a hidden state observed noisily through daily counts: `x_t=Fx_{t−1}+w`,
-`y_t=Hx_t+v`. Two–three parameters, **handles AIS-dropout days for free** (skip the
-update), online, calibrated bands. Set the observation noise `R` from the confidence
-columns. Ideal "current US export rate ± band" readout.
+**A4 · Kalman / state-space — latent flow-rate nowcast (spec D-022; RESULT below).**
+`x_t = x_{t−1} + w` (latent weekly export rate), `y_t = x_t + v` (observed loadings);
+two parameters `(q, r)` by exact Kalman MLE, walk-forward. Same target, grid and nulls
+as A2 so the two are directly comparable. Pre-registered secondary: local **linear
+trend**, which nests local level as `q_slope→0`.
 
-**A5 · BOCPD outage detection (high asymmetric payoff).** Outages dominate realised
-spread variance. Bayesian Online Change-Point Detection tracks the run-length posterior
-`P(r_t|y_{1:t})` — almost no training history needed. Feeds off `days_since_departed`,
-`us_queue_formation_wow`. Being 24–48 h early on a Freeport-style outage beats any
-smooth R².
+> ### A4 · RESULT — misses by 0.8 %, and closes the question (2026-08-12, `make a4-replay`, D-023)
+>
+> 314 scored weeks, `regime='noaa'`, W₁:
+>
+> | | A4 level | A4 trend | persistence | climatology |
+> |---|---|---|---|---|
+> | **W₁ MAE** | **2.104** | **2.101** | 2.694 | **2.088** |
+>
+> **(a) FAIL** — beats persistence comfortably, misses climatology by **0.016 MAE
+> (0.8 %)** on n=314: a statistical tie. **(b) PASS** (72.6 %).
+>
+> **The fitted parameter is the result.** Free to choose any smoothing by MLE, the
+> filter selected **equivalent EWMA α = 0.251 — a ~7-week effective window** (median
+> `q/r` = 0.082). Given complete freedom it smooths *more* than the 4-week SMA it was
+> competing with, and lands 0.8 % away. D-022 pre-registered a tie as informative:
+> **the naive moving average is near-optimal for this series, now demonstrated rather
+> than assumed.**
+>
+> **The D-018 prediction held.** Against A2 on comparable spans (A2 ex-artefact
+> 3.828), A4 cuts error ~45 % and eliminates the bias that killed its predecessors —
+> yearly bias range A1 −3.5…+2.8, A2 −0.31…+8.11, **A4 −1.28…+0.08**. It beats
+> climatology outright in **2022 and 2023**, and in the §0·3 #1 split wins the
+> **2021-22 crisis block** (2.221 vs 2.231) while losing narrowly in calm years — the
+> one regime where the level genuinely moved is the one where tracking it paid.
+> Calibration is the best of the four (PIT 41/45 extreme deciles vs A1's 72/97).
+
+**A5 · BOCPD outage detection (spec D-019/D-020; RESULT below).** Outages dominate
+realised spread variance, and a moving average is structurally worst at breaks — so
+A5 was deliberately a different question on a different scoring axis from A1/A2.
+Per-terminal BOCPD on daily laden-departure counts, Poisson-Gamma conjugate,
+run-length posterior `P(r_t|y_{1:t})`, all constants fixed a priori. Labels are
+**rate-relative** (a gap ≥ max(14 d, 5× the terminal's own baseline)) — essential,
+since Elba averages ~26 d between loadings while Sabine averages 1.4 d. The rule was
+validated against externally-known events before locking: it recovers **Freeport
+2022-06-08 (252 d, 127×, the explosion)**, the **2020 COVID cargo-cancellation wave**,
+and **Cove Point's annual September turnaround**.
+
+> ### A5 · RESULT — does not meet the bar; the naive rule does the job (2026-08-12, `make a5-replay`, D-021)
+>
+> 16 labelled outages, 8 terminals, 53.7 terminal-years, `regime='noaa'`:
+>
+> | detector | recall | median delay | false alarms / terminal-yr |
+> |---|---|---|---|
+> | **BOCPD** | 12 % | **17 d** | 0.13 |
+> | N1 absolute (14 d) | 88 % | 14 d | 2.33 |
+> | **N2 rate-relative** | 38 % | **12 d** | **0.19** |
+>
+> **FAIL** — BOCPD is slower than both nulls and detects almost nothing; its low
+> false-alarm rate reflects near-silence, not precision.
+>
+> **Why: binning destroyed the signal.** At a 2-day cadence ~half of all days are
+> zero-count during *normal* operation, so each zero carries almost no evidence and
+> the filter needs 2–3 weeks to react. The nulls read **time since last departure** —
+> the sufficient statistic for a point process, using the exact timing that daily
+> binning discards. The lesson is representational, not Bayesian: the right BOCPD
+> here is on **inter-arrival times** (Gamma-exponential), logged as a possible A5b but
+> **not built**, since specifying it after seeing this scorecard is a forking path.
+>
+> **N1's 88 % recall is near-tautological** (the label requires a ≥14 d gap, so N1
+> fires at day 14 by construction); its 2.33 false alarms/terminal-yr is the real
+> story. **N2's recall is capped by the pre-registered 21-day detection window** — it
+> fires at 5× baseline, which exceeds 21 d for slow terminals, explaining every Cove
+> Point miss.
+>
+> **The usable artefact is N2, the baseline.** 12-day median detection at **0.19 false
+> alarms per terminal-year**, catching Freeport 2022 at **10 d**, Freeport 2024 at
+> **8 d**, Sabine 2017/18/19 at 12/10/13 d, Corpus 2019 at 13 d. Every miss is a
+> slow-baseline terminal. A deployable outage monitor came out of this — as the null,
+> not the model.
 
 **A6 · Destination / routing nowcast — call EU-bound from the Gulf exit (validated 2026-06-17).**
 The live in-transit stock is **81 % `unknown`-destination** and `declared_eu_share` is
@@ -396,44 +644,72 @@ confidence machinery in place. ✅ Validation sweep green (`make validate-signal
 2022 + seasonality reproduce. **Gate cleared: cleared to model.**
 
 ### Decisions locked
-- **TTF source = Barchart Premier, ~$30 one-time** (Build C). Subscribe one month, CSV-
-  export the TTF daily futures series (Barchart root `TG` / native `TFM`) 2016→present,
-  cancel. Historical EOD download is included; the $155/mo ICE Endex fee is real-time-
-  only, so no exchange fee on history. Gives **clean daily TTF across the whole 2016+
-  panel** — no monthly-interpolation seam. **License: raw TTF CSV stays out of git**
-  (untracked `data/private/`); only derived signals/charts are publishable.
+- ~~**TTF source = Barchart Premier, ~$30 one-time**~~ — **superseded 2026-09-05 by
+  D-026.** TTF now comes from **Yahoo `TTF=F`** (free, keyless, 2017-10-23 → present,
+  251-254 rows/yr, 3 nulls in 2,234 rows). The Barchart purchase existed to buy the
+  2016-17 head, but **D-008 starts scoring at 2018-01** — that head is burn-in and is
+  never scored, so the paid depth was unusable. **License: Yahoo is personal-use, so
+  the raw series is not committed** — `market_series` in the DB is the only copy;
+  derived signals/charts are publishable.
 - **Spread cadence = daily**, clean over the entire panel.
 
-The work now runs as **two parallel tracks** — Part A nowcasts need neither TTF nor
-controls (they validate against EIA), so TTF resolution never gates modelling progress.
+The work ran as **two parallel tracks** — Part A nowcasts needed neither TTF nor
+controls (they validate against EIA), so TTF resolution never gated modelling progress.
+**Both tracks are now resolved:** Part A is complete at h = 1-2 weeks (D-024/D-025) and
+Track 1's target + control set is built and validated (D-026). Track 3 (Part B) is next.
 
 ### Track 1 — control set + spread target (new-data integration)
 Thin loaders, siblings to `data/eia.py` (pure parse + `merge` + upsert). EIA series →
 existing `eia_series`; non-EIA series → a shared `market_series` table (same key shape);
 one assembler joins all onto the `signal_daily` daily grid into a new `model_panel`.
 
-1. **EIA Phase 2** (do first, ~30 min, zero-risk) — `--probe storage_l48` / `--probe
-   hh_spot` to verify the unverified v2 routes, fix the registry entry on a 404, backfill.
-   Yields Henry Hub spot + US Lower-48 storage.
-2. **TTF** — one-time Barchart CSV pull into `data/private/`; `data/ttf.py` = pure CSV
-   parser → `market_series` upsert. Wire **World Bank Pink Sheet** monthly TTF (CC-BY,
-   free) purely as a monthly-resolution cross-check on the daily series.
-3. **EUR/USD FX** — FRED `DEXUSEU` (or Yahoo `EURUSD=X`), daily EOD.
-4. **Spread target** — `spread = HH[$/MMBtu] − TTF[€/MWh]/3.412 × EUR/USD` (§2). Clean
-   daily 2016+. Unblocks Part B.
-5. **GIE AGSI+** EU storage (free API, registration key) → `market_series`.
-6. **Degree-days** US + NW Europe (NOAA free for US; NW-Europe source TBD) — Track-1 tail,
-   a control not the target.
+1. ~~**EIA Phase 2**~~ ✅ **DONE 2026-08-10.** Both v2 routes probed live and confirmed
+   correct as-registered (no 404, no registry fix needed), then backfilled: `RNGWHHD`
+   Henry Hub daily spot, 7,431 rows 1997-01-07 → 2026-08-03; `NW2_EPG0_SWO_R48_BCF`
+   Lower-48 weekly storage, 866 rows 2010-01-01 → 2026-07-31. `ACTIVE_PHASE` bumped 1→2
+   so a plain `make eia` now keeps all three series current on their revision windows.
+   Note: HH spot prints on business days only — 68.9% of panel days — so the `model_panel`
+   assembler needs a business-day forward-fill, not an inner join.
+2. ✅ **TTF** — **DONE 2026-09-05** (D-026). Yahoo `TTF=F` → `market_series.ttf_front_month`,
+   2,234 rows 2017-10-23 → 2026-09-04. Barchart dropped. The **World Bank Pink Sheet**
+   monthly cross-check (CC-BY; the check on `TTF=F`'s continuous-roll discontinuities)
+   is **still outstanding** — rolling download URL, needs a landing-page scrape.
+3. ✅ **EUR/USD FX** — **DONE 2026-09-05.** FRED `DEXUSEU` → `market_series.eurusd`,
+   2,781 rows from 2016-01-01. Brent (`DCOILBRENTEU`) loaded alongside it.
+4. ✅ **Spread target** — **DONE 2026-09-05.** `spread = HH[$/MMBtu] − TTF[€/MWh]/3.412 ×
+   EUR/USD`, business-day forward-filled; **104 complete months from 2018-01**, and it
+   reproduces the record including the 2020-05 HH>TTF inversion (D-026). **Part B unblocked.**
+5. ✅ **GIE AGSI+** EU storage — **DONE 2026-09-05.** `continent=eu` aggregate (note:
+   `country=eu` returns empty), 3,899 rows from 2016-01-01, as both fill-% and TWh.
+6. ✅ **Degree-days** US + NW Europe — **DONE 2026-09-05.** Open-Meteo ERA5 archive
+   (free, keyless, daily) at weighted demand centres, base 18.3 °C, both regions from
+   one loader — this closes the "NW-Europe source TBD". Eurostat was rejected as
+   monthly-only (D-026).
 
 ### Track 2 — Part A physical nowcasts (start now, in parallel; validate on the decade)
 Walk-forward CV, `basis='knowable'`, confidence columns as observation variance.
-7. **A1 kinematic ETA** — no training; physics baseline; validates within weeks.
-8. **A2 Poisson/NB arrivals**, **A3 Cox/Weibull survival** on queue/berth — *then extend
+7. ✅ **A1 arrival-count baseline** — **DONE 2026-08-10, negative result** (fails the
+   pre-registered bar: beaten on W₁ MAE by both nulls; diagnosis = staleness of the
+   maturity-gated `π`; full result block under Part A / D-013, regime caveat D-014).
+   `make a1-replay` reproduces. A3 inherits the specific brief: censoring-aware fit
+   on *open* legs, no maturity gate, current data.
+8. ✅ **A2 NB count GLM** — **DONE 2026-08-12, negative result** (W₁ MAE 3.961 vs
+   climatology 2.152; over-extrapolation, mirror image of A1's staleness; one
+   pre-registered sign falsified — D-018). `make a2-replay`. **A4 Kalman is now
+   promoted ahead of A3** on the strength of the A1+A2 diagnosis (D-018). Then
+   **A3 Cox/Weibull survival** on queue/berth — *then extend
    the same A3 fit to per-O-D voyage time-to-arrival* (open-leg `legs.py` censoring as the
    right-censored unit, posteriors convolved into A1's arrival-count distribution) — with
    **C2 hierarchical pooling across terminals/O-D pairs** (highest-leverage move), **A4
    Kalman flow-rate**.
-9. **A5 BOCPD outage nowcast** — cheap, online, asymmetric payoff (Freeport-2022 labelled).
+9. ✅ **A5 BOCPD outage nowcast** — **DONE 2026-08-12, negative result** (BOCPD 17 d
+   median delay / 12 % recall vs the rate-relative null's 12 d / 0.19 FAR; cause =
+   binning a point process — D-021). `make a5-replay`. **Usable artefact: the N2
+   rate-relative silence rule** (12 d median, 0.19 false alarms/terminal-yr).
+9b. ✅ **A4 Kalman local level** — **DONE 2026-08-12** (W₁ MAE 2.104 vs climatology
+   2.088 — a 0.8 % tie; fitted EWMA α=0.251 ⇒ ~7-week optimal window). **Part A is
+   closed**: four models converge to the naive mean from above without crossing it
+   (D-023/D-024). **A3 and A5b deliberately not built**, with reasons logged.
 10. **A7 live vintage de-bias** — fit `E[physical | knowable_t]` per `(signal_key, regime)`
     from the `signal_daily_live_vintage` ↔ `physical` pairing (+ `capture_rate.py` as the
     live `1/capture` scale-up); replay the vintage log against `physical` for the
@@ -448,9 +724,9 @@ Walk-forward CV, `basis='knowable'`, confidence columns as observation variance.
     in the tens of thousands.
 
 ### First moves (decision-free)
-1. Buy Barchart Premier + download the TTF CSV (~$30, ~15 min) — the only money/manual step.
+1. ~~Buy Barchart Premier + download the TTF CSV~~ — **obsolete (D-026): TTF is free via Yahoo `TTF=F`; the control set now costs £0 and has no manual step.**
 2. EIA Phase 2 probe + backfill (~30 min) — HH spot + US storage.
-3. Start A1 kinematic ETA in parallel — no dependencies, validates fastest.
+3. Start A1 (arrival-count baseline) in parallel — no dependencies, validates fastest.
 
 ### Gate items (tracked, not blocking)
 - EIA capture-rate firms when EIA's June-2026 data publishes (~late summer 2026).

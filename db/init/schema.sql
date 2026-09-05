@@ -277,6 +277,24 @@ CREATE TABLE eia_series (
 );
 
 
+-- Non-EIA market/control series for the Part B spread model (data/market.py).
+-- Same (series_id, period) key shape as eia_series so one assembler can join
+-- both onto the signal_daily daily grid; `source` records which upstream API a
+-- row came from, since unlike eia_series this table pools several providers.
+-- Raw vendor files are NOT committed (Yahoo ToS is personal-use); this table is
+-- the only persisted copy. See analysis/MODELS.md §2 for the control set.
+CREATE TABLE market_series (
+    series_id   TEXT             NOT NULL,  -- our canonical handle, e.g. 'ttf_front_month'
+    period      DATE             NOT NULL,  -- observation date (gas day for AGSI+)
+    value       DOUBLE PRECISION,           -- NULL allowed: holidays / vendor gaps
+    unit        TEXT             NOT NULL,  -- 'EUR/MWh' | 'USD/EUR' | '%' | 'degC-day' ...
+    frequency   TEXT             NOT NULL,  -- 'daily' | 'weekly' | 'monthly'
+    source      TEXT             NOT NULL,  -- 'yahoo' | 'fred' | 'agsi' | 'openmeteo'
+    fetched_at  TIMESTAMPTZ      NOT NULL DEFAULT now(),
+    PRIMARY KEY (series_id, period)
+);
+
+
 -- Priority watchlist: derived nightly+hourly by pipeline/scoring.py. One row per
 -- LNG/FSRU vessel in vessel_registry. The ingester reads top-N from this table
 -- to pick the 150 MMSIs to subscribe to (100 persistent + 50 scan rotation).
