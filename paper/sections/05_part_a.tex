@@ -1,76 +1,76 @@
-\section{Physical nowcasts: the naive mean is near-optimal}\label{sec:parta}
+\section{Physical nowcasts}\label{sec:parta}
 
-Before asking whether the signals predict a price, we asked whether they predict the
-physical quantities they directly measure --- weekly EU arrivals, weekly US loadings,
-terminal outages --- at one- and two-week horizons. These are high signal-to-noise
-targets with published ground truth, and they establish what the pipeline can and
-cannot see before any price enters. Four models were pre-registered and scored
-walk-forward against two naive nulls (persistence and a four-week climatology), each
-built to fix the diagnosed weakness of the last. Table~\ref{tab:parta} gives the
-one-week headline.
+Before asking whether the signals predict a price, we ask whether they predict the
+physical quantities they measure directly: weekly EU arrivals, weekly US loadings
+and terminal outages, at one- and two-week horizons. These targets have high
+signal-to-noise ratios and published ground truth, and they establish what the
+pipeline can and cannot see before any price enters the analysis. Four models were
+pre-registered and scored walk-forward against two naive nulls, persistence and a
+four-week climatology. Each model was designed to address the diagnosed weakness of
+the previous one. Table~\ref{tab:parta} gives the one-week results.
 
 \begin{table}[t]
 \centering\small
 \caption{One-week-ahead nowcasts of weekly US loadings (A2, A4) and conditional EU
-arrivals (A1), scored walk-forward from 2018 on the NOAA feed. MAE in cargoes per
-week. All three fail their pre-registered bar of beating both nulls.}
+arrivals (A1), scored walk-forward from 2018 on the NOAA feed. MAE is in cargoes per
+week. All three fail the pre-registered bar of beating both nulls.}
 \label{tab:parta}
 \input{tables/part_a}
 \end{table}
 
-The sequence is the result. A1, a duration-climatology convolution of the at-sea
-stock, is \aOneSkill{} worse than the climatology null because its estimator is
-maturity-gated and stale. A2, a negative-binomial count model on lagged loadings and
-berth occupancy, is \aTwoSkill{} worse because it over-extrapolates the trend; it
-also falsified one of its pre-registered signs (ballast arrivals entered with
-coefficient \aTwoBallastCoef{} against a prior of positive), and this is reported as
-falsified. A4, a Kalman local-level model, is \aFourSkill{} from the null --- a tie.
-The tie is informative rather than disappointing: A4 fitted its smoothing constant by
-maximum likelihood and chose $\alpha=\aFourAlpha$, an effective window of
-\aFourWindow{} weeks. For a series that is a local level plus noise, the
-exponentially weighted moving average is the optimal linear predictor
-\citep{muth1960}; the fit landing on top of a four-week simple average is the optimum
-being found, not four methods coincidentally tying. On this target, at this horizon,
-the naive mean is near-optimal, and a fifth method would be wasted effort.
+The sequence of results is informative. A1, a duration-climatology convolution of
+the at-sea stock, is \aOneSkill{} worse than the climatology null; its estimator is
+maturity-gated and therefore stale. A2, a negative-binomial count model on lagged
+loadings and berth occupancy, is \aTwoSkill{} worse because it over-extrapolates
+the trend. A2 also falsified one of its pre-registered signs: ballast arrivals
+entered with coefficient \aTwoBallastCoef{} against a prior of positive. A4, a
+Kalman local-level model, is \aFourSkill{} from the null, which we treat as a tie.
+The tie carries information. A4 fitted its smoothing constant by maximum likelihood
+and chose $\alpha=\aFourAlpha$, an effective window of \aFourWindow{} weeks. For a
+series that is a local level plus noise, the exponentially weighted moving average
+is the optimal linear predictor \citep{muth1960}. The fitted model landing on a
+four-week simple average indicates that the optimum was found, and not that four
+methods happened to tie. On this target and at this horizon, the naive mean is close
+to optimal, and a fifth method would not have changed the conclusion.
 
 \paragraph{Outage detection.} A5 tested Bayesian online change-point detection
 \citep{adams2007} on the inter-departure process at each US terminal against
 \aFiveOutages{} labelled outages over \aFiveTerminalYears{} terminal-years
-(Table~\ref{tab:parta5}). It did not beat a rate-relative silence rule, which
-detects with a median delay of \aFiveNTwoDelay{} days at
-\aFiveNTwoFar{} false alarms per terminal-year --- but with a recall of only
-\aFiveNTwoRecall{} (\aFiveNTwoHits). The rule is a usable, limited monitor, and it is
-the baseline, not the model.
+(Table~\ref{tab:parta5}). It did not outperform a rate-relative silence rule, which
+detects with a median delay of \aFiveNTwoDelay{} days at \aFiveNTwoFar{} false
+alarms per terminal-year. The rule's recall is \aFiveNTwoRecall{}
+(\aFiveNTwoHits). It is a usable but limited monitor, and it is the baseline rather
+than the proposed model.
 
 \begin{table}[t]
 \centering\small
 \caption{Outage detection against labelled terminal outages. N2 is the pre-registered
-null; it is the usable artefact, and its recall is the number to read.}
+null and the usable artefact; its recall is the relevant number.}
 \label{tab:parta5}
 \input{tables/part_a5}
 \end{table}
 
-\paragraph{A test withdrawn.} The natural next step was to ask whether skill rises
-with horizon --- cargo at sea today determines arrivals two to three weeks out --- and
-this was pre-specified before any longer-horizon data was examined. Extending A1's
-window to four weeks produced a \hOneSkillWFour{} improvement over the best null at
-week four (Table~\ref{tab:h1}). It is an artefact. A1's target is
-\emph{conditional} on legs already at sea, while both nulls are the last elapsed
-\emph{unconditional} weekly count. The two coincide at one and two weeks --- no
-US-to-EU voyage completes in under seven days --- but past the voyage tail the
-conditional truth empties toward zero (mean \hOneTruthWOne{} arrivals in week one,
-\hOneTruthWFour{} in week four) while the nulls keep predicting the full weekly rate
-(\hOnePersistWFour{} MAE). A1 was not forecasting better; it was forecasting a
-smaller quantity. The pre-specified premise --- that the nulls degrade with horizon
---- fails, and the protocol said that outcome means abandon rather than patch. In
-the comparable region, skill moves from \hOneSkillWOne{} to \hOneSkillWTwo{}: the
-predicted direction, but from far below the null to clearly below it.
+\paragraph{A withdrawn test.} A natural extension asks whether skill rises with
+horizon, since cargo at sea today determines arrivals two to three weeks ahead. This
+was pre-specified before any longer-horizon data was examined. Extending A1's window
+to four weeks produced a \hOneSkillWFour{} improvement over the best null at week
+four (Table~\ref{tab:h1}). The improvement is an artefact. A1's target is
+conditional on legs already at sea, whereas both nulls are the last elapsed
+unconditional weekly count. The two coincide at one and two weeks, because no US-to-EU
+voyage completes in under seven days. Past the voyage tail the conditional truth
+falls toward zero (mean \hOneTruthWOne{} arrivals in week one and
+\hOneTruthWFour{} in week four) while the nulls continue to predict the full weekly
+rate (\hOnePersistWFour{} MAE). A1 was forecasting a smaller quantity, not
+forecasting better. The pre-specified premise, that the nulls degrade with horizon,
+fails, and the protocol treats that outcome as grounds to abandon the test. In the
+comparable region, skill moves from \hOneSkillWOne{} to \hOneSkillWTwo{}, which is
+the predicted direction but remains below the null.
 
 \begin{table}[t]
 \centering\small
-\caption{A1 extended to four weekly windows. The ``skill'' column at W3 and W4 is an
-artefact of a conditional target scored against unconditional nulls; the harness now
-refuses to report it as a result.}
+\caption{A1 extended to four weekly windows. The skill column at W3 and W4 is an
+artefact of a conditional target scored against unconditional nulls; the harness no
+longer reports it as a result.}
 \label{tab:h1}
 \input{tables/h1}
 \end{table}

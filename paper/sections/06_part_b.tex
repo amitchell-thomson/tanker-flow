@@ -2,41 +2,41 @@
 
 \subsection{Target, grid and controls}
 
-The target is the spread $\spread = \text{HH}_t - \text{TTF}_t$ in \$/MMBtu, with
-TTF converted from EUR/MWh at the day's EUR/USD rate and 3.412\,MWh per MMBtu, sampled
-weekly on Mondays from 2018 (the same grid as the physical nowcasts). The scored
-quantity is the $h$-week-ahead change, $\Delta_h = s_{t+7h}-s_t$, at $h\in\{1,4\}$;
-the level is too persistent to score honestly, since a model that predicts ``about
-the same as now'' looks skilled on it. The primary sample runs to \noaaEnds{}
-(Section~\ref{sec:panel}), giving \bWeeksCov{} complete weeks.
+The target is the spread $\spread = \text{HH}_t - \text{TTF}_t$ in \$/MMBtu, with TTF
+converted from EUR/MWh at the day's EUR/USD rate and 3.412\,MWh per MMBtu. It is
+sampled weekly on Mondays from 2018, the same grid as the physical nowcasts. The
+scored quantity is the $h$-week-ahead change, $\Delta_h = s_{t+7h}-s_t$, for
+$h\in\{1,4\}$. The level is too persistent to score usefully, because a model that
+predicts the current value performs well on it. The primary sample runs to
+\noaaEnds{} (Section~\ref{sec:panel}) and contains \bWeeksCov{} complete weeks.
 
-The control block is the spread's non-tanker drivers: heating and cooling degree
-days for the US and north-west Europe, US and EU storage, Brent, and a winter dummy.
-The price legs that construct the target are excluded as regressors. Every standard
-error is Newey--West \citep{neweywest1987} with the lag fixed in advance at $h+1$
-weeks: on a weekly grid at $h=4$, consecutive targets share three weeks and an
-ordinary least-squares standard error is roughly $\sqrt{h}$ too small. Fits are
-walk-forward with an expanding window and a 104-week minimum, and a training row is
-admissible only if its target closed strictly before the test week, plus a one-week
-embargo \citep{lopezdeprado2018}.
+The control block consists of the spread's non-tanker drivers: heating and cooling
+degree days for the US and north-west Europe, US and EU storage, Brent, and a winter
+dummy. The price legs that construct the target are excluded as regressors. All
+standard errors are Newey--West \citep{neweywest1987} with the lag fixed in advance
+at $h+1$ weeks. On a weekly grid with $h=4$, consecutive targets share three weeks,
+and an ordinary least-squares standard error is roughly $\sqrt{h}$ too small. Fits
+are walk-forward with an expanding window and a 104-week minimum. A training row is
+admissible only if its target closed strictly before the test week, with a further
+one-week embargo \citep{lopezdeprado2018}.
 
 \subsection{The controls-only null is worse than no change}
 
-Three models form a ladder, each the null for the next: M0 predicts no change; M1 is
-an AR(1) in the level; M2 adds the controls. M2 is the ``AR(1)+controls'' null the
-tanker signals were pre-registered to beat. Table~\ref{tab:ladder} shows that it
-does not beat M0: relative to assuming no change, M2 scores \bMTwoSkillHOneCov{} at
-one week and \bMTwoSkillHFourCov{} at four, monotonically worse at the longer
-horizon, and worse in each of 2023, 2024 and 2025 individually. This is what an
-efficient, persistent price series looks like --- the level already embeds the
-fundamentals, so re-adding them as regressors imports estimation noise --- and it
-means the operative null for the signals is M0, a harder bar than the one
-pre-registered.
+Three models form a ladder in which each is the null for the next. M0 predicts no
+change. M1 is an AR(1) in the level. M2 adds the controls and is the AR(1)+controls
+null that the tanker signals were pre-registered to beat. Table~\ref{tab:ladder}
+shows that M2 does not beat M0. Relative to a no-change forecast, M2 scores
+\bMTwoSkillHOneCov{} at one week and \bMTwoSkillHFourCov{} at four. It is worse at the
+longer horizon and worse in each of 2023, 2024 and 2025 taken individually. This is
+the behaviour expected of an efficient and persistent price series: the level already
+incorporates the fundamentals, so adding them as regressors introduces estimation
+noise. The operative null for the signals is therefore M0, a stricter bar than the
+one pre-registered.
 
 \begin{table}[t]
 \centering\small
 \caption{The model ladder on the primary sample. Skill is the fractional MAE
-improvement over M0; negative means worse than assuming no change.}
+improvement over M0; a negative value means worse than a no-change forecast.}
 \label{tab:ladder}
 \input{tables/laddercov}
 \end{table}
@@ -44,82 +44,83 @@ improvement over M0; negative means worse than assuming no change.}
 \subsection{No signal survives partialling}
 
 For each of eight pre-registered signals we residualise both the target and the
-signal on M2's regressors and regress residual on residual --- the
-Frisch--Waugh--Lovell partial effect \citep{frischwaugh1933,lovell1963}, which by the
-theorem equals the signal's coefficient in the full regression and is the harness's
-own correctness test. Each signal carried a sign committed in advance
-(Appendix~\ref{app:signals}), and a result counted only if $|t|>1.96$, the sign
-matched, and the sign held in at least two-thirds of individual years --- the last
-condition guarding against 2022 alone carrying a pooled fit.
+signal on M2's regressors and regress residual on residual. This is the
+Frisch--Waugh--Lovell partial effect \citep{frischwaugh1933,lovell1963}. By the
+theorem it equals the signal's coefficient in the full regression, and that equality
+serves as the harness's correctness test. Each signal carried a sign fixed in advance
+(Appendix~\ref{app:signals}). A result counted only if $|t|>1.96$, the sign matched,
+and the sign held in at least two-thirds of individual years. The last condition
+guards against 2022 alone driving a pooled fit.
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=0.9\linewidth]{fig3_fwl_scan}
 \caption{Newey--West $t$-statistics on the FWL partial effect of each pre-registered
-signal, net of persistence, weather, storage and oil, at one and four weeks. The
-dotted and dashed lines are the two decision bars used in the paper.}
+signal, after controlling for persistence, weather, storage and oil, at one and four
+weeks. The dotted and dashed lines mark the two decision bars used in the paper.}
 \label{fig:fwl}
 \end{figure}
 
 \begin{table}[t]
 \centering\small
 \caption{FWL partial effects on the primary sample. Year consistency is the share of
-individual years whose partial effect carries the full-sample sign.}
+individual years whose partial effect has the full-sample sign.}
 \label{tab:fwl}
 \input{tables/fwlcov}
 \end{table}
 
-None does (Figure~\ref{fig:fwl}, Table~\ref{tab:fwl}). The largest $|t|$ at either
-horizon is \bMaxTCov; the largest \pRsq{} is \bMaxRsqCov. The cleanest mechanical
-story --- cargo at sea today lands in Europe in two to three weeks --- was tested
-directly as the EU-bound stock and gave $t=\bTransitTOneCov$ at one week and
-$\bTransitTFourCov$ at four. At four weeks the four flow signals all carry their
-pre-registered sign, comfortably inside the noise band: directionally consistent
-with the mechanism and uniformly insignificant. No sign was falsified, because
-nothing reached significance to falsify.
+No signal meets the bar (Figure~\ref{fig:fwl}, Table~\ref{tab:fwl}). The largest
+$|t|$ at either horizon is \bMaxTCov, and the largest \pRsq{} is \bMaxRsqCov. The
+most direct mechanical hypothesis, that cargo at sea today lands in Europe in two to
+three weeks, was tested as the EU-bound stock and gave $t=\bTransitTOneCov$ at one
+week and $\bTransitTFourCov$ at four. At four weeks the four flow signals all have
+their pre-registered sign, but all lie well inside the noise band. They are
+directionally consistent with the mechanism and uniformly insignificant. No sign was
+falsified, because no estimate reached significance.
 
 \subsection{Three mechanisms a linear scan could miss}
 
-A one-at-a-time linear scan has three specific blind spots, and each was tested with
-a feature or a split rather than a new model class --- so each costs one test. The
-three were pre-registered together with a Bonferroni bar of $|t|>\bonferroniT$, a
-primary horizon of four weeks chosen on the voyage mechanism, and a holdout
-(\mechHoldLoCov{} to \mechHoldHiCov, \mechHoldNCov{} weeks) not examined until a
-hypothesis had passed on discovery (\mechDiscLoCov{} to \mechDiscHiCov,
-\mechDiscNCov{} weeks). A pass required the holdout sign to replicate.
+A one-at-a-time linear scan has three identifiable blind spots. Each was tested with
+a derived feature or a sample split, so each costs a single test. The three were
+pre-registered together with a Bonferroni bar of $|t|>\bonferroniT$, a primary
+horizon of four weeks chosen from the voyage mechanism, and a holdout
+(\mechHoldLoCov{} to \mechHoldHiCov, \mechHoldNCov{} weeks) that was not examined
+until a hypothesis had passed on the discovery sample (\mechDiscLoCov{} to
+\mechDiscHiCov, \mechDiscNCov{} weeks). A pass required the holdout sign to match.
 
-\emph{H2: the share, not the level.} Most of the at-sea stock has no resolved
-destination, so two collinear levels with offsetting effects could each look like
-noise while their ratio carries the signal. A pre-registered gate voids the test if
-the share is mostly a decade-long ramp (coverage improving rather than cargo
-re-routing); the trend explains $\Rsq=\mechTrendRsqCov$ and the gate passes.
-\emph{H3: an interaction with EU storage.} Extra cargo landing at 90\% full does
-little; the same cargo at 30\% is highly price-relevant, and a linear fit averages
-the two worlds. \emph{H4: a tightness split.} The cheap form of a regime model: the
-scan re-run within weeks where EU storage sits below its seasonal norm (norm fitted
-on discovery only), with the prediction that the effect is positive there and larger
-than in loose weeks.
+H2 tests the share of cargo bound for Europe in place of the level. Most of the
+at-sea stock has no resolved destination, so two collinear levels with offsetting
+effects could each appear insignificant while their ratio carries the signal. A
+pre-registered gate voids the test if the share is mostly a decade-long trend, which
+would indicate improving coverage rather than changing cargo routing. The trend
+explains $\Rsq=\mechTrendRsqCov$ and the gate passes. H3 tests an interaction with EU
+storage. Additional cargo arriving when storage is 90\% full has little effect,
+while the same cargo at 30\% is highly price-relevant, and a linear fit averages the
+two states. H4 tests a tightness split, the simplest form of a regime model. The
+scan is re-run within weeks in which EU storage is below its seasonal norm (with the
+norm fitted on the discovery sample only), and the prediction is that the effect is
+positive in those weeks and larger than in the remaining weeks.
 
 \begin{table}[t]
 \centering\footnotesize
-\caption{The three pre-registered mechanism tests, discovery sample, $h=4$,
-Bonferroni bar $|t|>\bonferroniT$. None is significant; H3 carries the wrong sign;
-H4's tight-regime effect is smaller than its loose-regime effect.}
+\caption{The three pre-registered mechanism tests on the discovery sample at $h=4$
+with Bonferroni bar $|t|>\bonferroniT$. None is significant. H3 has the wrong sign,
+and H4's tight-regime effect is smaller than its loose-regime effect.}
 \label{tab:mechanisms}
 \input{tables/mechanismscov}
 \end{table}
 
-All three fail (Table~\ref{tab:mechanisms}), and none is close: the largest $|t|$
-among the primary tests is \mechMaxTCov. Each fails in a way that argues against
-another attempt. H2's estimate is stable and consistently negative --- the wrong
-sign, on discovery (\mechHTwoBetaCov) and holdout (\mechHTwoHoldCov) alike --- and
-never near significance. H3 comes out positive ($t=\mechHThreeTCov$) against a prior
-of negative, so neither the magnitude nor the direction of the storage interaction is
-present. H4's tight-regime effect is negative ($t=\mechHFourTightTCov$) and smaller
-in magnitude than the loose-regime effect, the reverse of both predictions. Cargo
-arrivals do not matter more when Europe is short; on this evidence they do not
-measurably matter in either state.
+All three fail (Table~\ref{tab:mechanisms}), and none approaches the bar. The
+largest $|t|$ among the primary tests is \mechMaxTCov. Each failure argues against a
+further attempt. The H2 estimate is stable and negative on both discovery
+(\mechHTwoBetaCov) and holdout (\mechHTwoHoldCov), which is the wrong sign, and it
+never approaches significance. H3 is positive ($t=\mechHThreeTCov$) against a prior
+of negative, so neither the magnitude nor the direction of the storage interaction
+is present. H4's tight-regime effect is negative ($t=\mechHFourTightTCov$) and
+smaller in magnitude than the loose-regime effect, which reverses both predictions.
+On this evidence, cargo arrivals do not have a measurable effect in either storage
+state.
 
-Taken together, the linear null of the previous subsection has been tested against
-the three specific reasons it could have been wrong, on pre-registered signs, with a
+The linear null of the previous subsection has thus been tested against the three
+specific ways in which it could have been wrong, using pre-registered signs, a
 corrected bar and an untouched holdout, and it stands.

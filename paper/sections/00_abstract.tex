@@ -1,24 +1,25 @@
 \begin{abstract}
-Positions of liquefied-natural-gas carriers are widely believed to carry
-information about the price gap between North American and European gas: a cargo
+Positions of liquefied natural gas carriers are widely believed to carry
+information about the price gap between North American and European gas. A cargo
 that leaves the US Gulf today lands in Europe in two to three weeks, and that
-supply is not yet in any published statistic. We test the belief directly. From
-\nFixes{} AIS position fixes (\fixSpanLo{} to \fixSpanHi{}), reconstructed into
-\nEvents{} port events and a \nSignalKeys-signal daily panel built twice --- once
-with hindsight for validation and once strictly point-in-time for modelling --- we
-ask whether tanker-derived signals predict the one- and four-week change in the
-\HH{}--\TTF{} spread net of its own persistence, weather, storage and oil. Every
-hypothesis, sign and acceptance bar was committed to a dated append-only log before
-the corresponding fit. The answer is no. A controls-only model is worse than
-assuming no change (\bMTwoSkillHOneCov{} at one week, \bMTwoSkillHFourCov{} at four);
-no signal reaches a Newey--West $|t|$ of 1.96 (maximum \bMaxTCov); and three
-pre-registered mechanisms that could hide an effect from a linear scan --- the
-Europe-bound \emph{share} of cargo, an interaction with EU storage, and a
-tightness-regime split --- fail under a Bonferroni bar with an untouched holdout.
-The design detects effects of at least \powerFloor{} of residual variance and
-observed at most \bMaxRsqCov, so the result rules out tradeable effects and is
-silent on sub-tradeable ones. Alongside the null, we document two construction
-hazards specific to voyage-derived features: the unit of observation is defined
-retrospectively, and feature \emph{availability} changes across data vintages. A
-naive loader leaked \leakFutureShare{} of the sample.
+supply does not yet appear in any published statistic. We test this belief. From
+\nFixes{} AIS position fixes (\fixSpanLo{} to \fixSpanHi{}) we reconstruct
+\nEvents{} port events and a \nSignalKeys-signal daily panel, built once with
+hindsight for validation and once strictly point-in-time for modelling. We then ask
+whether tanker-derived signals predict the one- and four-week change in the
+\HH{}--\TTF{} spread after controlling for its own persistence, weather, storage
+and oil. Each hypothesis, sign and acceptance bar was recorded in a dated
+append-only log before the corresponding fit. We find no predictive content. A
+controls-only model performs worse than a no-change forecast
+(\bMTwoSkillHOneCov{} at one week, \bMTwoSkillHFourCov{} at four). No signal
+reaches a Newey--West $|t|$ of 1.96 (maximum \bMaxTCov). Three pre-registered
+mechanisms that a linear scan could miss (the Europe-bound share of cargo, an
+interaction with EU storage, and a tightness-regime split) fail under a Bonferroni
+bar with an untouched holdout. The design can detect effects of at least
+\powerFloor{} of residual variance; the largest observed is \bMaxRsqCov. The
+result therefore excludes effects large enough to trade and says nothing about
+smaller ones. We also document two construction hazards specific to
+voyage-derived features. The unit of observation is defined only in retrospect,
+and feature availability changes across data vintages. A naive loader leaked
+\leakFutureShare{} of the sample.
 \end{abstract}

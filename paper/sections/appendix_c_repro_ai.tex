@@ -1,31 +1,31 @@
 \section{Reproducibility, code, and the use of AI}\label{app:repro}
 
 \paragraph{Reproducibility.} Every number in this paper is generated. The replays
-write machine-readable results (\texttt{make paper-results}); a generator turns them
-into the LaTeX tables and into a file of macros from which every in-prose number is
-drawn (\texttt{make paper-tables}); the figures are drawn from the same tables the
-models read (\texttt{make paper-figures}). A number that is not generated cannot
-appear, because the macro is undefined and the document does not compile. The
-underlying replays are \texttt{make a1-replay}, \texttt{a2-replay},
-\texttt{a4-replay}, \texttt{a5-replay}, \texttt{a1-h1}, \texttt{b0-coverage},
-\texttt{mechanisms-coverage} and their full-panel variants; the panel itself is
-\texttt{make signals} followed by \texttt{make model-panel}. The source, the decision
-log and the test suite (591 tests at the time of writing) are public at the
-project repository.
+write machine-readable results (\texttt{make paper-results}). A generator converts
+them into the LaTeX tables and into a file of macros from which every in-prose
+number is drawn (\texttt{make paper-tables}). The figures are drawn from the same
+tables the models read (\texttt{make paper-figures}). A number that is not generated
+cannot appear in the text, because the corresponding macro is undefined and the
+document does not compile. The underlying replays are \texttt{make a1-replay},
+\texttt{a2-replay}, \texttt{a4-replay}, \texttt{a5-replay}, \texttt{a1-h1},
+\texttt{b0-coverage} and \texttt{mechanisms-coverage}, together with their
+full-panel variants. The panel itself is produced by \texttt{make signals} followed
+by \texttt{make model-panel}. The source, the decision log and the test suite (591
+tests at the time of writing) are available in the project repository.
 
 \paragraph{Data and licences.} AIS positions are from NOAA's Marine Cadastre and
-Global Fishing Watch under their respective terms; EIA, FRED, GIE AGSI+ and Open-Meteo
-are free public APIs; the World Bank monthly series is CC~BY~4.0 and is the only
-price series redistributed with the code. The daily TTF series is obtained from a
-public quote feed under personal-use terms and is not redistributed; the loader
-re-fetches it.
+Global Fishing Watch under their respective terms. EIA, FRED, GIE AGSI+ and
+Open-Meteo are free public APIs. The World Bank monthly series is licensed CC~BY~4.0
+and is the only price series redistributed with the code. The daily TTF series is
+obtained from a public quote feed under personal-use terms and is not redistributed;
+the loader retrieves it.
 
 \paragraph{Use of AI.} The author used an AI coding assistant (Anthropic's Claude,
-via Claude Code) extensively in this project. A substantial fraction of the pipeline,
-the modelling harnesses, the tests and the first drafts of this text were written
-with its assistance. Every design decision, hypothesis, sign and acceptance bar in
-the decision log is the author's; every result was reproduced by the author from the
-stated \texttt{make} targets; and the author takes full responsibility for the
-content. The assistant was also used to audit the project's own claims before this
-paper was written, which produced the corrections recorded in the decision log's
-final entries. % Author: adjust this wording to taste — it is your statement.
+through Claude Code) extensively in this project. A substantial fraction of the
+pipeline, the modelling harnesses, the tests and the first drafts of this text were
+written with its assistance. Every design decision, hypothesis, sign and acceptance
+bar in the decision log is the author's. Every result was reproduced by the author
+from the stated \texttt{make} targets, and the author takes full responsibility for
+the content. The assistant was also used to audit the project's own claims before
+this paper was written, which produced the corrections recorded in the final entries
+of the decision log. % Author: adjust this wording. It is your statement.

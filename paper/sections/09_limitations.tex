@@ -1,45 +1,48 @@
-% PROPOSAL — the author rewrites this section.
+% PROPOSAL: the author rewrites this section.
 \section{Limitations}\label{sec:limitations}
 
-\paragraph{The European side has no anchorage history.} The GFW feed carries port
-visits but no anchorage events, so European queue and absorption signals exist only
-from the 2026 live feed. Four of the five composite signals originally pre-registered
-as Part~B features turned out to have between 9 and 46 daily observations and were
-excluded by a documented amendment before any spread fit. The at-sea and US-side
-mechanism was tested on the decade; the EU-congestion mechanism was not testable.
+\paragraph{No European anchorage history.} The GFW feed carries port visits but no
+anchorage events, so European queue and absorption signals exist only from the 2026
+live feed. Four of the five composite signals originally pre-registered as features
+for Section~\ref{sec:partb} turned out to have between 9 and 46 daily observations
+and were excluded by a documented amendment before any spread fit. The at-sea and
+US-side mechanism was tested on the decade; the EU-congestion mechanism could not
+be tested.
 
-\paragraph{Destination blindness.} Between 75\% and 83\% of the at-sea stock has no
+\paragraph{Destination resolution.} Between 75\% and 83\% of the at-sea stock has no
 resolved destination. The EU-bound series is a minority observed slice whose
-definition depends on coverage; the unresolved band is carried as its own feature,
+definition depends on coverage. The unresolved band is carried as its own feature,
 and the ratio of the two was tested as H2. Attenuation from this measurement error
-pushes coefficients toward zero and cannot be excluded as a contributor.
+biases coefficients toward zero and cannot be excluded as a contributing factor.
 
 \paragraph{The capture gradient.} NOAA-only capture of US export cargoes is
 \captureTwentyTwenty{} in 2020 and \captureTwentyEighteen{} in 2018
 (Table~\ref{tab:capture}). Early-year levels of every US signal are biased low. The
-walk-forward designs work on within-window changes and the FWL scan on residuals, but
-a level-dependent non-linearity in the early years would be misread.
+walk-forward designs operate on within-window changes and the FWL scan on residuals,
+but a level-dependent non-linearity in the early years would be misread.
 
 \paragraph{The coverage seam.} The backfill feeds end on \noaaEnds{} and \gfwEnds.
-The full-panel results in Appendix~\ref{app:fullpanel} include the thin live tail;
-24\% of that sample's holdout weeks sit past the seam, and one full-panel finding
-(a holdout sign flip on H2) did not survive truncation and is not claimed. The
-primary sample is truncated at the seam.
+The full-panel results in Appendix~\ref{app:fullpanel} include the thin live tail.
+In that sample 24\% of the holdout weeks lie after the seam, and one full-panel
+finding, a change of sign in the H2 holdout coefficient, did not survive truncation
+and is not claimed. The primary sample is truncated at the seam.
 
-\paragraph{Regime pooling.} Signals are read from the pooled regime tag, the only one
-spanning the decade. A small residual over-count where NOAA and GFW both see the same
-US departure is documented in the project's signal catalogue; a robustness run on the
-NOAA tag alone for US-side signals was not performed.
+\paragraph{Regime pooling.} Signals are read from the pooled regime tag, which is
+the only tag spanning the decade. A small residual over-count where NOAA and GFW both
+observe the same US departure is documented in the project's signal catalogue. A
+robustness run on the NOAA tag alone for the US-side signals was not performed.
 
-\paragraph{The pre-registration trail.} As Section~\ref{sec:prereg} states, git
-does not independently establish that the log entries preceded the fits they govern.
+\paragraph{The pre-registration trail.} As Section~\ref{sec:prereg} states, the git
+history does not independently establish that the log entries preceded the fits they
+govern.
 
-\paragraph{Sample size and one dominant regime.} The scored spread sample is
+\paragraph{Sample size and a dominant regime.} The scored spread sample is
 \bWeeksCov{} weeks, heavily autocorrelated, and 2022 alone spans a range larger than
-the rest of the decade combined. The year-consistency condition and the holdout are
-the defences; a longer clean sample would be better than either.
+the remainder of the decade combined. The year-consistency condition and the holdout
+are the defences against this; a longer sample without a coverage seam would be
+preferable to either.
 
-\paragraph{Vintage residual.} \vintagePostDay{} rows of the live tail moved after a
+\paragraph{Vintage residual.} \vintagePostDay{} rows in the live tail changed after a
 next-day print (Section~\ref{sec:panel}). They lie outside the modelling sample, but
 they show that the knowable bound is exact on event time and only approximately
 exact on observation time in a thin-coverage regime.

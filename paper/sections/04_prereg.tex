@@ -1,33 +1,32 @@
 \section{Pre-registration protocol}\label{sec:prereg}
 
 The project keeps a dated, append-only decision log. A hypothesis, target, lag, sign
-or acceptance bar is committed the day its entry lands, before the corresponding fit;
-a later change is a visibly dated superseding entry that names the result which
-prompted it. The log is the instrument that turns a null into a finding: without it,
-a reader cannot distinguish ``we tested and found nothing'' from ``we kept looking
-until nothing crossed a line, and reported the line''. Table~\ref{tab:prereg} lists
-the entries that fixed each model below.
+or acceptance bar is recorded on the day its entry is written and before the
+corresponding fit. A later change is made by a new, dated entry that names the
+result which prompted it. The log is what allows a reader to distinguish a test that
+found nothing from a search that stopped at the first result to cross a threshold.
+Table~\ref{tab:prereg} lists the entries that fixed each model reported below.
 
 \begin{table}[t]
 \centering\small
-\caption{Pre-registration entries. The commit column is the honest part: see the text.}
+\caption{Pre-registration entries. The commit column is discussed in the text.}
 \label{tab:prereg}
 \input{tables/prereg}
 \end{table}
 
-Two consequences of the protocol are visible in the results. A pre-registered sign
-falsified by the data is reported as falsified (Section~\ref{sec:parta}); and a test
-that produced an apparent 87\% improvement over its null was withdrawn, because the
+Two consequences of the protocol appear in the results. A pre-registered sign that
+the data falsified is reported as falsified (Section~\ref{sec:parta}). A test that
+produced an apparent 87\% improvement over its null was withdrawn, because the
 protocol's own comparability condition failed (Section~\ref{sec:parta}). Neither
-would have happened without a committed criterion to fail against.
+outcome would have been recorded without a criterion fixed in advance.
 
-\paragraph{What the log does not establish.} The log is an ordinary text file in the
-project's version control, and its git history does not independently prove the
-ordering it asserts. The entries for the physical nowcasts (D-001 through D-026) were
-committed together, weeks after the work they describe; the two spread
-pre-registrations (D-028 and D-031) were each committed in the same change as their
-result. The \emph{substance} of the pre-registration --- the signs, bars, horizon and
-holdout fixed in each entry's text --- was written before the corresponding run, but
-a sceptical reader has only the author's word for it. We state this rather than have
-it discovered, and note that a third-party timestamped registry would have cost
-nothing. Future entries are committed and pushed before the run they govern.
+\paragraph{Limits of the log.} The log is a text file in the project's version
+control, and its git history does not independently establish the ordering it
+asserts. The entries for the physical nowcasts (D-001 through D-026) were committed
+together, weeks after the work they describe. The two spread pre-registrations
+(D-028 and D-031) were each committed in the same change as their result. The
+content of each pre-registration, meaning the signs, bars, horizon and holdout fixed
+in its text, was written before the corresponding run, but a sceptical reader has
+only the author's word for this. We state it here rather than leave it to be found.
+A third-party timestamped registry would have cost nothing and will be used for any
+future entry, which will be committed and pushed before the run it governs.

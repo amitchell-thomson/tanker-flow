@@ -1,0 +1,56 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{section.1}\protected@file@percent }
+\citation{noaa_ais}
+\citation{gfw}
+\citation{eia_api}
+\citation{worldbank_cmo}
+\citation{fred}
+\citation{agsi}
+\citation{openmeteo}
+\@writefile{toc}{\contentsline {section}{\numberline {2}Data and pipeline}{2}{section.2}\protected@file@percent }
+\newlabel{sec:data}{{2}{2}{Data and pipeline}{section.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}Sources}{2}{subsection.2.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}Reconstruction}{2}{subsection.2.2}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Reconstruction inventory. Port events are labelled by the feed that produced them. The two backfill feeds end months before the live feed, which determines the sample choice in Section~\ref {sec:partb}.}}{3}{table.caption.1}\protected@file@percent }
+\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
+\newlabel{tab:inventory}{{1}{3}{Reconstruction inventory. Port events are labelled by the feed that produced them. The two backfill feeds end months before the live feed, which determines the sample choice in Section~\ref {sec:partb}}{table.caption.1}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces NOAA-only capture of US LNG export cargoes relative to the EIA-implied count. The project's diagnostic tool counts every feed and therefore double-counts departures seen by both NOAA and GFW; the series reported here uses the single feed.}}{3}{table.caption.2}\protected@file@percent }
+\newlabel{tab:capture}{{2}{3}{NOAA-only capture of US LNG export cargoes relative to the EIA-implied count. The project's diagnostic tool counts every feed and therefore double-counts departures seen by both NOAA and GFW; the series reported here uses the single feed}{table.caption.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}Ground truth}{3}{subsection.2.3}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces The Henry Hub{}--TTF{} spread (top) and EU-bound gas at sea (bottom), daily, on the coverage-consistent sample used for modelling. The extremes coincide with Winter Storm Uri (February~2021) and the August~2022 TTF peak.}}{4}{figure.caption.3}\protected@file@percent }
+\newlabel{fig:spread}{{1}{4}{The \HH {}--\TTF {} spread (top) and EU-bound gas at sea (bottom), daily, on the coverage-consistent sample used for modelling. The extremes coincide with Winter Storm Uri (February~2021) and the August~2022 TTF peak}{figure.caption.3}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {3}Building the panel point-in-time}{4}{section.3}\protected@file@percent }
+\newlabel{sec:panel}{{3}{4}{Building the panel point-in-time}{section.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}The unit of observation is defined in retrospect}{4}{subsection.3.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Feature availability changes across vintages}{4}{subsection.3.2}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Voyage legs visible at an as-of date of 1~June~2020 under the naive loader and under the point-in-time bound. Recomputed from the event tables when the figure is generated.}}{5}{figure.caption.4}\protected@file@percent }
+\newlabel{fig:leakage}{{2}{5}{Voyage legs visible at an as-of date of 1~June~2020 under the naive loader and under the point-in-time bound. Recomputed from the event tables when the figure is generated}{figure.caption.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}What the knowable basis bounds}{5}{subsection.3.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}The modelling grid}{5}{subsection.3.4}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Pre-registration entries. The commit column is discussed in the text.}}{6}{table.caption.5}\protected@file@percent }
+\newlabel{tab:prereg}{{3}{6}{Pre-registration entries. The commit column is discussed in the text}{table.caption.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.5}The coverage seam}{6}{subsection.3.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4}Pre-registration protocol}{6}{section.4}\protected@file@percent }
+\newlabel{sec:prereg}{{4}{6}{Pre-registration protocol}{section.4}{}}
+\@writefile{toc}{\contentsline {paragraph}{Limits of the log.}{6}{section*.6}\protected@file@percent }
+\citation{muth1960}
+\citation{adams2007}
+\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces One-week-ahead nowcasts of weekly US loadings (A2, A4) and conditional EU arrivals (A1), scored walk-forward from 2018 on the NOAA feed. MAE is in cargoes per week. All three fail the pre-registered bar of beating both nulls.}}{7}{table.caption.7}\protected@file@percent }
+\newlabel{tab:parta}{{4}{7}{One-week-ahead nowcasts of weekly US loadings (A2, A4) and conditional EU arrivals (A1), scored walk-forward from 2018 on the NOAA feed. MAE is in cargoes per week. All three fail the pre-registered bar of beating both nulls}{table.caption.7}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {5}{\ignorespaces Outage detection against labelled terminal outages. N2 is the pre-registered null and the usable artefact; its recall is the relevant number.}}{7}{table.caption.9}\protected@file@percent }
+\newlabel{tab:parta5}{{5}{7}{Outage detection against labelled terminal outages. N2 is the pre-registered null and the usable artefact; its recall is the relevant number}{table.caption.9}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {5}Physical nowcasts}{7}{section.5}\protected@file@percent }
+\newlabel{sec:parta}{{5}{7}{Physical nowcasts}{section.5}{}}
+\@writefile{toc}{\contentsline {paragraph}{Outage detection.}{7}{section*.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{A withdrawn test.}{7}{section*.10}\protected@file@percent }
+\citation{neweywest1987}
+\citation{lopezdeprado2018}
+\citation{frischwaugh1933,lovell1963}
+\@writefile{lot}{\contentsline {table}{\numberline {6}{\ignorespaces A1 extended to four weekly windows. The skill column at W3 and W4 is an artefact of a conditional target scored against unconditional nulls; the harness no longer reports it as a result.}}{8}{table.caption.11}\protected@file@percent }
+\newlabel{tab:h1}{{6}{8}{A1 extended to four weekly windows. The skill column at W3 and W4 is an artefact of a conditional target scored against unconditional nulls; the harness no longer reports it as a result}{table.caption.11}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {6}The spread}{8}{section.6}\protected@file@percent }
+\newlabel{sec:partb}{{6}{8}{The spread}{section.6}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.1}Target, grid and controls}{8}{subsection.6.1}\protected@file@percent }

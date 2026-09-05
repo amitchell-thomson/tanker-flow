@@ -1,35 +1,35 @@
 \section{Signal definitions and pre-registered signs}\label{app:signals}
 
-The eight tanker signals used in Section~\ref{sec:partb}, the aggregation applied
-when collapsing per-terminal or per-zone bands to one daily series, and the sign
-committed before any fit. The sign convention: the spread $\text{HH}-\text{TTF}$ is
-negative in nearly every period, so ``the spread narrows'' means it rises toward
-zero --- a positive change.
+This appendix lists the eight tanker signals used in Section~\ref{sec:partb}, the
+aggregation applied when collapsing per-terminal or per-zone bands to one daily
+series, and the sign fixed before any fit. The sign convention is as follows. The
+spread $\text{HH}-\text{TTF}$ is negative in nearly every period, so a narrowing of
+the spread means a rise toward zero, which is a positive change.
 
 \begin{center}\small
 \begin{tabular}{>{\raggedright\arraybackslash}p{3.4cm}>{\raggedright\arraybackslash}p{1.6cm}>{\raggedright\arraybackslash}p{7.4cm}c}
 \toprule
 signal & aggregation & mechanism & prior \\
 \midrule
-gas in transit, EU-bound & sum over EU zones & more cargo landing in Europe soon $\Rightarrow$ TTF falls & $+$ \\
+gas in transit, EU-bound & sum over EU zones & more cargo landing in Europe soon; TTF falls & $+$ \\
 gas in transit, unresolved & sum & destination unknown; no directional prior & none \\
 US loading rate & sum over US berths & gas leaves the US balance (HH firms) and reaches Europe (TTF falls) & $+$ \\
-EU discharge rate & sum over EU berths & Europe absorbing gas now $\Rightarrow$ TTF falls & $+$ \\
-ballast returning to US & sum & tonnage returning to load $\Rightarrow$ future exports up & $+$ \\
-laden voyage age & $n$-weighted mean & cargo floating rather than landing $\Rightarrow$ Europe stays tight & $-$ \\
-US load-queue wait & $n$-weighted mean & US cannot export $\Rightarrow$ HH softens, Europe starved & $-$ \\
-net export pressure & $n$-weighted mean & $z$(loadings) $-$ $z$(load queue); both legs point the same way & $+$ \\
+EU discharge rate & sum over EU berths & Europe absorbing gas now; TTF falls & $+$ \\
+ballast returning to US & sum & tonnage returning to load; future exports rise & $+$ \\
+laden voyage age & $n$-weighted mean & cargo floating instead of landing; Europe stays tight & $-$ \\
+US load-queue wait & $n$-weighted mean & US cannot export; HH softens and Europe is short & $-$ \\
+net export pressure & $n$-weighted mean & $z$(loadings) $-$ $z$(load queue); both components act in the same direction & $+$ \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-Volumes are in m$^3$ of LNG; loading and discharge rates are amortised m$^3$ per day
-across berth hours so that a closed visit integrates to one cargo; ages and waits are
+Volumes are in m$^3$ of LNG. Loading and discharge rates are amortised m$^3$ per day
+across berth hours, so that a closed visit integrates to one cargo. Ages and waits are
 in days and hours respectively. The project's signal catalogue documents the
 remaining twenty-six keys, the two bases, and the confidence columns (dispersion,
-open fraction, estimated fraction) that accompany every value.
+open fraction and estimated fraction) that accompany every value.
 
-\paragraph{A recorded inconsistency.} The catalogue's own text gave net export
+\paragraph{A recorded inconsistency.} The catalogue's own text assigned net export
 pressure two incompatible signs in two places. The positive sign was adopted on the
-economics above and recorded as a prior; the data returned a negative point estimate
-at both horizons, at $|t|\le1.6$, which neither confirms nor falsifies it.
+economic reasoning above and recorded as the prior. The data returned a negative point
+estimate at both horizons with $|t|\le1.6$, which neither confirms nor falsifies it.
