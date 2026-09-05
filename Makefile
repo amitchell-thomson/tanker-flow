@@ -1,4 +1,4 @@
-.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events backfill-noaa backfill-noaa-reload backfill-gfw backfill-gfw-dry reconcile reconcile-dry scoring signals a1-replay a1-h1 a2-replay a5-replay a4-replay validate-signals vf-rescue vf-rescue-dry vf-status refresh-fleet discover discover-dry discover-berths discover-berths-dry complete-registry complete-registry-dry complete-registry-sample retire-stale retire-stale-dry backup eia eia-full market market-full model-panel check-ttf-roll b0-replay mechanisms capture-rate coverage
+.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events backfill-noaa backfill-noaa-reload backfill-gfw backfill-gfw-dry reconcile reconcile-dry scoring signals a1-replay a1-h1 a2-replay a5-replay a4-replay validate-signals vf-rescue vf-rescue-dry vf-status refresh-fleet discover discover-dry discover-berths discover-berths-dry complete-registry complete-registry-dry complete-registry-sample retire-stale retire-stale-dry backup eia eia-full market market-full model-panel check-ttf-roll b0-replay mechanisms b0-coverage mechanisms-coverage capture-rate coverage
 
 up:
 	docker compose up -d
@@ -186,6 +186,14 @@ b0-replay:
 # Read-only; result D-032 — all three fail.
 mechanisms:
 	uv run python -m analysis.mechanisms_replay
+
+# D-033 robustness: the same two scans truncated at the backfill horizon
+# (2025-12-31), past which the signals are carried by the thin live feed alone.
+b0-coverage:
+	uv run python -m analysis.b0_replay --end coverage
+
+mechanisms-coverage:
+	uv run python -m analysis.mechanisms_replay --end coverage
 
 # Read-only capture-rate report: captured US LNG-export departures vs the
 # EIA-implied cargo count per month (needs `make eia` first). Lands dark until
