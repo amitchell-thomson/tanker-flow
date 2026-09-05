@@ -24,11 +24,11 @@ before the latest stored period (to catch EIA revisions); `--full` backfills
 history. Empty `eia_api_key` degrades to a clear "disabled" log, not a crash
 (same pattern as `vf_api_key`).
 
-NOTE (implementation step 0): the v2 route paths + `series` facets below are
-best-known from the legacy v1 series IDs and MUST be confirmed against the live
-API before trusting the data. Run `uv run python -m data.eia --probe lng_exports`
-(etc.) to hit the live endpoint and print what comes back — fix the one registry
-entry if a route 404s. See the design doc.
+NOTE: the v2 route paths + `series` facets below were originally best-known from
+the legacy v1 series IDs; all three have since been confirmed against the live API
+(2026-08-10) and backfilled. Run `uv run python -m data.eia --probe lng_exports`
+(etc.) to re-hit the live endpoint and print what comes back — fix the one registry
+entry if a route starts 404ing. See the design doc.
 
 Usage:
   uv run python -m data.eia                  # incremental upsert, active series
@@ -86,7 +86,7 @@ SERIES: dict[str, EiaSeries] = {
         phase=1,
         revision_window=3,  # months
     ),
-    # Phase 2 — fundamentals (deferred; verify routes when spread-model work starts).
+    # Phase 2 — spread-model fundamentals (routes verified live 2026-08-10).
     # Legacy v1: NG.NW2_EPG0_SWO_R48_BCF.W (Bcf).
     "storage_l48": EiaSeries(
         key="storage_l48",
@@ -109,7 +109,7 @@ SERIES: dict[str, EiaSeries] = {
     ),
 }
 
-ACTIVE_PHASE = 1  # series with phase <= this are fetched by a no-arg `make eia`
+ACTIVE_PHASE = 2  # series with phase <= this are fetched by a no-arg `make eia`
 
 
 @dataclass(frozen=True)
