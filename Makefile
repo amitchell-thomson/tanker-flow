@@ -1,4 +1,4 @@
-.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events backfill-noaa backfill-noaa-reload backfill-gfw backfill-gfw-dry reconcile reconcile-dry scoring signals a1-replay a2-replay a5-replay a4-replay validate-signals vf-rescue vf-rescue-dry vf-status refresh-fleet discover discover-dry discover-berths discover-berths-dry complete-registry complete-registry-dry complete-registry-sample retire-stale retire-stale-dry backup eia eia-full market market-full model-panel check-ttf-roll b0-replay capture-rate coverage
+.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events backfill-noaa backfill-noaa-reload backfill-gfw backfill-gfw-dry reconcile reconcile-dry scoring signals a1-replay a1-h1 a2-replay a5-replay a4-replay validate-signals vf-rescue vf-rescue-dry vf-status refresh-fleet discover discover-dry discover-berths discover-berths-dry complete-registry complete-registry-dry complete-registry-sample retire-stale retire-stale-dry backup eia eia-full market market-full model-panel check-ttf-roll b0-replay capture-rate coverage
 
 up:
 	docker compose up -d
@@ -105,6 +105,12 @@ signals:
 # scores against the pre-registered bar. ~2 min.
 a1-replay:
 	uv run python -m analysis.a1_replay
+
+# D-025's H1 horizon test: the same A1 replay over W1..W4 instead of W1..W2.
+# Result D-030 — H1 is NOT TESTABLE on A1's conditional target past the voyage
+# tail; the harness prints a NOT COMPARABLE banner rather than a false win.
+a1-h1:
+	uv run python -m analysis.a1_replay --horizons 4
 
 # A2 count-GLM replay (analysis/MODELS.md Part A; result in DECISIONS.md D-018).
 # Read-only: walk-forward refit at each weekly as-of, then score. ~5 min.

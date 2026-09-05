@@ -130,17 +130,16 @@ def test_matured_population_excludes_legs_older_than_window():
         mmsi=2,
         departed=AS_OF - timedelta(days=MATURITY_DAYS + PI_WINDOW_DAYS + 10),
     )
-    pop = matured_population(
-        [inside, outside], AS_OF, LANE, window_days=PI_WINDOW_DAYS
-    )
+    pop = matured_population([inside, outside], AS_OF, LANE, window_days=PI_WINDOW_DAYS)
     assert [lg.mmsi for lg in pop] == [1]
 
 
 def test_matured_population_filters_to_laden_export_origin():
     keep = eu_leg(mmsi=1)
     ballast = eu_leg(mmsi=2, laden=False)
-    eu_origin = mk_leg(mmsi=3, origin_zone="nweurope", dest_zone="usgulf",
-                       duration_d=14.0)
+    eu_origin = mk_leg(
+        mmsi=3, origin_zone="nweurope", dest_zone="usgulf", duration_d=14.0
+    )
     pop = matured_population(
         [keep, ballast, eu_origin], AS_OF, LANE, window_days=PI_WINDOW_DAYS
     )
@@ -164,9 +163,7 @@ def test_matured_population_axis_filters():
 
 
 def curve_for(legs):
-    return build_arrival_curve(
-        legs, AS_OF, LANE, origin_zone="usgulf", regime="noaa"
-    )
+    return build_arrival_curve(legs, AS_OF, LANE, origin_zone="usgulf", regime="noaa")
 
 
 def test_curve_recovers_a_known_rate():
@@ -378,10 +375,18 @@ def test_open_forecast_legs_keeps_all_open_statuses():
 def test_open_forecast_legs_filters_direction_and_ladenness():
     legs = [
         mk_leg(mmsi=1, departed=AS_OF - timedelta(days=3), status="open_in_transit"),
-        mk_leg(mmsi=2, departed=AS_OF - timedelta(days=3), status="open_in_transit",
-               laden=False),
-        mk_leg(mmsi=3, departed=AS_OF - timedelta(days=3), status="open_in_transit",
-               origin_zone="nweurope"),
+        mk_leg(
+            mmsi=2,
+            departed=AS_OF - timedelta(days=3),
+            status="open_in_transit",
+            laden=False,
+        ),
+        mk_leg(
+            mmsi=3,
+            departed=AS_OF - timedelta(days=3),
+            status="open_in_transit",
+            origin_zone="nweurope",
+        ),
     ]
     assert {lg.mmsi for lg in open_forecast_legs(legs, AS_OF, LANE)} == {1}
 
@@ -391,13 +396,13 @@ def test_open_forecast_legs_filters_direction_and_ladenness():
 
 def build_forecast_fixture():
     """Matured history + a handful of open legs at known ages."""
-    history = (
-        bulk(100, eu_leg, duration_d=14.0)
-        + [gulf_return_leg(mmsi=300 + i, duration_d=34.0) for i in range(100)]
-    )
+    history = bulk(100, eu_leg, duration_d=14.0) + [
+        gulf_return_leg(mmsi=300 + i, duration_d=34.0) for i in range(100)
+    ]
     open_now = [
-        mk_leg(mmsi=900 + i, departed=AS_OF - timedelta(days=age),
-               status="open_in_transit")
+        mk_leg(
+            mmsi=900 + i, departed=AS_OF - timedelta(days=age), status="open_in_transit"
+        )
         for i, age in enumerate((10.0, 8.0, 3.0))
     ]
     return history + open_now
@@ -433,8 +438,7 @@ def test_forecast_window_reports_provenance_and_reuses_curves():
 def test_forecast_window_counts_legs_beyond_support():
     # No silent caps: an open leg too old for its curve is counted, not hidden.
     legs = build_forecast_fixture() + [
-        mk_leg(mmsi=5000, departed=AS_OF - timedelta(days=80),
-               status="open_censored")
+        mk_leg(mmsi=5000, departed=AS_OF - timedelta(days=80), status="open_censored")
     ]
     fs = forecast_window(legs, AS_OF, LANE, u0=0.0, u1=7.0)
     assert fs.n_legs == 4
@@ -444,16 +448,25 @@ def test_forecast_window_counts_legs_beyond_support():
 
 def test_forecast_window_scores_each_leg_against_its_own_regime():
     # A gfw-regime open leg must not be scored on the noaa curve.
-    legs = build_forecast_fixture() + [
-        gulf_return_leg(mmsi=6000 + i, regime="gfw", duration_d=34.0)
-        for i in range(150)
-    ] + [
-        mk_leg(mmsi=7000, departed=AS_OF - timedelta(days=10), regime="gfw",
-               status="open_in_transit")
-    ]
+    legs = (
+        build_forecast_fixture()
+        + [
+            gulf_return_leg(mmsi=6000 + i, regime="gfw", duration_d=34.0)
+            for i in range(150)
+        ]
+        + [
+            mk_leg(
+                mmsi=7000,
+                departed=AS_OF - timedelta(days=10),
+                regime="gfw",
+                status="open_in_transit",
+            )
+        ]
+    )
     fs = forecast_window(legs, AS_OF, LANE, u0=0.0, u1=7.0)
     assert set(fs.tiers) == {
-        f"usgulf/noaa/{PI_WINDOW_DAYS}d", f"usgulf/gfw/{PI_WINDOW_DAYS}d"
+        f"usgulf/noaa/{PI_WINDOW_DAYS}d",
+        f"usgulf/gfw/{PI_WINDOW_DAYS}d",
     }
     # The gfw history has no EU arrivals at all -> that leg scores 0.
     assert fs.probabilities[-1] == 0.0
@@ -638,8 +651,16 @@ from analysis.a1 import (  # noqa: E402
 )
 
 
-def arrived_leg(*, mmsi, departed_days_before, duration_d, dest_zone="nweurope",
-                regime="noaa", origin_zone="usgulf", laden=True):
+def arrived_leg(
+    *,
+    mmsi,
+    departed_days_before,
+    duration_d,
+    dest_zone="nweurope",
+    regime="noaa",
+    origin_zone="usgulf",
+    laden=True,
+):
     """A closed leg that departed `departed_days_before` days before AS_OF."""
     return mk_leg(
         mmsi=mmsi,
@@ -689,13 +710,19 @@ def test_realised_counts_only_eu_arrivals_from_laden_us_legs():
     legs = [
         arrived_leg(mmsi=1, departed_days_before=10, duration_d=14.0),
         # Gulf return: closes in the window but is not an EU arrival
-        arrived_leg(mmsi=2, departed_days_before=10, duration_d=14.0,
-                    dest_zone="usgulf"),
+        arrived_leg(
+            mmsi=2, departed_days_before=10, duration_d=14.0, dest_zone="usgulf"
+        ),
         # ballast
         arrived_leg(mmsi=3, departed_days_before=10, duration_d=14.0, laden=False),
         # EU-origin leg
-        arrived_leg(mmsi=4, departed_days_before=10, duration_d=14.0,
-                    origin_zone="nweurope", dest_zone="usgulf"),
+        arrived_leg(
+            mmsi=4,
+            departed_days_before=10,
+            duration_d=14.0,
+            origin_zone="nweurope",
+            dest_zone="usgulf",
+        ),
     ]
     assert realised_arrivals(legs, AS_OF, LANE, u0=W1[0], u1=W1[1]) == 1
 
@@ -714,9 +741,7 @@ def test_realised_filters_by_departure_regime():
         arrived_leg(mmsi=2, departed_days_before=10, duration_d=14.0, regime="gfw"),
     ]
     assert realised_arrivals(legs, AS_OF, LANE, u0=W1[0], u1=W1[1]) == 2
-    assert realised_arrivals(
-        legs, AS_OF, LANE, u0=W1[0], u1=W1[1], regime="noaa"
-    ) == 1
+    assert realised_arrivals(legs, AS_OF, LANE, u0=W1[0], u1=W1[1], regime="noaa") == 1
 
 
 def test_arrivals_in_window_is_half_open_on_the_left():
@@ -724,9 +749,7 @@ def test_arrivals_in_window_is_half_open_on_the_left():
     hi = AS_OF + timedelta(days=7)
     at_lo = arrived_leg(mmsi=1, departed_days_before=14, duration_d=14.0)
     assert at_lo.arrived_ts == lo
-    assert arrivals_in_window(
-        [at_lo], LANE, lo=lo, hi=hi, departed_by=AS_OF
-    ) == 0
+    assert arrivals_in_window([at_lo], LANE, lo=lo, hi=hi, departed_by=AS_OF) == 0
 
 
 # --- nulls ------------------------------------------------------------------
@@ -760,8 +783,7 @@ def test_persistence_never_uses_future_information():
 def test_climatology_is_the_trailing_four_week_mean():
     # One arrival in each of the four elapsed weeks -> mean 1.0
     legs = [
-        arrived_leg(mmsi=w, departed_days_before=14 + 7 * (w - 1) + 3,
-                    duration_d=14.0)
+        arrived_leg(mmsi=w, departed_days_before=14 + 7 * (w - 1) + 3, duration_d=14.0)
         for w in range(1, CLIMATOLOGY_WEEKS + 1)
     ]
     assert climatology_null(legs, AS_OF, LANE) == 1.0
@@ -777,8 +799,7 @@ def test_climatology_is_the_trailing_four_week_mean():
 def test_climatology_windows_do_not_overlap_or_gap():
     # One arrival per elapsed week for 8 weeks; a 4-week mean must see exactly 4.
     legs = [
-        arrived_leg(mmsi=w, departed_days_before=14 + 7 * (w - 1) + 3,
-                    duration_d=14.0)
+        arrived_leg(mmsi=w, departed_days_before=14 + 7 * (w - 1) + 3, duration_d=14.0)
         for w in range(1, 9)
     ]
     assert climatology_null(legs, AS_OF, LANE, weeks=4) == 1.0
@@ -807,14 +828,42 @@ from analysis.a1_replay import (  # noqa: E402
 )
 
 
-def mk_row(*, truth, forecast, persistence=0.0, climatology=0.0, lo50=0, hi50=0,
-           lo80=0, hi80=0, crps=0.0, pit=0.5, horizon="W1", regime="noaa",
-           as_of=None, supported=True, n_open=10, n_beyond=0):
+def mk_row(
+    *,
+    truth,
+    forecast,
+    persistence=0.0,
+    climatology=0.0,
+    lo50=0,
+    hi50=0,
+    lo80=0,
+    hi80=0,
+    crps=0.0,
+    pit=0.5,
+    horizon="W1",
+    regime="noaa",
+    as_of=None,
+    supported=True,
+    n_open=10,
+    n_beyond=0,
+):
     return ReplayRow(
-        as_of=as_of or AS_OF, horizon=horizon, regime=regime, truth=truth,
-        forecast=forecast, crps=crps, pit=pit, lo50=lo50, hi50=hi50,
-        lo80=lo80, hi80=hi80, persistence=persistence, climatology=climatology,
-        n_open=n_open, n_beyond_support=n_beyond, supported=supported,
+        as_of=as_of or AS_OF,
+        horizon=horizon,
+        regime=regime,
+        truth=truth,
+        forecast=forecast,
+        crps=crps,
+        pit=pit,
+        lo50=lo50,
+        hi50=hi50,
+        lo80=lo80,
+        hi80=hi80,
+        persistence=persistence,
+        climatology=climatology,
+        n_open=n_open,
+        n_beyond_support=n_beyond,
+        supported=supported,
     )
 
 
@@ -872,8 +921,7 @@ def test_score_empty_slice_is_safe():
 
 
 def test_pit_histogram_bins_the_unit_interval():
-    rows = [mk_row(truth=1, forecast=1.0, pit=p)
-            for p in (0.05, 0.15, 0.15, 0.95, 1.0)]
+    rows = [mk_row(truth=1, forecast=1.0, pit=p) for p in (0.05, 0.15, 0.15, 0.95, 1.0)]
     hist = pit_histogram(rows, bins=10)
     assert hist[0] == 1
     assert hist[1] == 2
@@ -887,3 +935,33 @@ def test_replay_row_year_and_membership_helpers():
     assert r.in_50 and r.in_80
     r2 = mk_row(truth=99, forecast=5.0, lo50=4, hi50=6, lo80=3, hi80=7)
     assert not r2.in_50 and not r2.in_80
+
+
+# --- D-025 H1 horizon grid (D-030) --------------------------------------------
+
+
+def test_build_horizons_default_reproduces_the_d013_pair():
+    """N=2 must be byte-identical to the original W1/W2, or extending the grid
+    would silently move the published D-013 scorecard."""
+    from analysis.a1 import W1, W2
+    from analysis.a1_replay import build_horizons
+
+    assert build_horizons(2) == {"W1": W1, "W2": W2}
+
+
+def test_build_horizons_windows_are_contiguous_and_non_overlapping():
+    from analysis.a1_replay import build_horizons
+
+    windows = build_horizons(4)
+    assert list(windows) == ["W1", "W2", "W3", "W4"]
+    bounds = [windows[f"W{k}"] for k in range(1, 5)]
+    assert bounds[0][0] == 0.0
+    for (_, hi), (lo, _) in zip(bounds, bounds[1:]):
+        assert hi == lo  # left-open right-closed windows partition (0, 28]
+    assert bounds[-1][1] == 28.0
+
+
+def test_build_horizons_single_window():
+    from analysis.a1_replay import build_horizons
+
+    assert build_horizons(1) == {"W1": (0.0, 7.0)}
