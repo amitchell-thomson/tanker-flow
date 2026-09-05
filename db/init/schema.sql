@@ -295,6 +295,20 @@ CREATE TABLE market_series (
 );
 
 
+-- Part B modelling panel: the spread target + every control and tanker feature
+-- on one aligned daily grid (data/model_panel.py). Tidy/long like signal_daily,
+-- so adding a feature never migrates a schema. Rebuilt TRUNCATE+insert.
+-- Values are forward-filled onto the daily grid and shifted by each source's
+-- publication lag, so a row is what a model standing on that date could see.
+CREATE TABLE model_panel (
+    bucket_date DATE             NOT NULL,
+    feature     TEXT             NOT NULL,  -- e.g. 'spread_hh_ttf', 'hdd_nwe'
+    value       DOUBLE PRECISION,           -- NULL = not knowable/observed that day
+    computed_at TIMESTAMPTZ      NOT NULL DEFAULT now(),
+    PRIMARY KEY (bucket_date, feature)
+);
+
+
 -- Priority watchlist: derived nightly+hourly by pipeline/scoring.py. One row per
 -- LNG/FSRU vessel in vessel_registry. The ingester reads top-N from this table
 -- to pick the 150 MMSIs to subscribe to (100 persistent + 50 scan rotation).
