@@ -297,7 +297,7 @@ model & MAE & persistence & climatology & vs climatology & 80\\% cov. \\\\
     macro("aOnePersist", fmt_num(s1["persist_mae"]))
     macro("aOneClim", fmt_num(s1["clim_mae"]))
     macro("aOneCov", fmt_pct(s1["cov80"]))
-    macro("aOneSkill", fmt_signed_pct(skill(s1["a1_mae"], s1["clim_mae"]), 0))
+    macro("aOneSkill", fmt_signed_pct(skill(s1["a1_mae"], s1["clim_mae"])))
     macro("aTwoMae", fmt_num(s2["mae"]))
     macro("aTwoClim", fmt_num(s2["clim_mae"]))
     macro("aTwoSkill", fmt_signed_pct(skill(s2["mae"], s2["clim_mae"])))

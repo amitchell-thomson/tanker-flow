@@ -275,6 +275,34 @@ digit. 341 tests pass, ruff clean; 16 new tests in `tests/test_a1.py`.
 
 ---
 
+## D-035 · 2026-09-05 · **Correction to D-024 — the A1/A2 skill figures were swapped**
+
+**Context.** The paper's Part A table is generated from the replay JSON. It reads
+A1 **+27.5 %** and A2 **+84.0 %** worse than the four-week climatology null at W₁.
+D-024 (and the CLAUDE.md summary derived from it) state the sequence as
+"+84 % → +27.6 % → +0.8 %", attributing 84 % to A1 and 27.6 % to A2.
+
+**The table is right; the synthesis was wrong.** From the recorded scorecards:
+A1 2.314 vs 1.814 ⇒ (2.314−1.814)/1.814 = **+27.6 %**; A2 3.961 vs 2.152 ⇒ **+84.0 %**;
+A4 2.104 vs 2.088 ⇒ **+0.8 %**. D-013 and D-018 each recorded their own numbers
+correctly; the error entered when D-024 summarised them.
+
+**What changes.** The narrative that the gap "closes monotonically as each model
+fixes the last one's weakness" does not hold: A2 was the *worst* of the four, not the
+middle rung. What does hold, and is what the paper says: A1 is stale, A2
+over-extrapolates and falsifies a sign, and A4's MLE lands on the naive mean. The
+conclusion (the naive mean is near-optimal at h = 1, with A4's EWMA optimality as the
+reason) is unchanged. The "monotone convergence" phrasing must not be used in the
+paper or in conversation.
+
+**How it was caught.** Nothing in the log or the tests compared D-024's summary
+against D-013/D-018. The paper's rule that every number is generated from the replay
+output, never typed, surfaced the discrepancy the first time the table was read next
+to the prose. Recorded as a second instance (after D-033) of a plot or table catching
+what the checks did not.
+
+---
+
 ## D-034 · 2026-09-05 · **Pre-paper audit — four recorded claims corrected, one check repaired**
 
 **Context.** Before drafting the paper, every replay was re-run and every number the
