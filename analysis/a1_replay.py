@@ -510,6 +510,7 @@ async def main() -> None:
     ap.add_argument("--start", default=GRID_START.date().isoformat())
     ap.add_argument("--regimes", default="noaa,gfw")
     ap.add_argument("--primary", default="noaa")
+    ap.add_argument("--json", action="store_true", help="Also write paper/results/a1*.json")
     ap.add_argument(
         "--horizons",
         type=int,
@@ -559,6 +560,22 @@ async def main() -> None:
         report(rows, args.primary)
         if len(horizons) > 2:
             report_h1(rows, args.primary)
+        if args.json:
+            from analysis.results_io import dump
+
+            ok = [r for r in rows if r.supported and r.regime == args.primary]
+            dump(
+                "a1_h1" if len(horizons) > 2 else "a1",
+                {
+                    "primary_regime": args.primary,
+                    "horizons": {h: list(horizons[h]) for h in horizons},
+                    "scorecards": {
+                        h: score([r for r in ok if r.horizon == h], h) for h in horizons
+                    },
+                    "n_scored": len(ok),
+                    "grid": [grid[0].date(), grid[-1].date()],
+                },
+            )
     finally:
         await pool.close()
 

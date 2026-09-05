@@ -1,0 +1,83 @@
+{
+  "bonferroni_t": 2.394,
+  "discovery": [
+    "2018-01-01",
+    "2024-12-30",
+    327
+  ],
+  "end": null,
+  "h2_trend_r2": 0.20885979400100996,
+  "h4_split": {
+    "loose": 162,
+    "tight": 229
+  },
+  "h4_tight_stronger": false,
+  "holdout": [
+    "2025-01-06",
+    "2026-07-06",
+    64
+  ],
+  "primary_horizon": 4,
+  "results": [
+    {
+      "beta": -2.6383463918339403,
+      "description": "EU-bound fraction of the at-sea stock",
+      "expected_sign": 1,
+      "holdout_beta": 8.226417985437307,
+      "n_discovery": 327,
+      "n_holdout": 64,
+      "name": "eu_share",
+      "partial_r2": 0.0027836433510283337,
+      "t_critical": 2.394,
+      "t_stat": -0.8878311455917294,
+      "verdict": "not significant (|t| 0.89 < 2.394)",
+      "void_reason": null,
+      "year_consistency": 0.7142857142857143
+    },
+    {
+      "beta": 4.782988588992139e-09,
+      "description": "gas_in_transit_eu x eu_storage_pct (centred)",
+      "expected_sign": -1,
+      "holdout_beta": 6.731224554643366e-10,
+      "n_discovery": 327,
+      "n_holdout": 64,
+      "name": "transit_x_storage",
+      "partial_r2": 0.0014475403893027372,
+      "t_critical": 2.394,
+      "t_stat": 0.4565531781953009,
+      "verdict": "not significant (|t| 0.46 < 2.394)",
+      "void_reason": null,
+      "year_consistency": 0.7142857142857143
+    },
+    {
+      "beta": -1.1305155570279991e-07,
+      "description": "gas_in_transit_eu, tight regime only",
+      "expected_sign": 1,
+      "holdout_beta": 9.211108580350905e-07,
+      "n_discovery": 165,
+      "n_holdout": 64,
+      "name": "transit_in_tight",
+      "partial_r2": 0.00031642477589874607,
+      "t_critical": 2.394,
+      "t_stat": -0.17160753121537725,
+      "verdict": "not significant (|t| 0.17 < 2.394)",
+      "void_reason": null,
+      "year_consistency": 1.0
+    },
+    {
+      "beta": -2.247164044845361e-07,
+      "description": "gas_in_transit_eu, loose regime only",
+      "expected_sign": 1,
+      "holdout_beta": null,
+      "n_discovery": 162,
+      "n_holdout": 0,
+      "name": "transit_in_loose",
+      "partial_r2": 0.008973425305949221,
+      "t_critical": 2.394,
+      "t_stat": -0.9950928856435063,
+      "verdict": "not significant (|t| 1.00 < 2.394)",
+      "void_reason": null,
+      "year_consistency": 1.0
+    }
+  ]
+}

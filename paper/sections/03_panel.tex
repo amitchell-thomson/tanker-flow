@@ -1,0 +1,88 @@
+\section{Building the panel point-in-time}\label{sec:panel}
+
+Every signal is built twice from the same events: a \emph{physical} basis that uses
+hindsight, for validation, and a \emph{knowable} basis that at each day $d$ uses only
+what could have been on a screen on day $d$, for modelling. The distinction is not
+cosmetic. Two properties of voyage-derived features make the knowable basis hard to
+get right, and both were found the hard way.
+
+\subsection{The unit of observation is defined retrospectively}
+
+A voyage leg does not exist until both a departure and the next arrival have been
+observed. At time $t$ a vessel that departed five days earlier has an
+\emph{incomplete} leg of unknown duration and unknown destination; in hindsight it
+has a complete leg with both. Any statistic over ``legs'' therefore conditions on
+completion unless the population is explicitly bounded. Figure~\ref{fig:leakage}
+quantifies the effect: at an as-of date of 1~June~2020, a loader that pairs all
+departures with all arrivals and then filters by date returns \leakNaive{} legs, of
+which \leakFutureClosed{} (\leakFutureShare) are closed by arrivals that had not yet
+happened. Bounded correctly, \leakBounded{} legs remain, none closed by the future.
+Status labels move with them: the count of legs classified as ``floating'' fell from
+95 to 9 under the bound, because that label is assigned in hindsight. The correction
+is a strict reduction --- at an as-of date past the data maximum both paths agree on
+every count --- which is the test that it is a bound and not a different query.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.85\linewidth]{fig2_leakage}
+\caption{Voyage legs visible at an as-of date of 1~June~2020 under the naive loader
+and under the point-in-time bound. Recomputed live from the event tables for this
+figure.}
+\label{fig:leakage}
+\end{figure}
+
+\subsection{Feature availability changes across vintages}
+
+The same naive loader attached \leakDeclared{} destination declarations to the 2020
+legs. Declarations come from a live AIS static-data feed that began in 2026; no
+declaration existed in 2020. This is a different failure from the first: a date
+filter on the \emph{observations} is satisfied, because each declaration row has a
+timestamp in the past of the vessel's current voyage, yet the \emph{table} being
+joined should not exist at that vintage. The bound therefore substitutes a
+reconstruction of the declaration from the raw static messages available at $d$,
+and at a 2020 as-of date it returns none.
+
+\subsection{What ``knowable'' bounds, and what it does not}
+
+The knowable basis bounds on event time. Event timestamps are back-dated to the fix
+at which a transition first qualified, so a departure is dated to the vessel's last
+fix in the berth polygon rather than to the later fix that confirmed it had gone. The
+gap between the two is the feature's own publication lag. We measured it directly:
+the first fix after a departure event arrives at a median lag of zero hours, and more
+than 24 hours later for 0.3\% of departures on the NOAA feed ($n=1{,}500$) and 1.5\%
+on the live feed ($n=343$). On the decade panel this is immaterial.
+
+A separate log records the knowable value of every signal as it was printed each day
+of live operation, so that the bound can be checked rather than asserted. Comparing
+the rebuilt knowable series with those prints on days old enough to have settled, the
+check flags \vintagePostDay{} rows whose value moved after a next-day print, all in
+the live tail, consistent with late-arriving fixes back-dating departures. (A further
+\vintageSameDay{} rows differ from prints taken \emph{during} the day, before that
+day's fixes had finished arriving; that comparison measures intraday timing, not
+leakage, and is reported but not scored.) The live tail lies outside the modelling
+sample used in Section~\ref{sec:partb}.
+
+\subsection{The modelling grid}
+
+Prices, storage and the tanker signals arrive on different calendars. They are
+assembled onto one daily grid by forward-fill under a per-cadence staleness ceiling,
+never by an inner join --- \HH{} spot prints on 69\% of calendar days, and an inner
+join across the price legs would silently drop a third of the history. Each external
+series is shifted to the date it became public (EIA weekly storage $+6$ days, daily
+spot $+1$, AGSI+ $+1$); the tanker signals are shifted by zero, because the knowable
+basis is already point-in-time and shifting again would double-count. Degree days are
+deliberately \emph{not} shifted: their role is to be partialled out, so what matters
+is the weather that happened, not what was knowable. Signals reported per terminal or
+per destination zone are collapsed to one series by summing volumes and by
+$n$-weighted averaging of durations.
+
+\subsection{The coverage seam}
+
+The two backfill feeds end on \noaaEnds{} (NOAA) and \gfwEnds{} (GFW). After that
+the signals are carried by the live feed alone --- \nLiveEvents{} events against
+\nBackfillEvents{} --- and the EU-bound at-sea stock falls from \stockDecTwentyFive{}
+to \stockJanTwentySix{} million\,m$^3$ between December~2025 and January~2026, a
+\coverageDropShare{} drop with no physical event behind it. This was found by
+plotting Figure~\ref{fig:spread}, not by any test. The primary modelling sample is
+therefore truncated at \noaaEnds; the full-panel results are reported in
+Appendix~\ref{app:fullpanel} and change no conclusion.

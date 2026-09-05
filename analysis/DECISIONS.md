@@ -275,6 +275,64 @@ digit. 341 tests pass, ruff clean; 16 new tests in `tests/test_a1.py`.
 
 ---
 
+## D-034 · 2026-09-05 · **Pre-paper audit — four recorded claims corrected, one check repaired**
+
+**Context.** Before drafting the paper, every replay was re-run and every number the
+paper would carry was re-derived from a `make` target or a live query. A1, A2, A4, A5,
+D-006, D-029, D-032 and D-033 all reproduce exactly. Four claims did not survive.
+
+**1. "US loadings track EIA to a few percent" (SIGNALS.md §1) — wrong as stated.**
+`make capture-rate` counts *all* regimes, so NOAA and GFW double-count the same
+departures and it reads **110–134 %** in 2024–25. Restricted to `regime='noaa'`
+(laden US-export `departed` ÷ EIA-implied cargoes at 174,000 m³):
+
+| year | 2016 | 2017 | 2018 | 2019 | **2020** | 2021 | 2022 | 2023 | 2024 | 2025 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| capture | 95 % | 83 % | 74 % | 59 % | **46 %** | 74 % | 88 % | 93 % | 103 % | 105 % |
+
+A **coverage gradient**: early-year *levels* are biased low by up to half. The paper
+cites this series and says why the shipped tool's default must not be. SIGNALS.md fixed.
+
+**2. Seasonality "≈ 1.48×" — stale.** `make validate-signals` measures the
+in-transit winter/summer ratio at **1.35×**. MODELS.md (×2) and `analysis/fwl.py` fixed.
+
+**3. "Validation sweep green / gate cleared" (MODELS.md build order) — false today.**
+The `vintage` check fails. Diagnosis:
+- **909 of the flagged rows were an artefact of the check.** It took the *last print of
+  the day* as canonical; 909 of those prints were made *during* the bucket day, before
+  its fixes had finished arriving, so the comparison measured intraday timing (D-006's
+  "midnight as-of" effect), not leakage.
+- **The residual 68 are real.** Printed on d+1 and still differing by **+50–63 %** on
+  `gas_in_transit_volume` / `gas_ballast_to_us` / `laden_voyage_age_d` at n ≈ 12 each,
+  consistent with late-arriving fixes back-dating `departed` events. Direct measurement
+  of that lag: median 0 h, >24 h for **0.3 %** (NOAA, n = 1,500) and **1.5 %** (live,
+  n = 343). All 68 rows lie in the live tail (post-2026-05-30), **outside the D-033
+  modelling sample**.
+
+**Decision.** The check now compares **post-day prints only** and reports the same-day
+count as a diagnostic (`68 knowable<>post-day print; same-day prints differ on 909 rows
+[intraday timing, not scored]`). **The gate stays red on the 68** — that is the honest
+state, and the paper reports both numbers. Chasing the 68 is post-paper work.
+
+**4. A5's N2 rule quoted without its recall.** D-021's "12 d median, 0.19 false
+alarms/terminal-year" is correct but incomplete: **recall is 38 % (6/16)**. A detector
+that catches six of sixteen labelled outages is real but limited, and every
+"deployable artefact" mention now carries the recall. MODELS.md and CLAUDE.md fixed;
+D-021/D-024 stand as written (append-only) and are read together with this entry.
+
+**Also recorded.** `git log -- analysis/DECISIONS.md` shows **D-000 → D-026 landed in
+a single commit** (`4239d13`, 2026-09-05), and D-028+D-029 (`e483a1b`) and D-031+D-032
+(`c489550`) were each committed with their result. **Git provides no independent
+evidence of pre-registration ordering anywhere in this project.** The substance —
+signs, bars, holdout — is recorded in the entry text before each fit; the *evidence
+trail* is weaker than it should be. The paper states this in its protocol section and
+its limitations. Going forward: commit and push the pre-registration before running.
+
+**Verified (2026-09-05).** 591 tests pass; ruff clean; `make validate-signals` → 70 PASS
+/ 1 WARN / 1 FAIL (`vintage`, 68) / 1 SKIP.
+
+---
+
 ## D-033 · 2026-09-05 · **Finding + robustness — a coverage break contaminates 24 % of the holdout; the null survives, one D-032 claim does not**
 
 **Context.** Found while generating Figure 1 for the paper: the plotted

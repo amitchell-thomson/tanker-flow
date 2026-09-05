@@ -1,0 +1,37 @@
+% PROPOSAL — the author rewrites this section.
+\section{Discussion}\label{sec:discussion}
+
+The null is the answer an efficient market predicts, and it is worth being precise
+about which question was asked. LNG cargo tracking is a commercial industry: several
+vendors sell satellite-augmented AIS with proprietary destination inference to every
+gas trading desk, in real time. The signals in this paper are built from public
+terrestrial AIS and a free voyage archive --- a strictly coarser version of what the
+marginal trader already has. The test was therefore not ``is the physical signal
+informative'' but ``is public physical data mispriced in a liquid benchmark at one-
+to four-week horizons'', and to that question a negative answer is close to
+by construction. What the paper adds is that the negative is not an artefact of a
+broken pipeline, an unlucky specification, or a search that stopped at the first
+$t>2$: the pipeline is validated against a published total, the specification was
+fixed in advance, and the search was corrected and held out.
+
+Three results deserve to survive the null. First, the physical nowcasts converge on
+the naive mean from above, and for the one-week loadings target this is a theorem
+rather than an observation --- an argument that applies to any slow industrial flow
+series and should temper the expectation that ``more model'' will beat a moving
+average on one. Second, the two construction hazards of Section~\ref{sec:panel} are
+general to voyage-derived features and easy to miss while feeling that dates have
+been handled correctly; the vintage log that catches them is cheap to keep and, as
+far as we know, rarely kept. Third, the outage rule of Section~\ref{sec:parta} is a
+usable monitor with a stated recall.
+
+What would change the answer? A private edge --- satellite coverage of the open
+ocean, a destination model that resolves the three-quarters of the stock this
+pipeline cannot --- would change the question rather than the answer, and would make
+the study a test of the vendor's product. Within public data, the remaining
+untested avenues are joint rather than marginal fits (spike-and-slab or partial least
+squares over the collinear block), a fitted regime model rather than an observable
+split, distributed lags of the signals, and the twenty-six signal keys the panel
+does not use. Each is a weaker prior than the three mechanisms already tested, and
+each faces a worse multiplicity problem against a residual that has never exceeded
+\bMaxRsqCov{} of variance. Any of them should arrive with its own pre-registration,
+its own correction, and the untouched-holdout standard used here.

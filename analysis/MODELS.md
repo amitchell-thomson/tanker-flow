@@ -55,7 +55,7 @@ not capture**, so neither is caught by down-weighting `open_fraction`:
   regime double-count: read `regime='noaa'` for US, per §1.)
 - **Tanker seasonality ≈ weather seasonality — a confounder, flagged.** The signals
   carry a strong, *correct* seasonal cycle: EU discharge winter/summer **1.20×**, gas-in-
-  transit **1.48×** (in-transit leads *and* amplifies discharge — as a leading indicator
+  transit **1.35×** (in-transit leads *and* amplifies discharge — as a leading indicator
   should). But that cycle overlaps the spread's own weather seasonality, so a naive fit
   would just re-discover winter. **This makes the degree-day controls + FWL partialling
   of §2 load-bearing, not optional** — the claim is tanker edge *net of* weather, and the
@@ -215,7 +215,7 @@ weather/storage. The ML analogue: fit with controls + tanker signals, then SHAP 
 permutation importance for the *incremental* lift over a controls-only model.
 
 > **Not optional here (see §0·1).** The tanker panel carries its own strong seasonality
-> (gas-in-transit winter/summer ≈ 1.48×) that overlaps the spread's weather cycle, so
+> (gas-in-transit winter/summer ≈ 1.35×) that overlaps the spread's weather cycle, so
 > without degree-day partialling a fit re-encodes winter rather than tanker edge. The
 > degree-day controls are the highest-priority entry in the table above for that reason.
 
@@ -502,7 +502,8 @@ and **Cove Point's annual September turnaround**.
 > Point miss.
 >
 > **The usable artefact is N2, the baseline.** 12-day median detection at **0.19 false
-> alarms per terminal-year**, catching Freeport 2022 at **10 d**, Freeport 2024 at
+> alarms per terminal-year** — but **38 % recall (6 of 16 labelled outages)**, so it is a
+> limited detector — catching Freeport 2022 at **10 d**, Freeport 2024 at
 > **8 d**, Sabine 2017/18/19 at 12/10/13 d, Corpus 2019 at 13 d. Every miss is a
 > slow-baseline terminal. A deployable outage monitor came out of this — as the null,
 > not the model.
@@ -707,7 +708,7 @@ Walk-forward CV, `basis='knowable'`, confidence columns as observation variance.
 9. ✅ **A5 BOCPD outage nowcast** — **DONE 2026-08-12, negative result** (BOCPD 17 d
    median delay / 12 % recall vs the rate-relative null's 12 d / 0.19 FAR; cause =
    binning a point process — D-021). `make a5-replay`. **Usable artefact: the N2
-   rate-relative silence rule** (12 d median, 0.19 false alarms/terminal-yr).
+   rate-relative silence rule** (12 d median, **38 % recall (6/16)**, 0.19 false alarms/terminal-yr — real but limited).
 9b. ✅ **A4 Kalman local level** — **DONE 2026-08-12** (W₁ MAE 2.104 vs climatology
    2.088 — a 0.8 % tie; fitted EWMA α=0.251 ⇒ ~7-week optimal window). **Part A is
    closed**: four models converge to the naive mean from above without crossing it

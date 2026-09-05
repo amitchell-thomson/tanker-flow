@@ -289,6 +289,7 @@ async def main() -> None:
     ap = argparse.ArgumentParser(description="A4 Kalman nowcast replay")
     ap.add_argument("--regime", default="noaa")
     ap.add_argument("--primary", default="level")
+    ap.add_argument("--json", action="store_true", help="Also write paper/results/a4.json")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -314,7 +315,26 @@ async def main() -> None:
     y = weekly_series(times, grid)
     logger.info("weekly series: mean %.2f, min %.0f, max %.0f",
                 sum(y) / len(y), min(y), max(y))
-    report(replay(grid, y), args.primary)
+    rows = replay(grid, y)
+    report(rows, args.primary)
+    if args.json:
+        from analysis.results_io import dump
+
+        pr = [r for r in rows if r.model == args.primary]
+        w1 = [r for r in pr if r.horizon == "W1" and r.alpha is not None]
+        dump(
+            "a4",
+            {
+                "regime": args.regime,
+                "primary_model": args.primary,
+                "scorecards": {
+                    h: score([r for r in pr if r.horizon == h], h) for h in ("W1", "W2")
+                },
+                "alpha_mean": sum(r.alpha for r in w1) / max(1, len(w1)),
+                "effective_window_weeks": (2 / (sum(r.alpha for r in w1) / max(1, len(w1))) - 1)
+                if w1 else None,
+            },
+        )
 
 
 if __name__ == "__main__":

@@ -115,7 +115,7 @@ async def load_weekly(pool: asyncpg.Pool, *, end: date | None = None) -> Weekly:
     )
 
 
-def report_ladder(weekly: Weekly, horizon: int) -> None:
+def report_ladder(weekly: Weekly, horizon: int) -> dict:
     out = run_ladder(
         weekly.level, weekly.controls, weekly.control_names, horizon=horizon
     )
@@ -149,9 +149,17 @@ def report_ladder(weekly: Weekly, horizon: int) -> None:
             errs = [abs(p.error) for p in out[name] if int(weekly.years[p.index]) == y]
             print(f"{np.mean(errs):>8.2f}" if errs else f"{'—':>8}", end="")
         print()
+    per_year = {
+        name: {
+            int(y): float(np.mean([abs(p.error) for p in out[name] if int(weekly.years[p.index]) == y]))
+            for y in years
+        }
+        for name in ("M0", "M1", "M2")
+    }
+    return {"scores": scores, "per_year_mae": per_year}
 
 
-def report_fwl(weekly: Weekly, horizon: int) -> None:
+def report_fwl(weekly: Weekly, horizon: int) -> dict:
     """FWL scan: each signal's effect net of persistence, weather, storage, oil.
 
     The AR term joins the control block here so the partial effect is measured
@@ -170,6 +178,7 @@ def report_fwl(weekly: Weekly, horizon: int) -> None:
         f"{'yr cons':>9}{'pR2':>7}  verdict"
     )
     print("-" * 78)
+    effects = {}
     for name, prior in SIGNAL_PRIORS.items():
         eff = partial_effect(
             name,
@@ -184,9 +193,14 @@ def report_fwl(weekly: Weekly, horizon: int) -> None:
             f"{name:<24}{SIGN_LABEL[prior]:>6}{eff.beta:>12.3e}{eff.t_stat:>8.2f}"
             f"{eff.year_consistency:>8.0%}{eff.partial_r2:>7.3f}  {eff.verdict()}"
         )
+        effects[name] = {**eff.__dict__, "verdict": eff.verdict(),
+                         "year_consistency": eff.year_consistency}
+    return effects
 
 
-async def run(horizons: list[int], *, end: date | None = None) -> None:
+async def run(
+    horizons: list[int], *, end: date | None = None, json_name: str | None = None
+) -> None:
     pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=3)
     try:
         weekly = await load_weekly(pool, end=end)
@@ -200,9 +214,21 @@ async def run(horizons: list[int], *, end: date | None = None) -> None:
     print(f"Controls: {', '.join(weekly.control_names)}")
     print(f"Min training window: {MIN_TRAIN_WEEKS} weeks")
 
+    payload = {
+        "end": end,
+        "n_weeks": len(weekly.level),
+        "grid": [weekly.dates[0], weekly.dates[-1]],
+        "controls": list(weekly.control_names),
+        "horizons": {},
+    }
     for h in horizons:
-        report_ladder(weekly, h)
-        report_fwl(weekly, h)
+        ladder = report_ladder(weekly, h)
+        fwl = report_fwl(weekly, h)
+        payload["horizons"][str(h)] = {**ladder, "fwl": fwl}
+    if json_name:
+        from analysis.results_io import dump
+
+        dump(json_name, payload)
 
 
 def main() -> None:
@@ -221,9 +247,11 @@ def main() -> None:
         default=[1, 4],
         help="Forecast horizons in weeks (D-028 pre-registers 1 and 4)",
     )
+    parser.add_argument("--json", action="store_true", help="Also write paper/results/b0*.json")
     args = parser.parse_args()
     end = COVERAGE_HORIZON if args.end == "coverage" else None
-    asyncio.run(run(args.horizons, end=end))
+    name = ("b0_coverage" if end else "b0") if args.json else None
+    asyncio.run(run(args.horizons, end=end, json_name=name))
 
 
 if __name__ == "__main__":

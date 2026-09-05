@@ -91,7 +91,7 @@ def _grade(
     )
 
 
-async def run(end: date | None = None) -> None:
+async def run(end: date | None = None, json_name: str | None = None) -> None:
     pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=3)
     try:
         weekly = await load_weekly(pool, end=end)
@@ -229,6 +229,23 @@ async def run(end: date | None = None) -> None:
         f"{abs(tight_r.beta):.2e} vs {abs(loose_r.beta):.2e} -> "
         f"{'holds' if stronger else 'does NOT hold'}"
     )
+    if json_name:
+        from analysis.results_io import dump
+
+        dump(
+            json_name,
+            {
+                "end": end,
+                "primary_horizon": h,
+                "bonferroni_t": BONFERRONI_T,
+                "discovery": [dates[disc][0], dates[disc][-1], int(disc.sum())],
+                "holdout": [dates[hold][0], dates[hold][-1], int(hold.sum())],
+                "h2_trend_r2": r2,
+                "h4_split": {"tight": int(tight.sum()), "loose": int((~tight).sum())},
+                "h4_tight_stronger": bool(stronger),
+                "results": [{**r.__dict__, "verdict": r.verdict()} for r in results],
+            },
+        )
 
 
 if __name__ == "__main__":
@@ -240,5 +257,8 @@ if __name__ == "__main__":
         help="Sample end: 'data-max' (D-032 as published) or 'coverage' "
         "(truncate at the backfill horizon 2025-12-31 — the D-033 robustness run)",
     )
+    ap.add_argument("--json", action="store_true", help="Also write paper/results/mechanisms*.json")
     _args = ap.parse_args()
-    asyncio.run(run(COVERAGE_HORIZON if _args.end == "coverage" else None))
+    _end = COVERAGE_HORIZON if _args.end == "coverage" else None
+    _name = ("mechanisms_coverage" if _end else "mechanisms") if _args.json else None
+    asyncio.run(run(_end, json_name=_name))

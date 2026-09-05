@@ -2,7 +2,7 @@
 
 The question Part B exists to answer is not "does a tanker signal correlate with
 the spread" — it does, because both have a winter cycle: gas-in-transit runs
-about 1.48x higher in winter and Europe burns more gas when it is cold. Regress
+about 1.35x higher in winter and Europe burns more gas when it is cold. Regress
 one on the other and you rediscover winter.
 
 The question is whether a signal carries information **net of** persistence,

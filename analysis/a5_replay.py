@@ -159,6 +159,7 @@ def report(outages, bocpd_alarms, n1_alarms, n2_alarms, spans, names):
 async def main() -> None:
     ap = argparse.ArgumentParser(description="A5 outage-detection replay")
     ap.add_argument("--regime", default="noaa")
+    ap.add_argument("--json", action="store_true", help="Also write paper/results/a5.json")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -176,6 +177,28 @@ async def main() -> None:
     # Only score outages at terminals that actually have a scored span.
     outages = [o for o in outages if o.terminal_id in spans]
     report(outages, b, n1, n2, spans, names)
+    if args.json:
+        from analysis.results_io import dump
+
+        def block(alarms, outs):
+            dets, far, _ = score_detector(alarms, outs, spans)
+            recall, med, n_hit = summarise(dets)
+            return {"recall": recall, "median_delay_d": med, "false_alarms_per_terminal_yr": far,
+                    "n_hit": n_hit, "n_outages": len(dets)}
+
+        ex = [o for o in outages if o.terminal_name != COVE_POINT]
+        dump(
+            "a5",
+            {
+                "regime": args.regime,
+                "n_outages": len(outages),
+                "terminal_years": sum(spans.values()) / 365.25,
+                "headline": {"bocpd": block(b, outages), "n1_absolute": block(n1, outages),
+                             "n2_rate_relative": block(n2, outages)},
+                "ex_cove_point": {"bocpd": block(b, ex), "n1_absolute": block(n1, ex),
+                                  "n2_rate_relative": block(n2, ex)},
+            },
+        )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,29 @@
+\section{What the design could have found}\label{sec:power}
+
+A null is only as informative as the smallest effect it could have detected. For a
+partial effect estimated on $n$ observations, $t^2 \approx n\,R^2/(1-R^2)$, so at a
+fixed bar the smallest detectable \pRsq{} falls as $1/n$. With \powerN{} discovery
+weeks and the Bonferroni bar of $|t|>\bonferroniT$, the floor is \powerFloor{} of
+residual variance (Figure~\ref{fig:power}). The largest \pRsq{} observed anywhere in
+the paper --- across eight signals, two horizons, three mechanisms and two samples ---
+is \bMaxRsqCov.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\linewidth]{fig4_power}
+\caption{Smallest detectable \pRsq{} against sample size at the two bars used in the
+paper, with the largest observed \pRsq{} and the discovery sample size marked.}
+\label{fig:power}
+\end{figure}
+
+The scope of the result follows. It rules out effects large enough to be worth
+trading and is silent on smaller ones: a signal explaining a third of a percent of
+residual variance would be real physics and a worthless strategy, and this design
+could not distinguish it from zero. Two further scale facts make the null less
+surprising than the intuition that motivated the study. The entire EU-bound stock of
+gas at sea averages \stockMeanMm{} million\,m$^3$ of LNG, about \stockMeanBcm{}\,bcm
+of gas or \stockDaysDemand{} days of EU demand at roughly \euDemandBcm{}\,bcm per
+year; a one-standard-deviation swing in it is \stockSdDaysDemand{} days of demand.
+The weekly spread, meanwhile, has a standard deviation of \$\spreadWeeklySd{} per
+MMBtu. The question was whether a day and a half of marginal supply moves a price
+that routinely swings on a revised weather forecast.

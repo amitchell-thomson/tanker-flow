@@ -302,21 +302,29 @@ class Sweep:
                      f"no vintage day older than the {SETTLE_DAYS}d settling window yet "
                      "— knowable stability not verifiable until the live tail accrues")
         else:
-            mism = await self.conn.fetchval(
-                """
+            #   4. post-day prints only (D-034). A print taken DURING day d is missing
+            #      the rest of that day's fixes, so comparing it with a full-day
+            #      recompute measures intraday timing, not leakage: on 2026-09-05
+            #      842 of 910 "mismatches" were exactly this. The canonical print for
+            #      day d is the last one made on a LATER day. The same-day count is
+            #      still reported, as a diagnostic, so the old number does not vanish.
+            mism_sql = """
                 WITH last_snap AS (
                   SELECT DISTINCT ON (signal_key, bucket_date, zone_scope, regime)
                          signal_key, bucket_date, zone_scope, regime, value
                   FROM signal_daily_live_vintage
                   WHERE basis='knowable' AND bucket_date < current_date - $1::int
+                    AND printed_at::date {cmp} bucket_date
                   ORDER BY signal_key, bucket_date, zone_scope, regime, printed_at DESC)
                 SELECT count(*) FROM last_snap v
                 JOIN signal_daily s USING (signal_key, bucket_date, zone_scope, regime)
                 WHERE s.basis='knowable' AND abs(v.value - s.value) > 1e-6
-                """, SETTLE_DAYS)
+                """
+            mism = await self.conn.fetchval(mism_sql.format(cmp=">"), SETTLE_DAYS)
+            same_day = await self.conn.fetchval(mism_sql.format(cmp="="), SETTLE_DAYS)
             self.add(4, "vintage", "FAIL" if mism else "PASS",
-                     f"{mism} knowable<>printed (over {testable} settled day(s))" if mism
-                     else f"knowable==as-printed ({testable} settled day(s))")
+                     (f"{mism} knowable<>post-day print (over {testable} settled day(s)); "
+                      f"same-day prints differ on {same_day} rows [intraday timing, not scored]"))
 
     # ---- Tier 5: confidence-column correctness -----------------------------
     async def tier5(self):

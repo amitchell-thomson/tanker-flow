@@ -28,7 +28,7 @@ panel, rebuilt TRUNCATE+swap by `make signals`). It never re-pairs. One row per
 columns below.
 
 Coverage by source (sets which signals get history — see §2.1):
-- **`noaa`** — exhaustive US Class-A terrestrial, 2016+ (the US ground truth; tracks EIA exports to a few %).
+- **`noaa`** — exhaustive US Class-A terrestrial, 2016+ (the US ground truth; NOAA-only laden departures ÷ EIA-implied cargoes = 46 % in 2020, rising to 93 % / 103 % / 105 % in 2023-25 — a coverage gradient, so early-year *levels* are biased low; see D-034).
 - **`gfw`** — Global Fishing Watch voyage arcs, EU + global, 2016+ (port visits only; **no coordinates, no anchorage events**).
 - **`bbox`** / **`mmsi_filter`** — the live feed before / after the 2026-05-30 cutover.
 

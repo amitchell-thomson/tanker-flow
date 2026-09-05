@@ -1,4 +1,4 @@
-.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events backfill-noaa backfill-noaa-reload backfill-gfw backfill-gfw-dry reconcile reconcile-dry scoring signals a1-replay a1-h1 a2-replay a5-replay a4-replay validate-signals vf-rescue vf-rescue-dry vf-status refresh-fleet discover discover-dry discover-berths discover-berths-dry complete-registry complete-registry-dry complete-registry-sample retire-stale retire-stale-dry backup eia eia-full market market-full model-panel check-ttf-roll b0-replay mechanisms b0-coverage mechanisms-coverage capture-rate coverage
+.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events backfill-noaa backfill-noaa-reload backfill-gfw backfill-gfw-dry reconcile reconcile-dry scoring signals a1-replay a1-h1 a2-replay a5-replay a4-replay validate-signals vf-rescue vf-rescue-dry vf-status refresh-fleet discover discover-dry discover-berths discover-berths-dry complete-registry complete-registry-dry complete-registry-sample retire-stale retire-stale-dry backup eia eia-full market market-full model-panel check-ttf-roll b0-replay mechanisms b0-coverage mechanisms-coverage paper-results paper-tables paper-figures paper capture-rate coverage
 
 up:
 	docker compose up -d
@@ -194,6 +194,32 @@ b0-coverage:
 
 mechanisms-coverage:
 	uv run python -m analysis.mechanisms_replay --end coverage
+
+# --- Paper ---------------------------------------------------------------
+# Everything in paper/ that carries a number is generated: replays -> JSON
+# (paper-results), JSON + live DB -> tables + numbers.tex (paper-tables), and
+# the figures from the same tables the models read (paper-figures). `paper`
+# runs all three and zips paper/ for upload to Overleaf (no local TeX here).
+paper-results:
+	uv run python -m analysis.a1_replay --json
+	uv run python -m analysis.a1_replay --horizons 4 --json
+	uv run python -m analysis.a2_replay --json
+	uv run python -m analysis.a4_replay --json
+	uv run python -m analysis.a5_replay --json
+	uv run python -m analysis.b0_replay --json
+	uv run python -m analysis.b0_replay --end coverage --json
+	uv run python -m analysis.mechanisms_replay --json
+	uv run python -m analysis.mechanisms_replay --end coverage --json
+
+paper-tables:
+	uv run python -m paper.tables
+
+paper-figures:
+	uv run python -m paper.figures --full-panel-too
+
+paper: paper-results paper-tables paper-figures
+	cd paper && rm -f ../tanker-flow-paper.zip && zip -qr ../tanker-flow-paper.zip main.tex numbers.tex refs.bib sections tables figures/*.pdf
+	@echo "wrote tanker-flow-paper.zip — upload to Overleaf (New Project -> Upload Project)"
 
 # Read-only capture-rate report: captured US LNG-export departures vs the
 # EIA-implied cargo count per month (needs `make eia` first). Lands dark until

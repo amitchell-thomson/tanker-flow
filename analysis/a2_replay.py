@@ -431,6 +431,7 @@ async def main() -> None:
     ap.add_argument("--regimes", default="noaa,gfw")
     ap.add_argument("--primary", default="noaa")
     ap.add_argument("--families", default="nb,poisson")
+    ap.add_argument("--json", action="store_true", help="Also write paper/results/a2.json")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -467,6 +468,25 @@ async def main() -> None:
                 rows, horizon=name, regime=regime, u1=u1, families=families
             )
     report(all_rows, args.primary, families[0])
+    if args.json:
+        from analysis.results_io import dump
+
+        pr = [r for r in all_rows if r.regime == args.primary and r.family == families[0]]
+        dump(
+            "a2",
+            {
+                "primary_regime": args.primary,
+                "primary_family": families[0],
+                "scorecards": {
+                    h: score([r for r in pr if r.horizon == h], h) for h in HORIZONS
+                },
+                "mean_coefficients": {
+                    name: sum(r.coefficient(name) for r in pr if r.horizon == "W1")
+                    / max(1, sum(1 for r in pr if r.horizon == "W1"))
+                    for name in FEATURES
+                },
+            },
+        )
 
 
 if __name__ == "__main__":

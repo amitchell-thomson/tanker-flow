@@ -1,0 +1,35 @@
+\section{Signal definitions and pre-registered signs}\label{app:signals}
+
+The eight tanker signals used in Section~\ref{sec:partb}, the aggregation applied
+when collapsing per-terminal or per-zone bands to one daily series, and the sign
+committed before any fit. The sign convention: the spread $\text{HH}-\text{TTF}$ is
+negative in nearly every period, so ``the spread narrows'' means it rises toward
+zero --- a positive change.
+
+\begin{center}\small
+\begin{tabular}{p{3.4cm}p{1.6cm}p{7.4cm}c}
+\toprule
+signal & aggregation & mechanism & prior \\
+\midrule
+gas in transit, EU-bound & sum over EU zones & more cargo landing in Europe soon $\Rightarrow$ TTF falls & $+$ \\
+gas in transit, unresolved & sum & destination unknown; no directional prior & none \\
+US loading rate & sum over US berths & gas leaves the US balance (HH firms) and reaches Europe (TTF falls) & $+$ \\
+EU discharge rate & sum over EU berths & Europe absorbing gas now $\Rightarrow$ TTF falls & $+$ \\
+ballast returning to US & sum & tonnage returning to load $\Rightarrow$ future exports up & $+$ \\
+laden voyage age & $n$-weighted mean & cargo floating rather than landing $\Rightarrow$ Europe stays tight & $-$ \\
+US load-queue wait & $n$-weighted mean & US cannot export $\Rightarrow$ HH softens, Europe starved & $-$ \\
+net export pressure & $n$-weighted mean & $z$(loadings) $-$ $z$(load queue); both legs point the same way & $+$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Volumes are in m$^3$ of LNG; loading and discharge rates are amortised m$^3$ per day
+across berth hours so that a closed visit integrates to one cargo; ages and waits are
+in days and hours respectively. The project's signal catalogue documents the
+remaining twenty-six keys, the two bases, and the confidence columns (dispersion,
+open fraction, estimated fraction) that accompany every value.
+
+\paragraph{A recorded inconsistency.} The catalogue's own text gave net export
+pressure two incompatible signs in two places. The positive sign was adopted on the
+economics above and recorded as a prior; the data returned a negative point estimate
+at both horizons, at $|t|\le1.6$, which neither confirms nor falsifies it.

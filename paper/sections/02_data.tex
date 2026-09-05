@@ -1,0 +1,78 @@
+\section{Data and pipeline}\label{sec:data}
+
+\subsection{Sources}
+
+Vessel positions come from three feeds with different fidelity, and the paper is
+careful never to aggregate across their seams. For the United States we use the
+NOAA Marine Cadastre archive of terrestrial Class-A AIS \citep{noaa_ais}, which is
+exhaustive along the US coast from 2016 and ends on \noaaEnds. For Europe and the
+open ocean we use Global Fishing Watch port-visit and voyage events \citep{gfw},
+which supply arrivals and departures but carry no coordinates and no anchorage
+events; that feed ends on \gfwEnds. A live subscription to an AIS aggregator covered
+a tier-ranked fleet from April~2026 and is used only for the vintage self-validation
+described in Section~\ref{sec:panel}.
+
+Prices and controls are all public: \HH{} spot and Lower-48 storage from the EIA API
+\citep{eia_api}; the TTF front-month contract from a keyless quote feed, cross-checked
+against the World Bank's monthly European gas series \citep{worldbank_cmo} (slope
+0.999, $\Rsq=0.9999$ over 106 months, so the continuous-roll distortion is
+negligible); EUR/USD and Brent from FRED \citep{fred}; EU storage from GIE AGSI+
+\citep{agsi}; and heating/cooling degree days computed from ERA5 reanalysis
+temperatures at weighted demand centres \citep{openmeteo}.
+
+\subsection{Reconstruction}
+
+Table~\ref{tab:inventory} gives the scale of the reconstruction. Fixes are resolved
+against hand-drawn berth, anchorage and approach polygons at every LNG terminal in
+seven zones (US Gulf, US Atlantic, north-west Europe, Baltic, Iberia, western and
+eastern Mediterranean) by a per-vessel state machine that emits zone entry,
+anchorage, mooring and departure events. Three pairings of those events are the
+substrate for everything that follows: a \emph{leg} pairs a departure with the
+vessel's next zone entry (a voyage), a \emph{visit} pairs a mooring with the next
+departure (berth occupancy), and a \emph{queue} pairs the first anchorage entry with
+the next mooring at the same terminal (the wait to berth). Laden state is inferred
+from reported draught against design draught.
+
+\begin{table}[t]
+\centering\small
+\caption{Reconstruction inventory. Port events are labelled by the feed that produced
+them; the two backfill feeds end months before the live feed, which matters for the
+sample choice in Section~\ref{sec:partb}.}
+\label{tab:inventory}
+\input{tables/inventory}
+\end{table}
+
+\subsection{Ground truth}
+
+The US leg of the reconstruction can be checked against a published total. The EIA
+reports monthly US LNG exports; dividing by a nominal 174,000\,m$^3$ cargo gives an
+implied cargo count, and the ratio of laden departures we observe to that count is a
+capture rate (Table~\ref{tab:capture}). Restricted to the NOAA feed alone it is
+\captureTwentyTwenty{} in 2020, rising to \captureTwentyThree{}, \captureTwentyFour{}
+and \captureTwentyFive{} in 2023--25. The gradient is a coverage artefact of the
+archive's early years, and it means early-year \emph{levels} of any US signal are
+biased low by up to half; models below either work on within-window changes or
+standardise, and none reads an early-year level as a physical quantity.
+
+\begin{table}[t]
+\centering\small
+\caption{NOAA-only capture of US LNG export cargoes against the EIA-implied count.
+The shipped diagnostic tool counts every feed and so double-counts departures seen by
+both NOAA and GFW; the series here is the single-feed one.}
+\label{tab:capture}
+\input{tables/capture}
+\end{table}
+
+Figure~\ref{fig:spread} shows the target and the headline signal on one timeline.
+The eye finds the two structural events every model must survive --- the 2020--21
+inversions in which \HH{} briefly exceeded \TTF{}, and the 2022 European crisis ---
+and little else.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{fig1_spread_and_stock}
+\caption{The \HH{}--\TTF{} spread (top) and the EU-bound gas at sea (bottom), daily,
+on the coverage-consistent sample used for modelling. The extremes land on Winter Storm
+Uri (February~2021) and the August~2022 TTF peak.}
+\label{fig:spread}
+\end{figure}

@@ -1,0 +1,50 @@
+% PROPOSAL — the author rewrites this section. It states the claim as the
+% generated numbers support it; the framing and emphasis are the author's call.
+\section{Introduction}
+
+The Henry Hub--TTF spread is the price of moving a molecule of gas from the United
+States to Europe, and liquefied natural gas (LNG) carriers are how the molecule moves.
+A laden carrier leaving Sabine Pass arrives at Rotterdam roughly fourteen to eighteen
+days later. Between departure and arrival its cargo is committed, physically visible
+to anyone with a receiver, and absent from every published supply statistic. The
+inference that vessel positions must therefore lead the spread is intuitive, widely
+held, and commercially sold.
+
+This paper tests it, and finds no support. The contribution is not the null itself
+--- an efficient-markets reading predicts it --- but the form in which the null is
+delivered. Three things make it a result rather than an absence:
+
+\begin{enumerate}
+\item \textbf{Pre-registration.} Every target, control set, lag, sign and acceptance
+  bar was written into a dated, append-only decision log before the corresponding fit,
+  so that no choice below was made after seeing what it produced. Where a
+  pre-registered sign was falsified, it is reported as falsified.
+\item \textbf{Inference that respects the data.} Weekly changes over a four-week
+  horizon overlap; standard errors are Newey--West throughout, with the lag fixed in
+  advance at \hacLagRule{} weeks. Training rows whose target reached into the test
+  week are purged. The three follow-up mechanisms are held to a Bonferroni bar and
+  must replicate their sign on a holdout that was not examined until they had passed
+  on discovery.
+\item \textbf{A bound on what could have been found.} With \powerN{} weekly
+  observations the design detects effects of at least \powerFloor{} of residual
+  variance. The largest observed anywhere is \bMaxRsqCov. The result therefore rules
+  out effects large enough to trade and says nothing about smaller ones.
+\end{enumerate}
+
+Two further findings are methodological and, we think, of independent use to anyone
+building features from vessel-tracking data. First, the natural unit of observation
+--- a \emph{voyage} --- does not exist until both its endpoints have been observed,
+so any statistic computed over completed voyages embeds the future: at a 2020 as-of
+date a straightforward loader returned \leakNaive{} legs of which \leakFutureClosed{}
+(\leakFutureShare) had been closed by arrivals that had not yet happened. Second,
+feature \emph{availability} changes across data vintages: the same loader attached
+\leakDeclared{} destination declarations to 2020 voyages from a data feed that did not
+exist until 2026, which no date filter on observations can catch.
+
+The rest of the paper is organised as follows. Section~\ref{sec:data} describes the
+pipeline and the decade-scale reconstruction. Section~\ref{sec:panel} sets out how the
+signal panel is built point-in-time. Section~\ref{sec:prereg} describes the
+pre-registration protocol and its limits. Section~\ref{sec:parta} reports the physical
+nowcasts, which converge on the naive mean. Section~\ref{sec:partb} reports the spread
+tests. Section~\ref{sec:power} bounds what they could have found.
+Sections~\ref{sec:discussion} and~\ref{sec:limitations} interpret and qualify.

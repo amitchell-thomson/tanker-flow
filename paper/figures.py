@@ -24,7 +24,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
-from analysis.b0_replay import SIGNAL_PRIORS, load_weekly  # noqa: E402
+from analysis.b0_replay import COVERAGE_HORIZON, SIGNAL_PRIORS, load_weekly  # noqa: E402
 from analysis.fwl import partial_effect  # noqa: E402
 from analysis.mechanisms import BONFERRONI_T  # noqa: E402
 from config import settings  # noqa: E402
@@ -60,6 +60,13 @@ plt.rcParams.update(
 )
 
 
+def _suffix(end: date | None) -> str:
+    """Primary figures use the coverage horizon (D-033); the full-panel variants
+    carry an explicit suffix so the appendix figure is never mistaken for the
+    primary one."""
+    return "" if end is not None else "_fullpanel"
+
+
 def _save(fig: plt.Figure, name: str) -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     for ext in ("pdf", "png"):
@@ -78,11 +85,12 @@ SELECT bucket_date,
        max(value) FILTER (WHERE feature = $2) AS b
 FROM model_panel
 WHERE bucket_date >= DATE '2018-01-01'
+  AND ($3::date IS NULL OR bucket_date <= $3)
 GROUP BY 1 ORDER BY 1
 """
 
 
-async def fig_spread(pool: asyncpg.Pool) -> None:
+async def fig_spread(pool: asyncpg.Pool, end: date | None = None) -> None:
     """The spread and the at-sea EU stock: the whole thesis in one picture.
 
     Plotted together deliberately. The eye wants to find a relationship here and
@@ -90,7 +98,7 @@ async def fig_spread(pool: asyncpg.Pool) -> None:
     events (2020 inversion, 2022 crisis) are what any model has to survive.
     """
     async with pool.acquire() as conn:
-        rows = await conn.fetch(PANEL_SQL, "spread_hh_ttf", "gas_in_transit_eu")
+        rows = await conn.fetch(PANEL_SQL, "spread_hh_ttf", "gas_in_transit_eu", end)
     days = [r["bucket_date"] for r in rows]
     spread = np.array([np.nan if r["a"] is None else r["a"] for r in rows], float)
     transit = np.array([np.nan if r["b"] is None else r["b"] for r in rows], float)
@@ -124,7 +132,7 @@ async def fig_spread(pool: asyncpg.Pool) -> None:
     ax2.set_ylabel("EU-bound gas\nat sea (M m³)")
     ax2.set_xlabel("")
     fig.align_ylabels([ax1, ax2])
-    _save(fig, "fig1_spread_and_stock")
+    _save(fig, "fig1_spread_and_stock" + _suffix(end))
 
 
 # ----------------------------------------------------------------------
@@ -188,13 +196,13 @@ async def fig_leakage(pool: asyncpg.Pool) -> None:
 # ----------------------------------------------------------------------
 
 
-async def fig_fwl(pool: asyncpg.Pool) -> None:
+async def fig_fwl(pool: asyncpg.Pool, end: date | None = None) -> None:
     """HAC t-statistics for every pre-registered signal, at both horizons.
 
     Plotted as t rather than beta so features with wildly different units are
     comparable on one axis, with the two decision bars drawn on it.
     """
-    weekly = await load_weekly(pool)
+    weekly = await load_weekly(pool, end=end)
     fig, ax = plt.subplots(figsize=(6.6, 3.6))
     names = list(SIGNAL_PRIORS)
     offsets = {1: -0.16, 4: +0.16}
@@ -237,7 +245,7 @@ async def fig_fwl(pool: asyncpg.Pool) -> None:
     ax.set_xlabel("Newey–West HAC $t$-statistic on the FWL partial effect")
     ax.set_xlim(-3.0, 3.0)
     ax.legend(fontsize=7.5, loc="lower right")
-    _save(fig, "fig3_fwl_scan")
+    _save(fig, "fig3_fwl_scan" + _suffix(end))
 
 
 # ----------------------------------------------------------------------
@@ -333,7 +341,10 @@ FIGURES = {
 }
 
 
-async def main(only: list[str] | None) -> None:
+END_AWARE = {"spread", "fwl"}  # the two figures drawn from the modelling sample
+
+
+async def main(only: list[str] | None, *, full_panel_too: bool) -> None:
     wanted = only or [*FIGURES, "power"]
     pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=3)
     try:
@@ -343,7 +354,13 @@ async def main(only: list[str] | None) -> None:
                 fig_power()
                 continue
             print(name)
-            await FIGURES[name](pool)
+            if name in END_AWARE:
+                # Primary = coverage horizon (D-033); optional full-panel appendix copy.
+                await FIGURES[name](pool, end=COVERAGE_HORIZON)
+                if full_panel_too:
+                    await FIGURES[name](pool, end=None)
+            else:
+                await FIGURES[name](pool)
     finally:
         await pool.close()
 
@@ -351,4 +368,10 @@ async def main(only: list[str] | None) -> None:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Regenerate the paper's figures")
     ap.add_argument("--only", nargs="+", choices=[*FIGURES, "power"])
-    asyncio.run(main(ap.parse_args().only))
+    ap.add_argument(
+        "--full-panel-too",
+        action="store_true",
+        help="Also write the full-panel (_fullpanel) variants for Appendix B",
+    )
+    _a = ap.parse_args()
+    asyncio.run(main(_a.only, full_panel_too=_a.full_panel_too))
