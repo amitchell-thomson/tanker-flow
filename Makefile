@@ -1,4 +1,4 @@
-.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events backfill-noaa backfill-noaa-reload backfill-gfw backfill-gfw-dry reconcile reconcile-dry scoring signals a1-replay a1-h1 a2-replay a5-replay a4-replay validate-signals vf-rescue vf-rescue-dry vf-status refresh-fleet discover discover-dry discover-berths discover-berths-dry complete-registry complete-registry-dry complete-registry-sample retire-stale retire-stale-dry backup eia eia-full market market-full model-panel check-ttf-roll b0-replay capture-rate coverage
+.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events backfill-noaa backfill-noaa-reload backfill-gfw backfill-gfw-dry reconcile reconcile-dry scoring signals a1-replay a1-h1 a2-replay a5-replay a4-replay validate-signals vf-rescue vf-rescue-dry vf-status refresh-fleet discover discover-dry discover-berths discover-berths-dry complete-registry complete-registry-dry complete-registry-sample retire-stale retire-stale-dry backup eia eia-full market market-full model-panel check-ttf-roll b0-replay mechanisms capture-rate coverage
 
 up:
 	docker compose up -d
@@ -180,6 +180,12 @@ check-ttf-roll:
 # pre-registered tanker signals. Read-only; spec D-028, result D-029.
 b0-replay:
 	uv run python -m analysis.b0_replay
+
+# D-031's three mechanism tests (H2 EU-share / H3 storage interaction /
+# H4 tightness split), Bonferroni-corrected with a held-out 2025+ stretch.
+# Read-only; result D-032 — all three fail.
+mechanisms:
+	uv run python -m analysis.mechanisms_replay
 
 # Read-only capture-rate report: captured US LNG-export departures vs the
 # EIA-implied cargo count per month (needs `make eia` first). Lands dark until

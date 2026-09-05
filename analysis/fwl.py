@@ -65,10 +65,15 @@ class PartialEffect:
     expected_sign: int  # +1 / -1 from D-028; 0 = no prior registered
     year_signs: dict[int, int]  # sign of the per-year partial effect
     partial_r2: float  # variance of y~ explained by T~
+    # Critical value for `significant`. Defaults to D-028's 1.96; D-031 raises it
+    # to 2.39 (Bonferroni over three primary tests). Carried on the result rather
+    # than read from a global so a report cannot silently grade one test against
+    # a bar that was set for another.
+    t_critical: float = T_CRITICAL
 
     @property
     def significant(self) -> bool:
-        return abs(self.t_stat) > T_CRITICAL
+        return abs(self.t_stat) > self.t_critical
 
     @property
     def sign_matches(self) -> bool:
@@ -111,6 +116,7 @@ def partial_effect(
     *,
     horizon: int,
     expected_sign: int,
+    t_critical: float = T_CRITICAL,
 ) -> PartialEffect:
     """Run FWL for one signal and grade it against the pre-registered bar."""
     hac_lag = newey_west_lag(horizon)
@@ -146,4 +152,5 @@ def partial_effect(
         expected_sign=expected_sign,
         year_signs=year_signs,
         partial_r2=partial_r2,
+        t_critical=t_critical,
     )

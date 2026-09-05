@@ -275,6 +275,169 @@ digit. 341 tests pass, ruff clean; 16 new tests in `tests/test_a1.py`.
 
 ---
 
+## D-032 · 2026-09-05 · **RESULT — all three mechanism tests fail; Part B's null stands**
+
+**Context.** First and only run of the D-031 protocol. Nothing was changed after
+pre-registration. `make mechanisms` reproduces every number.
+
+**Sample.** Discovery 2018-01-01 → 2024-12-30, **327 weeks**. Holdout 2025-01-06 →
+2026-07-06, **64 weeks**, untouched until each hypothesis had been graded on
+discovery. Primary horizon h = 4 weeks, Bonferroni bar **|t| > 2.394**.
+
+### H2's confound gate passed — so this is a real test, not a void one
+`eu_share`'s linear time trend explains **R² = 0.209**, below the pre-registered
+0.5 ceiling. The Europe-bound fraction is *not* mostly a decade-long ramp, so it is
+not simply recording our own improving destination resolution. H2 was therefore
+graded on its merits.
+
+### The scorecard
+
+| hypothesis | prior | β | HAC t | yr | partial R² | holdout β | verdict |
+|---|---|---|---|---|---|---|---|
+| `eu_share` | + | −2.638e+00 | −0.89 | 71 % | 0.003 | +8.23e+00 | not significant |
+| `transit_x_storage` | − | +4.783e−09 | 0.46 | 71 % | 0.001 | +6.73e−10 | not significant |
+| `transit_in_tight` | + | −1.131e−07 | −0.17 | 100 % | 0.000 | +9.21e−07 | not significant |
+| `transit_in_loose` | + | −2.247e−07 | −1.00 | 100 % | 0.009 | — | not significant |
+
+**None clears the bar. None comes close** — the largest |t| among the three
+primary tests is **0.89** against a 2.394 threshold, and the largest partial R² is
+**0.009**, unchanged from D-029's ceiling.
+
+### Each fails in a way that argues against rescue, not for another attempt
+
+- **H2** is not merely insignificant: its sign **flips between discovery (−2.64)
+  and holdout (+8.23)**. A real effect does not change direction across an
+  arbitrary date cut. This is the signature of noise, and it means the "share not
+  level" idea is dead rather than underpowered.
+- **H3** comes out with the **wrong sign** (+, prior −) *and* |t| = 0.46. Both the
+  magnitude and the direction of the storage interaction are absent. The most
+  economically motivated of the three — the one I said I would bet on — has the
+  least support of any.
+- **H4 fails on both of its conditions.** The tight-regime effect is **negative**
+  (prior +), and |β_tight| = 1.13e−07 is *smaller* than |β_loose| = 2.25e−07, the
+  reverse of the prediction. Cargo arrivals do not matter more when Europe is
+  short; on this evidence they do not measurably matter in either state.
+
+The 100 % year-consistency on H4's two rows is not evidence of anything: a
+consistently-signed near-zero coefficient is still near-zero.
+
+### What this does to the overall claim
+
+D-029 established the linear null. D-031/D-032 tested the three specific reasons a
+linear scan could have missed a real effect — a ratio rather than levels, a
+state-dependent slope, and a regime split — and **all three come back empty, on
+pre-registered signs, with a corrected bar and an untouched holdout.**
+
+**Part B's negative result is now substantially more robust than a single linear
+scan.** The remaining untested variants (joint spike-and-slab/PLS fits, a fitted
+HMM, distributed signal lags, the 26 unused signal keys) are all *weaker* prior
+candidates than the three just tested, and they face a worse multiplicity problem
+against a residual signal that has never exceeded partial R² = 0.009 anywhere.
+
+**Decision: Part B stops here, and the project moves to write-up.** Not because
+the space is exhausted — it is not, and §"Also open" in D-025 plus the list above
+remain honest inventory — but because the pre-registered programme has been run to
+completion and returned a clean, replicated null. Continuing to search after that,
+without a new mechanism to motivate it, is the exact behaviour the §0·3 discipline
+exists to prevent. **Any future test must arrive with its own pre-registration and
+its own correction, and be judged against the untouched-holdout standard set here.**
+
+**Prediction check, for the record.** D-031 stated in advance: "My honest
+expectation is that all three fail." They did. The prior was recorded before the
+run so that this sentence is a calibration check rather than hindsight.
+
+**Verified (2026-09-05, live DB).** 591 tests pass, ruff clean; 21 new tests over
+the derived features, the leakage-safe seasonal norm, the confound gate and the
+four-condition grading.
+
+---
+
+## D-031 · 2026-09-05 · **Three mechanism tests — pre-registration (binding, before any fit)**
+
+**Context.** D-029 returned a clean linear null. Three specific mechanisms could
+hide an effect from a one-at-a-time linear FWL scan. They are committed here in
+full — features, signs, sample split, bar — **before any of them is computed**.
+
+**Why the extra machinery.** D-029 already spent 16 tests (8 signals × 2 horizons)
+and its largest |t| was 1.72, which is what pure noise produces. Every further
+test raises the chance of manufacturing a false positive out of the same data.
+Three protections are therefore fixed now and are **not negotiable after the fact**:
+
+1. **One primary horizon: h = 4 weeks.** Chosen on mechanism, not on D-029's
+   numbers being marginally larger there: a US→EU voyage takes 14-18 d, so a
+   4-week window is where cargo at sea can mechanically act. h = 1 is reported as
+   secondary and **cannot rescue a failed primary**.
+2. **Bonferroni over the three primary tests.** α = 0.05/3 = 0.0167, so the bar is
+   **|HAC t| > 2.39**, not 1.96.
+3. **A held-out final stretch.** Discovery = **2018-01-01 → 2024-12-31**. Holdout =
+   **2025-01-01 →** end of panel, untouched until a hypothesis has already passed
+   on discovery. A pass must **carry the same sign on the holdout**; no
+   significance is demanded there (n ≈ 85 weeks), only that the sign replicates.
+
+### H2 — the EU *share*, not the EU level
+`gas_in_transit_eu` and `gas_in_transit_unknown` enter D-029 as separate levels,
+and the unknown band is the larger (75-83 % of the at-sea stock has no resolved
+destination). If what matters is the *fraction* of cargo bound for Europe, neither
+level carries it and two collinear features with offsetting effects each look like
+noise — precisely the blind spot of a one-at-a-time scan.
+
+    eu_share = gas_in_transit_eu / (gas_in_transit_eu + gas_in_transit_unknown)
+
+**Pre-registered sign: +** (a larger Europe-bound share ⇒ more EU supply landing
+⇒ TTF falls ⇒ HH−TTF rises).
+
+**Measurement-confound gate, specified before looking.** The known/unknown split
+could drift because *coverage* improved, not because cargo re-routed. Regress
+`eu_share` on time over the discovery window; **if that trend explains R² > 0.5 of
+its variance the feature is judged coverage-confounded and H2 is reported VOID**,
+not as a result in either direction.
+
+### H3 — interaction with EU storage
+Extra cargo arriving with EU storage at 90 % does little; the same cargo at 30 %
+is highly price-relevant. A linear fit averages the two worlds and finds nothing —
+which is what D-029 reported. Storage spans 17.67-99.50 % in-sample, so both
+worlds are richly represented.
+
+Regressors: `gas_in_transit_eu`, `eu_storage_pct`, **and their product**, with the
+FWL partial effect taken on the **product term** and both main effects moved into
+the control block.
+
+**Pre-registered sign: −.** The main effect is positive (D-028); "the effect
+strengthens as storage empties" means ∂effect/∂storage < 0, so the interaction
+coefficient is negative.
+
+### H4 — an observable tightness split, not a hidden Markov model
+MODELS.md's B4 proposes a fitted HMM. Tested here in the cheap form first: split
+on an **observable** state and re-run the same scan in each half. An HMM adds
+latent states and free parameters to a question answerable with a variable already
+in the panel; if an observable split finds nothing, the HMM was not going to.
+
+**State:** EU storage relative to its **day-of-year seasonal norm**, the norm
+computed **on the discovery window only** so the split rule is leakage-safe.
+`tight` = storage below its seasonal norm; `loose` = at or above.
+
+**Pre-registered prediction:** the partial effect of `gas_in_transit_eu` is
+**positive and significant in the `tight` half**, and **larger in the tight half
+than in the loose half**. A significant effect in the *loose* half only, or a
+negative effect in the tight half, falsifies H4 rather than supporting it.
+
+### The bar — all four conditions, per hypothesis
+1. |HAC t| > **2.39** (Bonferroni) on **discovery**, at the **primary horizon h = 4**;
+2. sign matches the pre-registered prior above;
+3. year-consistency ≥ ⅔ (D-028's 2022 guard, unchanged);
+4. the sign **replicates on the 2025+ holdout**.
+
+Newey-West lag stays h + 1. Everything else — grid, controls, purge, target —
+is D-028 unchanged, so these tests are directly comparable to D-029.
+
+**Stated prior, for the record.** H3 is the one with a real mechanism behind it
+and is where I would put the money; H2 is cheap and plausible but exposed to the
+coverage confound; H4 is the weakest, because a split halves the sample exactly
+when power is already the binding constraint. **My honest expectation is that all
+three fail**, and that is the outcome the write-up should be prepared for.
+
+---
+
 ## D-030 · 2026-09-05 · **RESULT — H1 is not testable on A1's target; the cost estimate in D-025 was wrong**
 
 **Context.** Running D-025's pre-specified H1 horizon test. `a1_replay` gains a
