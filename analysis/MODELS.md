@@ -672,8 +672,10 @@ one assembler joins all onto the `signal_daily` daily grid into a new `model_pan
    assembler needs a business-day forward-fill, not an inner join.
 2. ✅ **TTF** — **DONE 2026-09-05** (D-026). Yahoo `TTF=F` → `market_series.ttf_front_month`,
    2,234 rows 2017-10-23 → 2026-09-04. Barchart dropped. The **World Bank Pink Sheet**
-   monthly cross-check (CC-BY; the check on `TTF=F`'s continuous-roll discontinuities)
-   is **still outstanding** — rolling download URL, needs a landing-page scrape.
+   monthly cross-check is ✅ **DONE** (`ttf_eu_monthly`, CC-BY): slope 0.9990,
+   R² 0.9999, mean relative difference +0.007 % over 106 months — **the roll is
+   benign and the unit conversion is right, so spread levels are safe to model**
+   (D-027). `make check-ttf-roll`.
 3. ✅ **EUR/USD FX** — **DONE 2026-09-05.** FRED `DEXUSEU` → `market_series.eurusd`,
    2,781 rows from 2016-01-01. Brent (`DCOILBRENTEU`) loaded alongside it.
 4. ✅ **Spread target** — **DONE 2026-09-05.** `spread = HH[$/MMBtu] − TTF[€/MWh]/3.412 ×
@@ -715,8 +717,19 @@ Walk-forward CV, `basis='knowable'`, confidence columns as observation variance.
     live `1/capture` scale-up); replay the vintage log against `physical` for the
     revision-RMSE win. Needs vintage history to have accrued, so it trails A1–A5.
 
-### Track 3 — Part B spread model (after Tracks 1 & 2)
-11. **AR(1)+controls baseline** — the null; FWL partial-effect harness.
+### Track 3 — Part B spread model — **Tracks 1 & 2 are done; this is the live front**
+10b. ✅ **`model_panel` assembled** — **DONE 2026-09-05** (D-027). 20 features,
+   77,500 rows, 2016-01-01 → 2026-08-10; **2,764 fully-complete days from 2018-01**.
+   Forward-filled onto a daily grid (never inner-joined — HH prints on 68.9 % of
+   days) with each source's **publication lag** applied, so a row is what a model
+   standing on that date could see. `make model-panel`; `load_wide()` returns the
+   DataFrame. **Feature-set amendment (D-027): `spread_thrust`,
+   `implied_storage_build`, `diversion_arbitrage` and `declared_eu_share` are
+   live-only** (9-46 daily observations — they need EU anchorage events GFW does
+   not carry) **and are therefore not Part B features.** The decade-deep
+   primitives plus `net_export_pressure` (1,770 rows) carry the same information,
+   with the weights fitted rather than imposed.
+11. **AR(1)+controls baseline** — the null; FWL partial-effect harness. **Next.**
 12. **BSTS (B2)** with spike-and-slab over the pre-registered signals + controls,
     confidence-weighted; cross-check Elastic Net (B1) + PLS (B3). Report posterior
     inclusion probabilities + predictive intervals. Two-stage: feed the Part A nowcast in.

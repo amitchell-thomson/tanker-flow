@@ -275,6 +275,104 @@ digit. 341 tests pass, ruff clean; 16 new tests in `tests/test_a1.py`.
 
 ---
 
+## D-027 · 2026-09-05 · Panel assembled; the TTF roll is benign; four composites are unusable
+
+**Context.** Building `data/model_panel.py`, the single aligned daily grid Part B
+reads. Two findings landed on the way, one reassuring and one not.
+
+### Finding 1 — the TTF roll is benign, and the unit conversion is right
+D-026 left the World Bank Pink Sheet cross-check outstanding. It is now built
+(`ttf_eu_monthly`, CC BY 4.0) and run (`make check-ttf-roll`). Because the Pink
+Sheet publishes European gas **already in $/MMBtu**, regressing our converted
+daily series (resampled monthly) on it tests the `/3.412 × EUR/USD` conversion
+**and** the continuous-roll distortion at once. Over **106 months, 2017-11 →
+2026-08**:
+
+| statistic | value | reading |
+|---|---|---|
+| slope | **0.9990** | no scale distortion |
+| intercept | **0.0147 $/MMBtu** | no offset |
+| R² | **0.9999** | |
+| mean relative difference | **+0.007 %** | a systematic roll bias would appear here |
+| median abs. difference | 0.162 % (p90 0.569 %) | |
+| worst month | 2021-12, +2.0 % | |
+
+**Decision: model spread *levels* on the rolled daily series; no roll adjustment,
+no cash series needed.** Honest limit: this compares *monthly means*, so an
+intra-month roll step that averages out is invisible to it — but a systematic
+one would show as bias in the mean, and there is none at 0.007 %.
+
+The pinned Pink Sheet URL carries a rolling document id, and **a stale id returns
+HTTP 200 with a truncated file rather than 404** — the classic `…-0350012021/…`
+link still served data ending 2024M12 when checked today. The loader now warns
+when the newest period is more than `WORLDBANK_STALE_AFTER_DAYS` old, so the
+silent truncation becomes loud.
+
+### Finding 2 — four of the five pre-registered Part B composites are unusable
+MODELS.md Part B names four composites as features and §Part C #8 pre-registers
+`spread_thrust` among the signals to believe. Measured on `basis='knowable'`:
+
+| composite | rows | span |
+|---|---|---|
+| `net_export_pressure` | **1,770** | 2016-06-10 → 2026-08-05 |
+| `implied_storage_build` | 46 | 2026-05-06 → 2026-08-06 |
+| `spread_thrust` | 29 | 2026-04-19 → 2026-08-05 |
+| `declared_eu_share` | 10 | 2026-07-15 → 2026-08-08 |
+| `diversion_arbitrage` | 9 | 2026-07-18 → 2026-08-08 |
+
+**Cause, and it is structural, not a bug.** These composites read EU queue and
+absorption signals, which need EU *anchorage* events. GFW carries no anchorage
+events (CLAUDE.md, `queues.py`), so EU queues are live-only — they begin at the
+2026-05-30 cutover. `net_export_pressure` survives because both its legs are US,
+where NOAA reconstructs anchorages back to 2016.
+
+**Decision: Part B's pre-registered feature set is amended to the decade-deep
+primitives plus `net_export_pressure`.** This is an amendment made *before any
+spread fit*, on a data-availability criterion, not on observed skill — logged
+rather than silently applied. The three live-only composites are not dropped from
+`SIGNALS.md`; they are simply not Part B features, because 29 daily observations
+cannot support one. **This does not weaken the thesis**: the composites are
+arithmetic combinations of primitives the panel already carries, so a regularised
+fit over the primitives spans the same space and lets the data choose the weights
+rather than imposing them.
+
+### The panel itself
+`model_panel` (migration `c8d3f0a2b5e7`), tidy `(bucket_date, feature, value)`
+like `signal_daily`, so a new feature never migrates a schema. **20 features,
+77,500 rows, 2016-01-01 → 2026-08-10; 3,144 days from 2018-01 of which 2,764 are
+complete on every column.** Three design points, each a way the panel could have
+been silently wrong:
+
+1. **Forward-fill, never an inner join.** HH spot prints on 68.9 % of days; an
+   inner join drops a third of history and says nothing. Each series carries
+   forward with a per-cadence staleness ceiling, so a *discontinued* feed goes
+   NULL instead of flat-lining a constant "signal" forever.
+2. **Publication lag.** Every source declares when its value was *public*, not
+   what it describes: EIA weekly storage is shifted +6 d (week ending Friday,
+   published the next Thursday), EIA daily HH +1 d, AGSI+ +1 d. Without this the
+   panel leaks days of the future into every walk-forward test. Signals declare
+   **0** because the `knowable` basis is already point-in-time — lagging them
+   again would double-count.
+   **Degree days are deliberately unlagged**, though ERA5 publishes ~5 d behind:
+   their job is to be *partialled out* (FWL), so the question is what the weather
+   that actually happened explains, not what was knowable. A live predictor must
+   come from a forecast feed, not from this column.
+3. **Aggregation differs by signal type.** Volumes **sum** across bands; durations
+   take an **`n_legs`-weighted mean** — a 40 h wait on 2 vessels and a 100 h wait
+   on 10 average to 90, not 70. Either error yields a plausible, wrong series.
+
+**Verified (2026-09-05, live DB).** The two extremes of the assembled target land
+exactly on the two events they should: the most positive spread is **2021-02-18,
+HH $23.86** (Winter Storm Uri) and the most negative is **2022-08-26, TTF $99.39**
+(the European gas crisis peak, the day TTF touched ~€340/MWh). 538 tests pass,
+ruff clean; 29 new tests across the loader and the assembler.
+
+**Consequence for sequencing.** Part B is unblocked with no further data work.
+Next is the AR(1)+controls null and the FWL partialling harness — the null before
+the model, per the D-024 lesson that naive baselines are stronger than they look.
+
+---
+
 ## D-026 · 2026-09-05 · Track 1 control set built — TTF sourced free, Barchart dropped
 
 **Context.** Part B was blocked on the §2 target + control set. Only EIA Phase 2
