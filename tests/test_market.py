@@ -18,6 +18,7 @@ from data.market import (
     merge_rows,
     parse_agsi_records,
     parse_fred_observations,
+    parse_worldbank_grid,
     parse_yahoo_chart,
     start_date_for,
     weighted_temperature,
@@ -26,6 +27,7 @@ from data.market import (
 TTF = SERIES["ttf_front_month"]
 EURUSD = SERIES["eurusd"]
 STORAGE = SERIES["eu_storage_full"]
+WB = SERIES["ttf_eu_monthly"]
 HDD_NWE = SERIES["hdd_nwe"]
 CDD_NWE = SERIES["cdd_nwe"]
 
@@ -231,4 +233,72 @@ def test_registry_keys_match_their_series_id():
 
 
 def test_every_series_has_a_known_source():
-    assert {s.source for s in SERIES.values()} <= {"yahoo", "fred", "agsi", "openmeteo"}
+    assert {s.source for s in SERIES.values()} <= {
+        "yahoo",
+        "fred",
+        "agsi",
+        "openmeteo",
+        "worldbank",
+    }
+
+
+# --- World Bank Pink Sheet ----------------------------------------------------
+
+# Preamble rows, a two-row header, then YYYYMmm periods — the real sheet's shape,
+# with the target commodity deliberately NOT in a fixed column.
+WB_GRID = [
+    ["World Bank Commodity Price Data", None, None, None],
+    [None, None, None, None],
+    [None, None, None, None],
+    [None, None, None, None],
+    [None, "Crude oil, Brent", "Natural gas, US", "Natural gas, Europe"],
+    [None, "($/bbl)", "($/mmbtu)", "($/mmbtu)"],
+    ["2016M01", 30.8, 2.31, 4.398186],
+    ["2016M02", 32.2, 1.99, 3.968379],
+    ["2026M08", 70.1, 2.80, 21.11],
+]
+
+
+def test_parse_worldbank_grid_finds_column_by_header():
+    rows = parse_worldbank_grid(WB_GRID, WB)
+    assert [r.period for r in rows] == [
+        date(2016, 1, 1),
+        date(2016, 2, 1),
+        date(2026, 8, 1),
+    ]
+    # Must read 'Natural gas, Europe' (col 3), not the adjacent US gas column.
+    assert [r.value for r in rows] == [4.398186, 3.968379, 21.11]
+    assert rows[0].unit == "$/MMBtu"
+    assert rows[0].frequency == "monthly"
+
+
+def test_parse_worldbank_grid_survives_column_reordering():
+    """The World Bank reorders commodities between editions; a fixed column index
+    would silently start reading a different commodity instead of failing."""
+    reordered = [list(reversed(row)) for row in WB_GRID]
+    # Period labels now sit last, so re-front them to keep the sheet's shape.
+    reordered = [[orig[0]] + row[:-1] for orig, row in zip(WB_GRID, reordered)]
+    rows = parse_worldbank_grid(reordered, WB)
+    assert [r.value for r in rows] == [4.398186, 3.968379, 21.11]
+
+
+def test_parse_worldbank_grid_raises_when_column_absent():
+    """A renamed column must fail loudly, not return an empty series that looks
+    like a load failure."""
+    grid = [[r[0], r[1], r[2]] for r in WB_GRID]  # drop the Europe column
+    try:
+        parse_worldbank_grid(grid, WB)
+    except ValueError as e:
+        assert "Natural gas, Europe" in str(e)
+    else:
+        raise AssertionError("expected ValueError for a missing column")
+
+
+def test_parse_worldbank_grid_ignores_non_period_rows():
+    rows = parse_worldbank_grid(WB_GRID, WB)
+    assert len(rows) == 3  # the 6 preamble/header rows are not data
+
+
+def test_parse_worldbank_grid_handles_single_digit_months():
+    grid = WB_GRID[:6] + [["2020M7", 1.0, 2.0, 3.0]]
+    assert parse_worldbank_grid(grid, WB)[0].period == date(2020, 7, 1)
