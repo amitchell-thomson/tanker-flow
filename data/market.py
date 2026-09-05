@@ -42,7 +42,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import io
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 
@@ -71,6 +73,25 @@ DEGREE_DAY_BASE_C = 18.3
 # this covers it with a run-up. Recorded as a constant so the gap is explicit in
 # code rather than discovered as a surprise NULL in the assembler.
 TTF_HISTORY_STARTS = date(2017, 10, 23)
+
+# World Bank Pink Sheet monthly commodity prices. Two things make this series
+# worth carrying despite being monthly: it is **CC BY 4.0** — the only price
+# series here we may redistribute — and it publishes European gas already in
+# $/MMBtu, so it cross-checks BOTH the EUR/MWh -> $/MMBtu conversion and the
+# continuous-roll discontinuities in the daily `TTF=F` series (scripts/check_ttf_roll.py).
+#
+# The document id in this URL ROLLS when the World Bank republishes. A stale id
+# keeps returning HTTP 200 with a truncated file rather than 404ing — the classic
+# `...-0350012021/...` link still served data ending 2024M12 when checked on
+# 2026-09-05. `WORLDBANK_STALE_AFTER_DAYS` turns that silent truncation into a
+# loud warning; refresh the id from the "Pink Sheet" links on
+# https://www.worldbank.org/en/research/commodity-markets when it fires.
+WORLDBANK_PINK_SHEET_URL = (
+    "https://thedocs.worldbank.org/en/doc/"
+    "74e8be41ceb20fa0da750cda2f6b9e4e-0050012026/related/CMO-Historical-Data-Monthly.xlsx"
+)
+WORLDBANK_SHEET = "Monthly Prices"
+WORLDBANK_STALE_AFTER_DAYS = 120
 
 
 # --- Degree-day demand centres -----------------------------------------------
@@ -183,6 +204,15 @@ SERIES: dict[str, MarketSeries] = {
         description="NW Europe weighted cooling degree days (base 18.3C)",
         spec={"points": NWE_DEGREE_DAY_POINTS, "kind": "cdd"},
     ),
+    # --- Redistributable monthly cross-check --------------------------------
+    "ttf_eu_monthly": MarketSeries(
+        key="ttf_eu_monthly",
+        source="worldbank",
+        frequency="monthly",
+        unit="$/MMBtu",
+        description="World Bank Pink Sheet 'Natural gas, Europe' (TTF) — CC BY 4.0",
+        spec={"url": WORLDBANK_PINK_SHEET_URL, "column": "Natural gas, Europe"},
+    ),
 }
 
 
@@ -274,6 +304,57 @@ def parse_agsi_records(records: list[dict], series: MarketSeries) -> list[Market
                 series_id=series.key,
                 period=datetime.strptime(raw_date, "%Y-%m-%d").date(),
                 value=_coerce(rec.get(field_name)),
+                unit=series.unit,
+                frequency=series.frequency,
+                source=series.source,
+            )
+        )
+    return rows
+
+
+PERIOD_RE = re.compile(r"^(\d{4})M(\d{1,2})$")
+
+
+def parse_worldbank_grid(
+    grid: list[list[object]], series: MarketSeries
+) -> list[MarketRow]:
+    """Pure: the Pink Sheet's raw cell grid -> rows for one named commodity.
+
+    The sheet has several preamble rows, then a two-row header (commodity name,
+    then unit), then `YYYYMmm` period labels down column 0. The commodity column
+    is located **by header text**, not by a fixed index, because the World Bank
+    adds and reorders commodities between editions — a hardcoded column silently
+    starts reading a different commodity rather than failing.
+    """
+    wanted = str(series.spec["column"]).strip().casefold()
+    col = None
+    for row in grid:
+        for idx, cell in enumerate(row):
+            if isinstance(cell, str) and cell.strip().casefold() == wanted:
+                col = idx
+                break
+        if col is not None:
+            break
+    if col is None:
+        raise ValueError(
+            f"column {series.spec['column']!r} not found in the Pink Sheet — "
+            "the edition may have renamed it"
+        )
+
+    rows: list[MarketRow] = []
+    for row in grid:
+        if not row:
+            continue
+        match = PERIOD_RE.match(str(row[0]).strip())
+        if not match:
+            continue
+        year, month = int(match.group(1)), int(match.group(2))
+        value = _coerce(row[col]) if col < len(row) else None
+        rows.append(
+            MarketRow(
+                series_id=series.key,
+                period=date(year, month, 1),
+                value=value,
                 unit=series.unit,
                 frequency=series.frequency,
                 source=series.source,
@@ -468,16 +549,57 @@ async def _fetch_openmeteo(
     return degree_days(weighted_temperature(per_point, points), series)
 
 
+async def _fetch_worldbank(
+    client: httpx.AsyncClient, series: MarketSeries, start: date
+) -> list[MarketRow]:
+    """Download the Pink Sheet workbook and parse one commodity column.
+
+    `start` filters after parsing rather than before: the workbook is a single
+    small file covering 1960-present, so there is nothing to page or bound.
+    """
+    import pandas as pd
+
+    resp = await client.get(series.spec["url"], follow_redirects=True)
+    resp.raise_for_status()
+    frame = pd.read_excel(
+        io.BytesIO(resp.content), sheet_name=WORLDBANK_SHEET, header=None
+    )
+    rows = [
+        r
+        for r in parse_worldbank_grid(frame.values.tolist(), series)
+        if r.period >= start
+    ]
+    if rows:
+        newest = max(r.period for r in rows)
+        if (date.today() - newest).days > WORLDBANK_STALE_AFTER_DAYS:
+            logger.warning(
+                "[%s] Pink Sheet ends %s — the pinned document id is likely stale. "
+                "Refresh WORLDBANK_PINK_SHEET_URL from "
+                "https://www.worldbank.org/en/research/commodity-markets",
+                series.key,
+                newest,
+            )
+    return rows
+
+
 FETCHERS = {
     "yahoo": _fetch_yahoo,
     "fred": _fetch_fred,
     "agsi": _fetch_agsi,
     "openmeteo": _fetch_openmeteo,
+    "worldbank": _fetch_worldbank,
 }
 
 # Trailing days re-pulled on an incremental run so late-arriving or revised
 # vendor values overwrite ours. ERA5 is the slow one (~5 day publication lag).
-REVISION_WINDOW_DAYS = {"yahoo": 7, "fred": 14, "agsi": 14, "openmeteo": 21}
+# The Pink Sheet revises published months, so re-pull a couple of them.
+REVISION_WINDOW_DAYS = {
+    "yahoo": 7,
+    "fred": 14,
+    "agsi": 14,
+    "openmeteo": 21,
+    "worldbank": 90,
+}
 
 
 def _provider_key_missing(series: MarketSeries) -> str | None:
@@ -574,7 +696,10 @@ async def probe(key: str) -> None:
     if missing:
         logger.error("%s is empty — set it in .env to probe %s", missing, key)
         return
-    start = max(date.today() - timedelta(days=30), PANEL_START)
+    # A 30-day window shows nothing for a monthly series, so scale the probe to
+    # the series' own cadence.
+    lookback = {"monthly": 400, "weekly": 120}.get(series.frequency, 30)
+    start = max(date.today() - timedelta(days=lookback), PANEL_START)
     if series.source == "yahoo":
         start = max(start, TTF_HISTORY_STARTS)
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:

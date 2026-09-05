@@ -1,4 +1,4 @@
-.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events backfill-noaa backfill-noaa-reload backfill-gfw backfill-gfw-dry reconcile reconcile-dry scoring signals a1-replay a2-replay a5-replay a4-replay validate-signals vf-rescue vf-rescue-dry vf-status refresh-fleet discover discover-dry discover-berths discover-berths-dry complete-registry complete-registry-dry complete-registry-sample retire-stale retire-stale-dry backup eia eia-full market market-full capture-rate coverage
+.PHONY: up down db-ui psql logs reset seed-terminals seed-zones seed-unlocodes viz ingest enrich port-events backfill-noaa backfill-noaa-reload backfill-gfw backfill-gfw-dry reconcile reconcile-dry scoring signals a1-replay a2-replay a5-replay a4-replay validate-signals vf-rescue vf-rescue-dry vf-status refresh-fleet discover discover-dry discover-berths discover-berths-dry complete-registry complete-registry-dry complete-registry-sample retire-stale retire-stale-dry backup eia eia-full market market-full model-panel check-ttf-roll capture-rate coverage
 
 up:
 	docker compose up -d
@@ -157,6 +157,18 @@ market:
 
 market-full:
 	uv run python -m data.market --full
+
+# Assemble the Part B modelling panel: spread target + controls + tanker signals
+# on one aligned daily grid -> model_panel (TRUNCATE + rebuild). Forward-fills
+# onto the daily grid and applies each source's publication lag, so a row is what
+# a model standing on that date could actually see. `--summary` prints coverage.
+model-panel:
+	uv run python -m data.model_panel --summary
+
+# Cross-check the daily rolled TTF against the World Bank Pink Sheet's
+# independent monthly $/MMBtu benchmark (roll + unit-conversion validation).
+check-ttf-roll:
+	uv run python -m scripts.check_ttf_roll
 
 # Read-only capture-rate report: captured US LNG-export departures vs the
 # EIA-implied cargo count per month (needs `make eia` first). Lands dark until
