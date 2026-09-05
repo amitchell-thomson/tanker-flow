@@ -70,6 +70,15 @@ PIT_SEED = 20260810
 HORIZONS = {"W1": W1, "W2": W2}
 
 
+def build_horizons(n_weeks: int) -> dict[str, tuple[float, float]]:
+    """Consecutive one-week duration windows `W1..Wn`, `Wk = ((k-1)*7, k*7]`.
+
+    `n_weeks=2` reproduces the D-013 default exactly, so extending the horizon
+    grid for D-025's H1 test cannot silently change the original scorecard.
+    """
+    return {f"W{k}": ((k - 1) * 7.0, k * 7.0) for k in range(1, n_weeks + 1)}
+
+
 @dataclass(frozen=True)
 class ReplayRow:
     """One (as_of, horizon, regime) scored observation."""
@@ -119,12 +128,14 @@ def replay(
     lane: LaneFilter,
     grid: list[datetime],
     regimes: list[str],
+    horizons: dict[str, tuple[float, float]] | None = None,
 ) -> list[ReplayRow]:
     """Walk the grid and score. Pure given the loaded inputs.
 
     `truth_legs` is the hindsight leg set (D-011); `events` is the same underlying
     event stream, sliced per as-of to rebuild the point-in-time view.
     """
+    horizons = HORIZONS if horizons is None else horizons
     rng = random.Random(PIT_SEED)
     times = [e.event_time for e in events]  # events pre-sorted by caller
     rows: list[ReplayRow] = []
@@ -139,7 +150,7 @@ def replay(
         )
         for regime in regimes:
             curves: dict[tuple[str, str], ArrivalCurve] = {}
-            for name, (u0, u1) in HORIZONS.items():
+            for name, (u0, u1) in horizons.items():
                 fs = forecast_window(
                     legs, as_of, lane, u0=u0, u1=u1, curves=curves, regime=regime
                 )
@@ -279,18 +290,23 @@ def fmt(sc: Scorecard) -> str:
 def report(rows: list[ReplayRow], primary_regime: str) -> None:
     print(f"\n{'=' * 124}\nA1 REPLAY SCORECARD")
     print(f"{'=' * 124}")
-    print(f"scored observations: {len(rows)}   "
-          f"regimes: {sorted({r.regime for r in rows})}   "
-          f"span: {min(r.as_of for r in rows):%Y-%m-%d} -> "
-          f"{max(r.as_of for r in rows):%Y-%m-%d}")
+    print(
+        f"scored observations: {len(rows)}   "
+        f"regimes: {sorted({r.regime for r in rows})}   "
+        f"span: {min(r.as_of for r in rows):%Y-%m-%d} -> "
+        f"{max(r.as_of for r in rows):%Y-%m-%d}"
+    )
     unsupported = [r for r in rows if not r.supported]
     beyond = sum(r.n_beyond_support for r in rows)
-    print(f"unsupported-curve rows: {len(unsupported)} (excluded from headline)   "
-          f"legs beyond curve support: {beyond}")
+    print(
+        f"unsupported-curve rows: {len(unsupported)} (excluded from headline)   "
+        f"legs beyond curve support: {beyond}"
+    )
 
     rows = [r for r in rows if r.supported]
 
-    for horizon in ("W1", "W2"):
+    horizon_names = sorted({r.horizon for r in rows}, key=lambda h: int(h[1:]))
+    for horizon in horizon_names:
         hr = [r for r in rows if r.horizon == horizon]
         if not hr:
             continue
@@ -317,8 +333,10 @@ def report(rows: list[ReplayRow], primary_regime: str) -> None:
 
         hist = pit_histogram(pr)
         total = sum(hist) or 1
-        print(f"\n  PIT histogram ({primary_regime}, seed={PIT_SEED}) — "
-              f"uniform => calibrated:")
+        print(
+            f"\n  PIT histogram ({primary_regime}, seed={PIT_SEED}) — "
+            f"uniform => calibrated:"
+        )
         for i, c in enumerate(hist):
             bar = "#" * round(40 * c / total * len(hist))
             print(f"    [{i / 10:.1f},{(i + 1) / 10:.1f})  {c:4d}  {bar}")
@@ -331,14 +349,130 @@ def report(rows: list[ReplayRow], primary_regime: str) -> None:
         return
     a = sc.beats_persistence and sc.beats_climatology
     b = 0.70 <= sc.cov80 <= 0.90
-    print(f"  (a) W1 MAE beats BOTH nulls  : A1 {sc.a1_mae:.3f} vs "
-          f"persist {sc.persist_mae:.3f}, clim {sc.clim_mae:.3f}  -> "
-          f"{'PASS' if a else 'FAIL'}")
-    print(f"  (b) 80% coverage in [70,90]% : {sc.cov80:.1%}  -> "
-          f"{'PASS' if b else 'FAIL'}")
+    print(
+        f"  (a) W1 MAE beats BOTH nulls  : A1 {sc.a1_mae:.3f} vs "
+        f"persist {sc.persist_mae:.3f}, clim {sc.clim_mae:.3f}  -> "
+        f"{'PASS' if a else 'FAIL'}"
+    )
+    print(
+        f"  (b) 80% coverage in [70,90]% : {sc.cov80:.1%}  -> {'PASS' if b else 'FAIL'}"
+    )
     print(f"\n  VERDICT: {'A1 WORKS' if a and b else 'A1 does NOT meet the bar'}")
     if a and not b:
         print("  (point baseline stands; the calibration gap is A3's opening — D-003)")
+
+
+def report_h1(rows: list[ReplayRow], primary_regime: str) -> None:
+    """Grade D-025's H1 horizon hypothesis — pre-specified 2026-08-12.
+
+    H1's claim: the pipeline signal's lead is *mechanical*. A US->EU voyage takes
+    14-18 d, so cargo at sea today determines EU arrivals two to three weeks out,
+    while the naive nulls (which never extrapolate) should decay as `h` grows.
+    Skill should therefore RISE with `h` and peak around h = 2-3.
+
+    The three pre-specified predictions, graded verbatim:
+      P1  skill over the nulls increasing across h = 1..4, peaking at h ~ 2-3
+      P3  the nulls degrade monotonically in h
+          -- if P3 fails the premise is wrong and H1 is abandoned, not patched
+    (P2 concerns US loadings on the A2/A4 harness and is not scored here.)
+    """
+    rows = [r for r in rows if r.supported and r.regime == primary_regime]
+    names = sorted({r.horizon for r in rows}, key=lambda h: int(h[1:]))
+    cards = {h: score([r for r in rows if r.horizon == h], h) for h in names}
+
+    print(f"\n{'=' * 124}\nD-025 H1 — HORIZON HYPOTHESIS (pre-specified 2026-08-12)")
+    print(f"{'=' * 124}")
+    print(f"  regime={primary_regime}\n")
+    print(
+        f"  {'h':<5}{'n':>6}{'truth':>8}{'A1 MAE':>9}{'persist':>9}{'clim':>8}"
+        f"{'skill vs best null':>21}{'cov80':>8}"
+    )
+    print("  " + "-" * 74)
+    skills: list[float] = []
+    for h in names:
+        sc = cards[h]
+        best_null = min(sc.persist_mae, sc.clim_mae)
+        skill = (best_null - sc.a1_mae) / best_null if best_null else float("nan")
+        skills.append(skill)
+        print(
+            f"  {h:<5}{sc.n:>6}{sc.mean_truth:>8.2f}{sc.a1_mae:>9.3f}"
+            f"{sc.persist_mae:>9.3f}{sc.clim_mae:>8.3f}{skill:>20.1%}{sc.cov80:>8.1%}"
+        )
+
+    # Comparability guard. A1's target is CONDITIONAL on legs already at sea
+    # (D-001); both nulls are the last fully-elapsed UNCONDITIONAL weekly count
+    # and carry no horizon at all. Those coincide while the window still holds
+    # most of the at-sea stock (W1/W2: the minimum observed US->EU laden voyage
+    # is 7.04 d), but past the voyage-time tail the conditional truth empties
+    # toward zero while the nulls keep predicting the full weekly rate. "Skill"
+    # then measures the target changing meaning, not a better forecast, so it is
+    # flagged rather than reported as a win.
+    base_truth = cards[names[0]].mean_truth
+    incomparable = [
+        h for h in names if base_truth > 0 and cards[h].mean_truth < 0.5 * base_truth
+    ]
+    if incomparable:
+        last = cards[incomparable[-1]]
+        print(
+            f"\n  !! NOT COMPARABLE at {', '.join(incomparable)}: mean truth falls "
+            f"from {base_truth:.2f} (W1) to {last.mean_truth:.2f},"
+            f"\n     while the nulls stay unconditional ({last.persist_mae:.2f} MAE). "
+            f"A1's target is conditional on"
+            f"\n     legs already at sea; past the voyage tail it empties toward zero "
+            f"and the nulls are"
+            f"\n     answering a different question. The skill column is an ARTEFACT "
+            f"there, not a win."
+        )
+
+    # P3: the premise. If the nulls do not decay, D-025 says abandon, not patch.
+    persist = [cards[h].persist_mae for h in names]
+    clim = [cards[h].clim_mae for h in names]
+    p3_persist = all(b >= a for a, b in zip(persist, persist[1:]))
+    p3_clim = all(b >= a for a, b in zip(clim, clim[1:]))
+    p3 = p3_persist and p3_clim
+
+    peak_idx = max(range(len(skills)), key=lambda i: skills[i])
+    peak = names[peak_idx]
+    rising = (
+        all(b >= a for a, b in zip(skills[:2], skills[1:3]))
+        if len(skills) >= 3
+        else False
+    )
+    p1 = rising and peak in ("W2", "W3")
+
+    peak_card = cards[peak]
+    beats_both = peak_card.beats_persistence and peak_card.beats_climatology
+    cov_ok = 0.70 <= peak_card.cov80 <= 0.90
+
+    print(
+        f"\n  P3  nulls degrade monotonically in h : "
+        f"persistence {'yes' if p3_persist else 'NO'}, "
+        f"climatology {'yes' if p3_clim else 'NO'}  -> {'PASS' if p3 else 'FAIL'}"
+    )
+    if not p3:
+        print("      D-025: 'if they do not, the premise is wrong and H1 should be")
+        print("      abandoned rather than pursued.' The nulls do not decay with h,")
+        print("      so H1's mechanism has no room to operate on this target.")
+    print(
+        f"  P1  skill rises and peaks at h~2-3   : peak at {peak} "
+        f"({skills[peak_idx]:+.1%}), rising={rising}  -> {'PASS' if p1 else 'FAIL'}"
+    )
+    print(
+        f"  Bar (a) peak-horizon MAE beats BOTH nulls : "
+        f"A1 {peak_card.a1_mae:.3f} vs persist {peak_card.persist_mae:.3f}, "
+        f"clim {peak_card.clim_mae:.3f}  -> {'PASS' if beats_both else 'FAIL'}"
+    )
+    print(
+        f"  Bar (b) 80% coverage in [70,90]%          : "
+        f"{peak_card.cov80:.1%}  -> {'PASS' if cov_ok else 'FAIL'}"
+    )
+    if incomparable:
+        verdict = "H1 NOT TESTABLE on this target — see the comparability note"
+    elif p3 and p1 and beats_both and cov_ok:
+        verdict = "H1 SUPPORTED"
+    else:
+        verdict = "H1 NOT SUPPORTED"
+    print(f"\n  VERDICT: {verdict}")
 
 
 # ----------------------------------------------------------------------
@@ -376,6 +510,13 @@ async def main() -> None:
     ap.add_argument("--start", default=GRID_START.date().isoformat())
     ap.add_argument("--regimes", default="noaa,gfw")
     ap.add_argument("--primary", default="noaa")
+    ap.add_argument(
+        "--horizons",
+        type=int,
+        default=2,
+        help="Number of consecutive weekly windows W1..Wn (default 2 = D-013; "
+        "4 runs D-025's H1 horizon test)",
+    )
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -383,25 +524,41 @@ async def main() -> None:
     try:
         lane, events, weights = await load(pool)
         data_max = events[-1].event_time
-        # Last as-of whose W2 window is fully observed.
-        grid_end = data_max - timedelta(days=W2[1])
+        horizons = build_horizons(args.horizons)
+        # Last as-of whose LONGEST window is fully observed. Using W2 here would
+        # score W3/W4 against truth that has not happened yet.
+        max_u1 = max(u1 for _, u1 in horizons.values())
+        grid_end = data_max - timedelta(days=max_u1)
         start = datetime.fromisoformat(args.start).replace(tzinfo=UTC)
         grid = mondays(start, grid_end)
         logger.info(
             "events=%d  data_max=%s  grid=%d weekly as-ofs %s -> %s",
-            len(events), f"{data_max:%Y-%m-%d}", len(grid),
-            f"{grid[0]:%Y-%m-%d}", f"{grid[-1]:%Y-%m-%d}",
+            len(events),
+            f"{data_max:%Y-%m-%d}",
+            len(grid),
+            f"{grid[0]:%Y-%m-%d}",
+            f"{grid[-1]:%Y-%m-%d}",
         )
         truth_legs = pair_legs(
-            events, data_max + timedelta(days=1),
-            weights=weights, fallback_region=FALLBACK_DEST_REGION,
+            events,
+            data_max + timedelta(days=1),
+            weights=weights,
+            fallback_region=FALLBACK_DEST_REGION,
         )
         logger.info("hindsight legs for truth: %d", len(truth_legs))
 
         rows = replay(
-            events, weights, truth_legs, lane, grid, args.regimes.split(",")
+            events,
+            weights,
+            truth_legs,
+            lane,
+            grid,
+            args.regimes.split(","),
+            horizons=horizons,
         )
         report(rows, args.primary)
+        if len(horizons) > 2:
+            report_h1(rows, args.primary)
     finally:
         await pool.close()
 

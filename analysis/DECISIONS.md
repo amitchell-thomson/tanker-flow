@@ -275,6 +275,85 @@ digit. 341 tests pass, ruff clean; 16 new tests in `tests/test_a1.py`.
 
 ---
 
+## D-030 · 2026-09-05 · **RESULT — H1 is not testable on A1's target; the cost estimate in D-025 was wrong**
+
+**Context.** Running D-025's pre-specified H1 horizon test. `a1_replay` gains a
+`--horizons N` flag building `Wk = ((k-1)·7, k·7]`; **the default N = 2 reproduces
+D-013 byte-for-byte** (W1 MAE 2.314 vs persist 2.217, clim 1.814, coverage 73.7 %)
+so the extension cannot have disturbed the original scorecard.
+
+### What came back (regime `noaa`, 446 weekly as-ofs)
+
+| h | mean truth | A1 MAE | persist | clim | skill vs best null | cov80 |
+|---|---|---|---|---|---|---|
+| W1 | 5.89 | 2.324 | 2.226 | 1.822 | **−27.5 %** | 73.5 % |
+| W2 | 5.49 | 2.121 | 2.052 | 1.773 | **−19.6 %** | 76.0 % |
+| W3 | 1.98 | 1.170 | 4.146 | 4.058 | *+71.2 %* | 85.9 % |
+| W4 | 0.75 | 0.691 | 5.247 | 5.208 | *+86.7 %* | 94.2 % |
+
+**P3 — "the nulls must degrade monotonically in h" — FAILS.** Both nulls get
+*worse* in MAE (2.23 → 5.25), and D-025 pre-committed that this outcome means the
+premise is wrong and H1 is abandoned rather than patched.
+
+### The W3/W4 "skill" is an artefact, and the diagnosis is the finding
+
+**A1's target is conditional; the nulls are unconditional.** D-001 defined the
+target as arrivals *among legs already departed at `as_of`*. Both nulls
+(`persistence_null`, `climatology_null`) are the last fully-elapsed **weekly
+arrival count**, carrying no horizon argument at all.
+
+Those two coincide while the window still contains most of the at-sea stock — the
+minimum observed US→EU laden voyage is 7.04 d, so essentially nothing arrives
+inside W1 that had not already departed, which is exactly why D-001's conditional
+target was legitimate at W1/W2. Past the voyage-time tail (median 14.75 d, p90
+24.7 d) the conditional truth **empties toward zero** — 5.89 → 0.75 arrivals —
+while the nulls keep predicting the full ~5.2/week rate.
+
+So at W3/W4, A1 is not forecasting better; it is forecasting a *different, much
+smaller quantity* than the nulls are. **+86.7 % measures the target changing
+meaning.** The harness now detects this (mean truth below half the W1 level) and
+prints a NOT COMPARABLE banner, so the number cannot be quoted as a win by anyone
+reading the output later — including me.
+
+**Corrected verdict: H1 NOT TESTABLE on this target**, not "H1 refuted".
+
+### The part that *is* comparable is weakly against H1
+Within W1→W2, where the conditional and unconditional targets still agree, skill
+moves **−27.5 % → −19.6 %**. Directionally that is H1's prediction (skill rising
+with `h`), but it rises from "much worse than the null" to "clearly worse than the
+null". There is no horizon in the comparable region where A1 approaches the bar.
+
+### D-025's cost estimate was wrong, and why that matters
+D-025 said H1 was "**~1 day; all four harnesses already parameterise `u0`/`u1`**".
+The parameterisation was indeed trivial — an afternoon. The blocker is not
+plumbing: **the target itself changes meaning with `h`**, so a valid test needs a
+different target, not a wider window.
+
+**What a valid H1 test requires.** An *unconditional* h-week-ahead EU arrival
+forecast: A1's conditional term (legs already at sea) **plus a departure-process
+term** for legs not yet departed, with the nulls scored against that same
+unconditional target. D-001 anticipated exactly this and deferred it: "folding a
+climatological departure top-up into A1 blurs the A1/A2 boundary for a tail that
+matters only in W₂ … A2 will later compose with it for the unconditional
+forecast." That composition was never built. At W1/W2 the not-yet-departed tail is
+~0 and could be ignored; at W3/W4 it is *most of the answer*, which is why the
+composition stops being optional precisely where H1 wants to look.
+
+**Decision: H1 is parked, not pursued.** Building the A1×A2 composition is a
+genuine modelling task, and D-029 has just reported that the spread — the thing
+any arrival forecast would ultimately feed — shows no linear response to these
+signals at all. Spending that effort to sharpen an input whose downstream consumer
+found nothing is the wrong order. **If Part B's untested variants (non-linearity,
+regimes, joint fits — D-029) turn up a live channel, H1 becomes worth building
+against that specific channel.** Logged now so the ordering is a decision on
+record rather than an omission.
+
+**Verified (2026-09-05, live DB).** `make a1-replay` unchanged; `make a1-h1`
+reproduces the table above. Default-horizon regression asserted against D-013's
+published figures. 570 tests pass, ruff clean.
+
+---
+
 ## D-029 · 2026-09-05 · **RESULT — the spread is a random walk at h = 1-4 w, and no tanker signal survives FWL**
 
 **Context.** First run of the D-028 protocol. Nothing was changed after the

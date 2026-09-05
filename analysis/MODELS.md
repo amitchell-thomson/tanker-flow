@@ -712,6 +712,7 @@ Walk-forward CV, `basis='knowable'`, confidence columns as observation variance.
    2.088 — a 0.8 % tie; fitted EWMA α=0.251 ⇒ ~7-week optimal window). **Part A is
    closed**: four models converge to the naive mean from above without crossing it
    (D-023/D-024). **A3 and A5b deliberately not built**, with reasons logged.
+9c. ✅ **H1 horizon test (D-025)** — **RUN 2026-09-05, not testable** (D-030). `make a1-h1`. A1's conditional target empties past the voyage tail (truth 5.89 → 0.75 over W1→W4) while the nulls stay unconditional, so W3/W4 "skill" is an artefact; P3 fails. A valid test needs the A1×A2 composition D-001 deferred. **Parked**, not refuted.
 10. **A7 live vintage de-bias** — fit `E[physical | knowable_t]` per `(signal_key, regime)`
     from the `signal_daily_live_vintage` ↔ `physical` pairing (+ `capture_rate.py` as the
     live `1/capture` scale-up); replay the vintage log against `physical` for the
