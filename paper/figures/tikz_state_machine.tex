@@ -1,0 +1,25 @@
+% The per-vessel state machine (pipeline/state_machine.py). Thresholds are the
+% code's defaults: 30 min dwell at SOG < 1 kn for anchored/moored, 15 min at
+% SOG > 1 kn outside the berth for departed. Events fire back-dated to the first
+% qualifying fix, not to the fix that confirmed the dwell.
+\begin{tikzpicture}[
+  x=1cm, y=1cm,
+  st/.style={draw=ink, rounded corners=2pt, fill=palegrey, font=\scriptsize\bfseries,
+             inner sep=3pt, minimum width=1.9cm, minimum height=6mm},
+  ev/.style={font=\tiny, align=center, fill=white, inner sep=1pt},
+  arr/.style={-{Latex[length=1.5mm]}, draw=ink, line width=0.55pt},
+]
+\node[st] (T) at (0, 0) {TRANSIT};
+\node[st] (E) at (4.2, 0) {IN\_ENVELOPE};
+\node[st] (A) at (8.8, 1.9) {ANCHORED};
+\node[st] (M) at (8.8, -1.9) {MOORED};
+\node[st] (D) at (13.2, -1.9) {DEPARTED};
+\draw[arr] (T) -- node[ev, below, yshift=-2pt] {\texttt{zone\_entry}\\first fix inside\\the approach envelope} (E);
+\draw[arr] (E) -- node[ev, below right, pos=0.55, xshift=-2pt, yshift=-1pt] {\texttt{anchored}\\$\ge$30\,min at SOG$<$1\,kn\\in the anchorage} (A);
+\draw[arr] (E) -- node[ev, below left, pos=0.5, xshift=2pt, yshift=-1pt] {\texttt{moored}\\$\ge$30\,min at SOG$<$1\,kn\\in a berth} (M);
+\draw[arr] (A) -- node[ev, right] {\texttt{moored}} (M);
+\draw[arr] (A) to[bend right=38] node[ev, above, yshift=3pt] {\texttt{anchorage\_exit}} (E);
+\draw[arr] (M) -- node[ev, above, yshift=2pt] {\texttt{departed}\\SOG$>$1\,kn outside\\the berth for 15\,min} (D);
+\draw[arr] (D) to[bend left=30] node[ev, below, yshift=-3pt] {\texttt{zone\_exit}: first fix outside the envelope} (T);
+\node[ev, text=ink!70] at (4.2, 3.0) {\texttt{anchorage\_entry} / \texttt{anchorage\_exit}: raw polygon crossings, no dwell filter};
+\end{tikzpicture}

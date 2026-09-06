@@ -2,18 +2,24 @@
 
 A null result is informative only in proportion to the smallest effect it could
 have detected. For a partial effect estimated on $n$ observations,
-$t^2 \approx n\,R^2/(1-R^2)$, so at a fixed bar the smallest detectable \pRsq{}
-falls as $1/n$. With \powerN{} discovery weeks and the Bonferroni bar of
+$t^2 \approx n\,R^2/(1-R^2)$, so at a fixed bar $t^\ast$ the smallest detectable
+\pRsq{} is
+\begin{equation}
+  R^2_{\min} = \frac{t^{\ast 2}}{n + t^{\ast 2}},
+  \label{eq:power}
+\end{equation}
+which falls as $1/n$. With \powerN{} discovery weeks and the Bonferroni bar of
 $|t|>\bonferroniT$, the floor is \powerFloor{} of residual variance
 (Figure~\ref{fig:power}). The largest \pRsq{} observed anywhere in the paper, across
 eight signals, two horizons, three mechanisms and two samples, is \bMaxRsqCov.
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.8\linewidth]{fig4_power}
-\caption{Smallest detectable \pRsq{} as a function of sample size at the two bars
-used in the paper, with the largest observed \pRsq{} and the discovery sample size
-marked.}
+\includegraphics[width=\linewidth]{fig4_power}
+\caption{Smallest detectable \pRsq{}, Equation~\eqref{eq:power}, as a function of
+sample size at the two bars used in the paper, with the largest observed \pRsq{} and
+the discovery sample size marked. Halving the floor needs twice the sample, which
+at a weekly grid means another six years of coverage-consistent data.}
 \label{fig:power}
 \end{figure}
 
@@ -29,3 +35,14 @@ sea averages \stockMeanMm{} million\,m$^3$ of LNG, which is about
 \$\spreadWeeklySd{} per MMBtu. The question was therefore whether about a day and a
 half of marginal supply moves a price that responds to revisions in the weather
 forecast.
+
+\paragraph{Distinguishing a physically real signal from a tradeable one.} The
+distinction is worth keeping because it is where the interesting work now lies. A
+signal is physically real if it predicts the quantity it measures: Part~A is that
+test, and the at-sea stock does predict European arrivals, with a lead equal to the
+voyage time, because that is arithmetic. A signal is tradeable if its effect on the
+price survives the controls at a size above the floor of
+Equation~\eqref{eq:power}. The route to the first question is more physical
+targets scored against published totals; the route to the second is a lower floor,
+which means a longer coverage-consistent sample or a less attenuated regressor, not
+a different model.

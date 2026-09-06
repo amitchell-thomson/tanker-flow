@@ -1,25 +1,45 @@
-% PROPOSAL: the author rewrites this section.
 \section{Limitations}\label{sec:limitations}
+
+Every limitation below is one that a commercial gas desk has already paid to
+remove, which is the immediate disadvantage any public-data study of this market
+starts from. They are listed so that the scope of the null is exact.
+
+\paragraph{Terrestrial AIS misses vessels and drops them.} The archives and the
+live feed see a vessel only within range of a shore receiver. Vessels that load out
+of range leave no departure, vessels at sea are invisible for the whole crossing,
+and the live feed additionally loses any vessel that does not hold a subscription
+slot. The rescue backstop of Section~\ref{sec:live} quantifies the live shortfall:
+\nRescueSkipped{} candidate lookups were declined by the budget in the period
+shown, and \nRescueLookups{} were made. The measured publication lag of a
+departure is negligible on the archives and up to a day on the live feed.
+
+\paragraph{The polygons are hand-drawn.} The \nZonePolygons{} berth, anchorage and
+approach polygons were digitised by hand and are provisional at several terminals.
+An envelope drawn too tight emits spurious exits during a channel transit; one
+drawn too loose merges neighbouring terminals. The state machine's stickiness and
+berth-override rules limit the damage, and the capture check bounds the aggregate
+effect on the US side, but no per-terminal audit of the geometry has been done.
+
+\paragraph{The two archives have opposite capture gradients.} NOAA-only capture of
+US export cargoes is \captureTwentyTwenty{} in 2020 and \captureTwentyEighteen{} in
+2018 (Table~\ref{tab:capture}), and GFW's capture runs the other way. Early-year
+levels of every US signal are biased low. The walk-forward designs operate on
+within-window changes and the FWL scan on residuals, but a level-dependent
+non-linearity in the early years would be misread.
 
 \paragraph{No European anchorage history.} The GFW feed carries port visits but no
 anchorage events, so European queue and absorption signals exist only from the 2026
 live feed. Four of the five composite signals originally pre-registered as features
 for Section~\ref{sec:partb} turned out to have between 9 and 46 daily observations
 and were excluded by a documented amendment before any spread fit. The at-sea and
-US-side mechanism was tested on the decade; the EU-congestion mechanism could not
-be tested.
+US-side mechanism was tested on the decade; the EU-congestion mechanism could not be
+tested.
 
 \paragraph{Destination resolution.} Between 75\% and 83\% of the at-sea stock has no
 resolved destination. The EU-bound series is a minority observed slice whose
 definition depends on coverage. The unresolved band is carried as its own feature,
 and the ratio of the two was tested as H2. Attenuation from this measurement error
 biases coefficients toward zero and cannot be excluded as a contributing factor.
-
-\paragraph{The capture gradient.} NOAA-only capture of US export cargoes is
-\captureTwentyTwenty{} in 2020 and \captureTwentyEighteen{} in 2018
-(Table~\ref{tab:capture}). Early-year levels of every US signal are biased low. The
-walk-forward designs operate on within-window changes and the FWL scan on residuals,
-but a level-dependent non-linearity in the early years would be misread.
 
 \paragraph{The coverage seam.} The backfill feeds end on \noaaEnds{} and \gfwEnds.
 The full-panel results in Appendix~\ref{app:fullpanel} include the thin live tail.
@@ -42,7 +62,12 @@ the remainder of the decade combined. The year-consistency condition and the hol
 are the defences against this; a longer sample without a coverage seam would be
 preferable to either.
 
+\paragraph{The outage monitor is slow.} The usable detector has a twelve-day median
+delay. A terminal outage of that length is public news well before the monitor
+fires, so its value is as an automated check on the reconstruction, not as
+information.
+
 \paragraph{Vintage residual.} \vintagePostDay{} rows in the live tail changed after a
-next-day print (Section~\ref{sec:panel}). They lie outside the modelling sample, but
+next-day print (Section~\ref{sec:bounds}). They lie outside the modelling sample, but
 they show that the knowable bound is exact on event time and only approximately
 exact on observation time in a thin-coverage regime.

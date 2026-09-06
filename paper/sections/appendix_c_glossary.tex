@@ -1,0 +1,53 @@
+\section{Glossary of terms}\label{app:glossary}
+
+\begin{description}[nosep,leftmargin=0em,style=unboxed,font=\normalfont\itshape]
+\item[AIS.] The Automatic Identification System: a VHF broadcast every vessel over
+  300 gross tonnes must transmit, carrying its identity (MMSI), position, speed and
+  course, and less often its draught, destination and ETA. Terrestrial receivers
+  hear it within roughly 40 nautical miles of shore; satellites hear it at sea.
+\item[MMSI.] Maritime Mobile Service Identity, the nine-digit number that keys AIS
+  messages to a vessel. It can change on reflagging, which is why the fleet list is
+  keyed on the IMO hull number and resolved to an MMSI.
+\item[FSRU.] Floating storage and regasification unit, a converted carrier moored
+  permanently as an import terminal.
+\item[Laden, ballast.] A carrier is laden when carrying cargo and in ballast when
+  empty; Equation~\eqref{eq:laden} infers the state from draught.
+\item[Leg, visit, queue.] The three event pairings: departure to next arrival
+  (a voyage), mooring to departure (berth occupancy), first anchorage entry to
+  mooring (the wait to berth).
+\item[Physical, knowable.] The two bases every signal is built on: with hindsight,
+  and using only what was observable on the day (Section~\ref{sec:panel}).
+\item[Vintage.] The version of a dataset as it existed on a given date. A feature
+  has a vintage hazard when the table it comes from did not exist at the as-of date
+  even though its rows carry earlier timestamps.
+\item[Persistence null, climatology null.] Forecasting next week's count as last
+  week's count, and as the trailing four-week mean, respectively.
+\item[MAE, skill, excess.] Mean absolute error; the fractional MAE improvement over
+  a null, Equation~\eqref{eq:skill}; and the fractional MAE deterioration relative
+  to a null, Equation~\eqref{eq:excess}.
+\item[80\% coverage.] The share of realised outcomes that fell inside the model's
+  central 80\% predictive interval. A calibrated model scores about 80\%.
+\item[Walk-forward.] Refitting the model at every step on data strictly before that
+  step, so that every forecast is out of sample. Contrast with cross-validation,
+  which shuffles time.
+\item[Purge and embargo.] Dropping training rows whose target window overlaps the
+  test date, and one further row as a margin (Section~\ref{sec:partb}).
+\item[HAC, Newey--West.] A heteroskedasticity- and autocorrelation-consistent
+  standard error, Equation~\eqref{eq:nw}, which corrects for the serial correlation
+  that overlapping targets induce.
+\item[Bonferroni.] Dividing the significance level by the number of tests so that
+  the family-wise false-positive rate stays at the nominal level.
+\item[FWL, partial effect, partial \Rsq.] The Frisch--Waugh--Lovell construction of
+  a coefficient net of controls, Equation~\eqref{eq:fwl}, and the share of the
+  residual variance that the signal explains.
+\item[Discovery, holdout.] The sample on which a hypothesis is graded, and the
+  final stretch left untouched until it has passed.
+\item[EWMA.] Exponentially weighted moving average, $\hat{x}_t = \alpha y_t + (1-\alpha)\hat{x}_{t-1}$.
+\item[BOCPD.] Bayesian online change-point detection, Equation~\eqref{eq:bocpd}.
+\item[CRPS.] Continuous ranked probability score, a proper score for a full
+  predictive distribution that reduces to absolute error for a point forecast.
+\item[Capture rate.] Observed cargoes divided by the EIA-implied count,
+  Equation~\eqref{eq:capture}.
+\item[Coverage seam.] The date after which only the thin live feed carries the
+  signals (Section~\ref{sec:seam}).
+\end{description}

@@ -7,18 +7,22 @@ result which prompted it. The log is what allows a reader to distinguish a test 
 found nothing from a search that stopped at the first result to cross a threshold.
 Table~\ref{tab:prereg} lists the entries that fixed each model reported below.
 
-\begin{table}[t]
+\begin{table*}[tb]
 \centering\small
 \caption{Pre-registration entries. The commit column is discussed in the text.}
 \label{tab:prereg}
 \input{tables/prereg}
-\end{table}
+\end{table*}
 
 Two consequences of the protocol appear in the results. A pre-registered sign that
 the data falsified is reported as falsified (Section~\ref{sec:parta}). A test that
 produced an apparent 87\% improvement over its null was withdrawn, because the
 protocol's own comparability condition failed (Section~\ref{sec:parta}). Neither
-outcome would have been recorded without a criterion fixed in advance.
+outcome would have been recorded without a criterion fixed in advance. A third
+consequence is smaller but real: an audit of the log before this paper was drafted
+found that one synthesis entry had swapped two models' scores, and the rule that
+every number in the text is generated from the replay output surfaced the
+discrepancy the first time the table was read next to the prose.
 
 \paragraph{Limits of the log.} The log is a text file in the project's version
 control, and its git history does not independently establish the ordering it

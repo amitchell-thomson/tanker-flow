@@ -4,73 +4,211 @@ Before asking whether the signals predict a price, we ask whether they predict t
 physical quantities they measure directly: weekly EU arrivals, weekly US loadings
 and terminal outages, at one- and two-week horizons. These targets have high
 signal-to-noise ratios and published ground truth, and they establish what the
-pipeline can and cannot see before any price enters the analysis. Four models were
-pre-registered and scored walk-forward against two naive nulls, persistence and a
-four-week climatology. Each model was designed to address the diagnosed weakness of
-the previous one. Table~\ref{tab:parta} gives the one-week results.
+pipeline can and cannot see before any price enters the analysis. The models are
+labelled A1 to A5 in the order they were pre-registered in the project plan (Part~A
+of the plan is the physical layer, Part~B the spread); A3, a survival model of
+voyage time, was specified but not built, for reasons recorded in the log. Four
+models were pre-registered and scored walk-forward against two naive nulls, and
+each was designed to address the diagnosed weakness of the previous one.
 
-\begin{table}[t]
+\paragraph{Targets, nulls and scoring.} Time is a weekly grid of Mondays from
+2018. For an as-of date $t$ the forecast windows are $W_k = (t + 7(k-1),\, t + 7k]$
+days, and the target is a count of cargoes in the window: the conditional EU
+arrival count for A1 (laden legs already at sea at $t$ whose first European zone
+entry falls in $W_k$) and the US laden-departure count for A2 and A4. The
+\term{persistence} null is the last fully elapsed week's count, and the
+\term{climatology} null is the trailing four-week mean; both are computable at $t$.
+Models are scored by mean absolute error (MAE) in cargoes, and a model
+\term{beats} a null when its MAE is lower. We report each model's excess error over
+the climatology null,
+\begin{equation}
+  \text{excess} = \frac{\mathrm{MAE}_{\text{model}} - \mathrm{MAE}_{\text{clim}}}{\mathrm{MAE}_{\text{clim}}},
+  \label{eq:excess}
+\end{equation}
+so that a positive value is worse than the null. Calibration is scored by the share
+of outcomes inside the model's central 80\% interval, which should lie between 70
+and 90\%. The pre-registered bar was to beat both nulls on one-week MAE and to land
+inside that coverage band. Figure~\ref{fig:loadings} shows the loadings series the
+US-side models forecast, with both nulls drawn on it.
+
+\begin{figure*}[tb]
+\centering
+\includegraphics[width=0.95\textwidth]{fig11_loadings}
+\caption{Weekly laden departures from US export terminals on the NOAA feed, with
+the two objects the nowcasts compete against: the trailing four-week mean (the
+climatology null) and the exponentially weighted moving average at the smoothing
+constant A4 fitted by maximum likelihood, $\alpha=\aFourAlphaFig$. The series
+peaks at \loadingsWeeklyPeak{} cargoes in a week and averages
+\loadingsWeeklyMeanTwentyFive{} per week in 2025. The 2020 trough is the COVID
+cargo-cancellation wave and the mid-2022 step down is the Freeport outage.}
+\label{fig:loadings}
+\end{figure*}
+
+\paragraph{A1: duration climatology.} For each open laden leg $i$ of age $a$ at $t$,
+the probability that it produces an observed European arrival in $W_k$ is
+estimated directly as a count ratio over the matured population of the trailing
+year,
+\begin{equation}
+  p_i(W_k) = \frac{N_{\mathrm{eu}}\!\left(\text{duration} \in (a+u_0,\, a+u_1]\right)}{N(\text{open at age } a)},
+  \label{eq:a1}
+\end{equation}
+where $(u_0, u_1]$ is the window offset. The ratio factorises into an
+age-conditional probability that the leg is Europe-bound at all and the duration
+distribution of Europe-bound legs, but because both come from one population the
+factors telescope into the single ratio above. The weekly count is the
+Poisson-binomial sum over open legs, with mean $\sum_i p_i$ and an exact
+probability mass function by convolution. A1 has no fitted parameter.
+
+\paragraph{A2: negative-binomial count model.} Weekly US loadings $y$ are modelled
+as
+\begin{equation}
+  \log \lambda = \beta_0 + \sum_j \beta_j x_j, \qquad y \sim \mathrm{NB}(\lambda, k),
+  \label{eq:a2}
+\end{equation}
+with five features fixed in advance together with their expected signs: last
+week's count, the trailing four-week mean, the number of vessels in berth, ballast
+arrivals in the past week, and the anchorage queue depth. The first two features
+are the two nulls, so the scorecard asks whether the three physical features add
+anything to the autoregression. Coefficients are refit every week on an expanding
+window with a minimum of 104 weeks.
+
+\paragraph{A4: Kalman local level.} The same target is modelled as a latent weekly
+rate observed with noise,
+\begin{equation}
+\begin{aligned}
+  x_t &= x_{t-1} + w_t, & w_t &\sim N(0, q), \\
+  y_t &= x_t + v_t,     & v_t &\sim N(0, r),
+\end{aligned}
+\label{eq:a4}
+\end{equation}
+with $(q, r)$ by exact maximum likelihood, walk-forward. In steady state the
+filter's one-step forecast is an exponentially weighted moving average,
+$\hat{x}_t = \alpha y_t + (1-\alpha)\hat{x}_{t-1}$, with $\alpha$ set by the ratio
+$q/r$ and an effective window of $(2-\alpha)/\alpha$ weeks. A4 therefore asks
+whether an optimally tuned moving average beats the fixed four-week one.
+
+\begin{table*}[tb]
 \centering\small
 \caption{One-week-ahead nowcasts of weekly US loadings (A2, A4) and conditional EU
 arrivals (A1), scored walk-forward from 2018 on the NOAA feed. MAE is in cargoes per
-week. All three fail the pre-registered bar of beating both nulls.}
+week; the excess column is Equation~\eqref{eq:excess}. All three fail the
+pre-registered bar of beating both nulls.}
 \label{tab:parta}
 \input{tables/part_a}
-\end{table}
+\end{table*}
 
-The sequence of results is informative. A1, a duration-climatology convolution of
-the at-sea stock, is \aOneSkill{} worse than the climatology null; its estimator is
-maturity-gated and therefore stale. A2, a negative-binomial count model on lagged
-loadings and berth occupancy, is \aTwoSkill{} worse because it over-extrapolates
-the trend. A2 also falsified one of its pre-registered signs: ballast arrivals
-entered with coefficient \aTwoBallastCoef{} against a prior of positive. A4, a
-Kalman local-level model, is \aFourSkill{} from the null, which we treat as a tie.
-The tie carries information. A4 fitted its smoothing constant by maximum likelihood
-and chose $\alpha=\aFourAlpha$, an effective window of \aFourWindow{} weeks. For a
-series that is a local level plus noise, the exponentially weighted moving average
-is the optimal linear predictor \citep{muth1960}. The fitted model landing on a
-four-week simple average indicates that the optimum was found, and not that four
-methods happened to tie. On this target and at this horizon, the naive mean is close
-to optimal, and a fifth method would not have changed the conclusion.
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{fig12_parta}
+\caption{One-week MAE of each model against its two nulls, from
+Table~\ref{tab:parta}. No model beats the four-week climatology; A4 ties it.}
+\label{fig:parta}
+\end{figure}
 
-\paragraph{Outage detection.} A5 tested Bayesian online change-point detection
-\citep{adams2007} on the inter-departure process at each US terminal against
-\aFiveOutages{} labelled outages over \aFiveTerminalYears{} terminal-years
-(Table~\ref{tab:parta5}). It did not outperform a rate-relative silence rule, which
-detects with a median delay of \aFiveNTwoDelay{} days at \aFiveNTwoFar{} false
-alarms per terminal-year. The rule's recall is \aFiveNTwoRecall{}
-(\aFiveNTwoHits). It is a usable but limited monitor, and it is the baseline rather
-than the proposed model.
+\paragraph{Results.} Table~\ref{tab:parta} and Figure~\ref{fig:parta} give the
+one-week results. A1 is \aOneSkill{} worse than the climatology null; its estimator
+is built from legs at least ninety days old inside a one-year window, so it is
+stale, and its errors are the classic lag pattern of under-shooting on the way up
+and over-shooting on the way down. A2 is \aTwoSkill{} worse because it
+over-extrapolates the trend: the log link on an expanding window places current
+features several standard deviations above the training mean and the exponential
+converts that distance into multiplicative overshoot. A2 also falsified one of its
+pre-registered signs: ballast arrivals entered with coefficient \aTwoBallastCoef{}
+against a prior of positive. A4, the Kalman local-level model, is \aFourSkill{}
+from the null, which we treat as a tie. The tie carries information. A4 fitted its
+smoothing constant by maximum likelihood and chose $\alpha=\aFourAlpha$, an
+effective window of \aFourWindow{} weeks. For a series that is a local level plus
+noise, the exponentially weighted moving average is the optimal linear predictor
+\citep{muth1960}. The fitted model landing next to a four-week simple average
+indicates that the optimum was found, and not that four methods happened to tie. On
+this target and at this horizon, the naive mean is close to optimal, and a fifth
+method would not have changed the conclusion. The sequence is not a monotone
+convergence: A2 was the worst of the four, not the middle rung.
 
-\begin{table}[t]
+\paragraph{A5: outage detection.} A5 tested Bayesian online change-point detection
+\citep{adams2007} on each US terminal's daily laden-departure count against
+\aFiveOutages{} labelled outages over \aFiveTerminalYears{} terminal-years. The
+observation model is Poisson with a Gamma prior on the rate, and the detector
+maintains a posterior over the run length $r_t$ (days since the last change) by
+\begin{equation}
+\begin{aligned}
+  P(r_t = r+1) &\propto P(r_{t-1} = r)\, \pi(y_t \mid r)\,(1-H), \\
+  P(r_t = 0)   &\propto \textstyle\sum_r P(r_{t-1} = r)\, \pi(y_t \mid r)\, H,
+\end{aligned}
+\label{eq:bocpd}
+\end{equation}
+where $\pi(y_t \mid r)$ is the run's negative-binomial posterior predictive and
+$H$ the hazard; it alarms when the run-length-averaged rate falls below a fixed
+fraction of the pre-change rate. The nulls are two silence rules that read the
+time since the last departure: N1 alarms after a fixed 14~days, N2 after five times
+the terminal's own baseline inter-departure interval. Table~\ref{tab:parta5} and
+Figure~\ref{fig:outage} give the scorecard. BOCPD did not outperform the
+rate-relative rule, because daily binning discards the exact timing that a point
+process carries: about half of normal days are zero-count at a two-day cadence, so
+each zero is weak evidence. N2 detects with a median delay of \aFiveNTwoDelay{}
+days at \aFiveNTwoFar{} false alarms per terminal-year, with recall
+\aFiveNTwoRecall{} (\aFiveNTwoHits); every miss is a slow-baseline terminal whose
+five-times rule exceeds the 21-day detection window. It is a usable but limited
+monitor, and it is the baseline rather than the proposed model. Its use should be
+stated plainly: a twelve-day median delay is slower than public news of a terminal
+outage, so N2 is an automated cross-check on the reconstruction rather than an
+alert a trader would act on.
+
+\begin{table*}[tb]
 \centering\small
 \caption{Outage detection against labelled terminal outages. N2 is the pre-registered
 null and the usable artefact; its recall is the relevant number.}
 \label{tab:parta5}
 \input{tables/part_a5}
-\end{table}
+\end{table*}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{fig14_outage}
+\caption{Recall against false alarms for the three detectors; marker size grows
+with median delay. N1's recall is near-tautological, since a labelled outage is by
+construction a gap of at least fourteen days, and its false-alarm rate is the real
+story.}
+\label{fig:outage}
+\end{figure}
 
 \paragraph{A withdrawn test.} A natural extension asks whether skill rises with
 horizon, since cargo at sea today determines arrivals two to three weeks ahead. This
-was pre-specified before any longer-horizon data was examined. Extending A1's window
-to four weeks produced a \hOneSkillWFour{} improvement over the best null at week
-four (Table~\ref{tab:h1}). The improvement is an artefact. A1's target is
-conditional on legs already at sea, whereas both nulls are the last elapsed
-unconditional weekly count. The two coincide at one and two weeks, because no US-to-EU
-voyage completes in under seven days. Past the voyage tail the conditional truth
-falls toward zero (mean \hOneTruthWOne{} arrivals in week one and
-\hOneTruthWFour{} in week four) while the nulls continue to predict the full weekly
-rate (\hOnePersistWFour{} MAE). A1 was forecasting a smaller quantity, not
-forecasting better. The pre-specified premise, that the nulls degrade with horizon,
-fails, and the protocol treats that outcome as grounds to abandon the test. In the
-comparable region, skill moves from \hOneSkillWOne{} to \hOneSkillWTwo{}, which is
-the predicted direction but remains below the null.
+was pre-specified before any longer-horizon data was examined, with the premise,
+also written down, that the nulls would degrade with horizon. The test extends the
+A1 window index to $k=1,\dots,4$ and scores each $W_k$ against the same two nulls.
+Extending to four weeks produced a \hOneSkillWFour{} improvement over the best null
+at week four (Table~\ref{tab:h1}). The improvement is an artefact, and
+Figure~\ref{fig:h1} shows why. A1's target is conditional on legs already at sea at
+$t$, whereas both nulls are the last elapsed \emph{unconditional} weekly count. The
+two coincide at one and two weeks, because no US-to-EU voyage completes in under
+seven days, so nothing arrives in the first week that had not already departed.
+Past the voyage tail the conditional truth falls toward zero (mean
+\hOneTruthWOne{} arrivals in week one and \hOneTruthWFour{} in week four) while the
+nulls continue to predict the full weekly rate (\hOnePersistWFour{} MAE). A1 was
+forecasting a smaller quantity, not forecasting better; a forecast of zero would
+have scored almost as well. The pre-specified premise fails, and the protocol
+treats that outcome as grounds to abandon the test. In the comparable region, the
+excess moves from \hOneSkillWOne{} to \hOneSkillWTwo{}, which is the predicted
+direction but remains below the null. A valid horizon test needs an unconditional
+target, which requires composing A1 with a departure-process model such as A2; that
+composition is listed as future work.
 
-\begin{table}[t]
+\begin{table*}[tb]
 \centering\small
 \caption{A1 extended to four weekly windows. The skill column at W3 and W4 is an
 artefact of a conditional target scored against unconditional nulls; the harness no
 longer reports it as a result.}
 \label{tab:h1}
 \input{tables/h1}
-\end{table}
+\end{table*}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{fig13_h1}
+\caption{The withdrawn horizon test. Bars are the mean conditional truth in each
+window; lines are the MAE of A1 and of the two nulls. Beyond week two the target
+empties while the nulls keep forecasting a full week's arrivals, so the apparent
+skill measures the target changing meaning.}
+\label{fig:h1}
+\end{figure}

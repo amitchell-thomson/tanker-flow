@@ -1,0 +1,55 @@
+% The pipeline, sources to paper. Hand-laid-out (a diagram, not a measurement);
+% every count on it is a macro from numbers.tex / numbers2.tex.
+\begin{tikzpicture}[
+  x=1cm, y=1cm,
+  box/.style={draw=ink, rounded corners=1.5pt, fill=white, inner sep=2.5pt,
+              align=center, font=\scriptsize, minimum height=7mm, text width=2.55cm},
+  src/.style={box, fill=paleblue},
+  store/.style={box, fill=palegold},
+  derive/.style={box, fill=palegrey},
+  outbox/.style={box, fill=white, draw=ink, thick},
+  arr/.style={-{Latex[length=1.5mm]}, draw=ink!75, line width=0.5pt},
+  lab/.style={font=\tiny, fill=white, inner sep=1pt, text=ink!80},
+]
+% ---- row 1: sources
+\node[src] (igu)  at (1.5, 4.3) {IGU fleet list\\ \tiny annual PDF};
+\node[src] (ais)  at (4.7, 4.3) {AISstream\\ \tiny 3 WebSockets per worker, 150 MMSI slots, 1\,h rotation};
+\node[src] (vf)   at (7.9, 4.3) {VesselFinder API\\ \tiny masterdata; credit-budgeted rescue};
+\node[src] (noaa) at (11.1, 4.3) {NOAA Marine Cadastre\\ \tiny US Class-A AIS, 2016--25};
+\node[src] (gfw)  at (14.3, 4.3) {Global Fishing Watch\\ \tiny port visits and voyages, 2016--26};
+% ---- row 2: stores
+\node[store] (reg) at (1.5, 2.7) {\texttt{vessel\_registry}\\ \tiny \nFleet{} LNG carriers and FSRUs};
+\node[store] (fix) at (6.3, 2.7) {\texttt{ais\_fixes}\\ \tiny \nFixes{} fixes (hypertable)};
+\node[derive] (sm) at (9.5, 2.7) {state machine\\ \tiny per vessel, \nZonePolygons{} polygons at \nTerminals{} terminals};
+\node[store] (pe) at (12.7, 2.7) {\texttt{port\_events}\\ \tiny \nEvents{} events, regime-tagged};
+\node[src] (mkt) at (15.9, 2.7) {EIA, FRED, AGSI+,\\ ERA5, TTF quote\\ \tiny prices, storage, weather};
+% ---- row 3: derivations
+\node[derive] (wl) at (3.9, 1.1) {\texttt{priority\_watchlist}\\ \tiny 5 tiers, re-scored hourly};
+\node[derive] (pair) at (9.5, 1.1) {legs, visits, queues\\ \tiny the three pairings};
+\node[store] (sd) at (12.7, 1.1) {\texttt{signal\_daily}\\ \tiny \nSignalKeys{} keys, two bases, \nSignalRows{} rows};
+\node[store] (mp) at (15.9, 1.1) {\texttt{model\_panel}\\ \tiny \nPanelFeatures{} features, publication-lagged};
+% ---- row 4: analysis and paper
+\node[outbox] (parta) at (9.5, -0.5) {Part A replays\\ \tiny A1, A2, A4, A5 nowcasts};
+\node[outbox] (partb) at (12.7, -0.5) {Part B replays\\ \tiny M0--M2 ladder, FWL scan, H2--H4};
+\node[outbox] (paper) at (15.9, -0.5) {tables, macros, figures\\ \tiny generated, never typed};
+% ---- edges
+\draw[arr] (igu) -- (reg);
+\draw[arr] (vf) -- node[lab, pos=0.62] {IMO$\to$MMSI} (reg);
+\draw[arr] (ais) -- (fix);
+\draw[arr] (vf) -- node[lab, pos=0.55] {rescue fixes} (fix);
+\draw[arr] (noaa) -- node[lab, pos=0.5] {backfill} (fix);
+\draw[arr] (fix) -- (sm);
+\draw[arr] (sm) -- (pe);
+\draw[arr] (gfw) -- node[lab, pos=0.5] {events written directly} (pe);
+\draw[arr] (reg.south) |- (wl.west);
+\draw[arr] (fix.south west) -- node[lab, pos=0.5, right=1pt] {last fix, ETA, destination} (wl.north east);
+\draw[arr] (wl.north) -- node[lab, pos=0.22, left=1pt] {subscription list} (ais.south);
+\draw[arr] (pe) -- (pair);
+\draw[arr] (pair) -- (sd);
+\draw[arr] (sd) -- (mp);
+\draw[arr] (mkt) -- (mp);
+\draw[arr] (pair) -- (parta);
+\draw[arr] (mp) -- (partb);
+\draw[arr] (parta) -- (partb);
+\draw[arr] (partb) -- (paper);
+\end{tikzpicture}

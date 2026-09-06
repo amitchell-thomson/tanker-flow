@@ -4,7 +4,9 @@
 write machine-readable results (\texttt{make paper-results}). A generator converts
 them into the LaTeX tables and into a file of macros from which every in-prose
 number is drawn (\texttt{make paper-tables}). The figures are drawn from the same
-tables the models read (\texttt{make paper-figures}). A number that is not generated
+tables the models read (\texttt{make paper-figures}); the engineering figures and
+the macros for every engineering count in the prose are produced by a second
+generator (\texttt{python -m paper.figures2}) from the live tables. A number that is not generated
 cannot appear in the text, because the corresponding macro is undefined and the
 document does not compile. The underlying replays are \texttt{make a1-replay},
 \texttt{a2-replay}, \texttt{a4-replay}, \texttt{a5-replay}, \texttt{a1-h1},

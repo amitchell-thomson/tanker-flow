@@ -1,25 +1,30 @@
 \begin{abstract}
+\noindent
 Positions of liquefied natural gas carriers are widely believed to carry
 information about the price gap between North American and European gas. A cargo
 that leaves the US Gulf today lands in Europe in two to three weeks, and that
-supply does not yet appear in any published statistic. We test this belief. From
-\nFixes{} AIS position fixes (\fixSpanLo{} to \fixSpanHi{}) we reconstruct
-\nEvents{} port events and a \nSignalKeys-signal daily panel, built once with
-hindsight for validation and once strictly point-in-time for modelling. We then ask
-whether tanker-derived signals predict the one- and four-week change in the
-\HH{}--\TTF{} spread after controlling for its own persistence, weather, storage
-and oil. Each hypothesis, sign and acceptance bar was recorded in a dated
-append-only log before the corresponding fit. We find no predictive content. A
-controls-only model performs worse than a no-change forecast
-(\bMTwoSkillHOneCov{} at one week, \bMTwoSkillHFourCov{} at four). No signal
-reaches a Newey--West $|t|$ of 1.96 (maximum \bMaxTCov). Three pre-registered
-mechanisms that a linear scan could miss (the Europe-bound share of cargo, an
-interaction with EU storage, and a tightness-regime split) fail under a Bonferroni
-bar with an untouched holdout. The design can detect effects of at least
-\powerFloor{} of residual variance; the largest observed is \bMaxRsqCov. The
-result therefore excludes effects large enough to trade and says nothing about
-smaller ones. We also document two construction hazards specific to
-voyage-derived features. The unit of observation is defined only in retrospect,
-and feature availability changes across data vintages. A naive loader leaked
-\leakFutureShare{} of the sample.
+supply does not yet appear in any published statistic. We test this belief on the
+transatlantic trade. From \nFixes{} AIS position fixes (\fixSpanLo{} to
+\fixSpanHi{}) we reconstruct \nEvents{} port events at \nTerminals{} terminals and
+a \nSignalKeys-signal daily panel, built once with hindsight for validation and
+once strictly point-in-time for modelling. The US side of the reconstruction is
+checked against EIA export totals. We then ask whether tanker-derived signals
+predict the one- and four-week change in the \HH{}--\TTF{} spread after
+controlling for its own persistence, weather, storage and oil. Each hypothesis,
+sign and acceptance bar was recorded in a dated append-only log before the
+corresponding fit. We find no predictive content. A controls-only model performs
+worse than a no-change forecast (\bMTwoSkillHOneCov{} at one week,
+\bMTwoSkillHFourCov{} at four). No signal reaches a Newey--West $|t|$ of 1.96
+(maximum \bMaxTCov). Three pre-registered mechanisms that a linear scan could miss
+(the Europe-bound share of cargo, an interaction with EU storage, and a
+tightness-regime split) fail under a Bonferroni bar with an untouched holdout. The
+design can detect effects of at least \powerFloor{} of residual variance; the
+largest observed is \bMaxRsqCov. The result therefore excludes effects large enough
+to trade and says nothing about smaller ones. Three things stand independently of
+the null: a decade-scale event reconstruction with a measured capture rate, two
+construction hazards specific to voyage-derived features (the unit of observation
+is defined only in retrospect, and feature availability changes across data
+vintages, so that a naive loader leaked \leakFutureShare{} of the sample), and a
+physical-nowcast benchmark showing that a naive moving average is near-optimal for
+weekly US loadings.
 \end{abstract}

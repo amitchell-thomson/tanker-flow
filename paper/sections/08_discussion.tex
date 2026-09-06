@@ -1,4 +1,3 @@
-% PROPOSAL: the author rewrites this section.
 \section{Discussion}\label{sec:discussion}
 
 The null is the outcome an efficient market predicts, and it is important to be
@@ -6,35 +5,59 @@ precise about which question was asked. LNG cargo tracking is a commercial indus
 Several vendors sell satellite-augmented AIS with proprietary destination inference
 to gas trading desks in real time. The signals in this paper are built from public
 terrestrial AIS and a free voyage archive, which is a coarser version of what the
-marginal trader already has. The test was therefore not whether the physical signal
-is informative, but whether public physical data is mispriced in a liquid benchmark
-at one- to four-week horizons. A negative answer to that question is close to what
-one would expect in advance. What the paper adds is evidence that the negative
-result is not an artefact of a defective pipeline, an unlucky specification, or a
-search that stopped at the first $t>2$. The pipeline is validated against a
-published total, the specification was fixed before the fit, and the search was
-corrected for multiplicity and held out.
+marginal trader already has, and it reaches a public researcher with a delay that a
+desk would find unusable. The test was therefore not whether the physical signal is
+informative, but whether public physical data is mispriced in a liquid benchmark at
+one- to four-week horizons. A negative answer to that question is close to what one
+would expect in advance. What the paper adds is evidence that the negative result is
+not an artefact of a defective pipeline, an unlucky specification, or a search that
+stopped at the first $t>2$. The pipeline is validated against a published total,
+the specification was fixed before the fit, and the search was corrected for
+multiplicity and held out.
 
-Three results stand independently of the null. First, the physical nowcasts
-converge on the naive mean from above, and for the one-week loadings target this
-follows from theory rather than from the particular models tried. The argument
-applies to any slow industrial flow series and should temper the expectation that a
-richer model will beat a moving average on one. Second, the two construction hazards
-of Section~\ref{sec:panel} apply to voyage-derived features in general, and they are
-easy to miss even when dates appear to have been handled correctly. The vintage log
-that detects them is inexpensive to maintain and, to our knowledge, rarely kept.
-Third, the outage rule of Section~\ref{sec:parta} is a usable monitor with a stated
-recall.
+\paragraph{What the work found besides the null.} A reader who takes only the
+headline would miss most of the content, so the other findings are listed here.
 
-Several changes could alter the answer. A private information advantage, such as
-satellite coverage of the open ocean or a destination model that resolves the
-three-quarters of the stock this pipeline cannot, would change the question rather
-than the answer and would make the study a test of the vendor's product. Within
-public data, the remaining untested approaches are joint rather than marginal fits
-(spike-and-slab or partial least squares over the collinear block), a fitted regime
-model in place of an observable split, distributed lags of the signals, and the
-twenty-six signal keys the panel does not use. Each has a weaker prior than the three
-mechanisms already tested, and each faces a larger multiplicity problem against a
-residual that has never exceeded \bMaxRsqCov{} of variance. Any of them should be
-accompanied by its own pre-registration, its own multiplicity correction, and the
-untouched-holdout standard used here.
+\begin{enumerate}[nosep,leftmargin=1.4em]
+  \item \emph{The naive mean is near-optimal for weekly loadings, and the reason is
+    known.} Four nowcasts approached a four-week moving average from above without
+    crossing it, and the one with a fitted smoothing constant chose a seven-week
+    window by maximum likelihood. For a slow industrial flow that is a local level
+    plus noise, the exponentially weighted mean is the optimal linear predictor, so
+    this follows from theory and should temper the expectation that a richer model
+    will beat a moving average on any such series.
+  \item \emph{A voyage-derived feature leaks by construction unless bounded.} The
+    \leakFutureShare{} of legs closed by the future at a 2020 as-of date was not a
+    bug anyone wrote on purpose; it is what the natural implementation does. The
+    vintage hazard is subtler still, since a date filter passes. Both are cheap to
+    detect with a print log and, to our knowledge, rarely checked.
+  \item \emph{Coverage has a gradient, and it runs opposite ways in the two public
+    archives.} The NOAA capture rate rises from under half to above unity over the
+    decade because receiver density grew; GFW's falls over the same years. Neither
+    archive is a complete record on its own and the union is not their sum.
+  \item \emph{A pre-registered sign was falsified.} Ballast arrivals entered the
+    loadings model with a stable negative coefficient against a prior of positive.
+    A ship must arrive empty before it leaves full, so the sign is a puzzle about
+    timing rather than mechanism, and it is recorded rather than explained.
+  \item \emph{Almost half of matured laden departures never pair with a European
+    arrival.} They pair instead with the vessel's return to the Gulf, with a median
+    duration of about a month. These are cargoes whose destination the public feeds
+    never observed, and they are the reason the arrival model could not assume that
+    a leg still open is still Europe-bound.
+  \item \emph{A coverage seam was found by a plot, not a test.} The
+    \coverageDropShare{} fall in the at-sea stock at the turn of 2026 passed a
+    validation sweep of seventy checks and a test suite of several hundred tests.
+    It was visible in the first figure drawn for this paper.
+  \item \emph{An outage monitor with a stated recall came out of the exercise as the
+    null, not the model.} A rate-relative silence rule detects with a median delay
+    of \aFiveNTwoDelay{} days at \aFiveNTwoFar{} false alarms per terminal-year and
+    \aFiveNTwoRecall{} recall.
+\end{enumerate}
+
+None of these is a price result. All of them are results about the data, and they
+are the proof of concept the pipeline delivers: a decade of port events that
+reconcile with a published total, built point-in-time and checked against its own
+live prints. The growth in US export capacity that dominates every volume panel of
+Figure~\ref{fig:signals} is real and large, but it is public information from
+project sanctions and EIA reports, not something AIS reveals, and the spread scan
+removes it deliberately through the persistence term.

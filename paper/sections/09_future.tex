@@ -1,0 +1,51 @@
+\section{What would change the answer}\label{sec:future}
+
+Several changes could alter the answer, and they divide into changes to the
+question and changes within it.
+
+\paragraph{A private information advantage.} Satellite coverage of the open ocean
+or a destination model that resolves the three-quarters of the stock this pipeline
+cannot would change the question rather than the answer, and would make the study a
+test of the vendor's product. Within public data the most promising destination
+feature is geometric: a Gulf cargo bound for Europe must exit north-east through the
+Straits of Florida while Asia-bound cargoes route south, and the project's notes
+record that a north-east crossing is strong evidence of a European arrival about
+thirteen days ahead. The crossing is inside terrestrial range, so it is a coverage
+question, and the live system's slot allocation was changed to keep departing
+vessels subscribed through the Straits. That feature was not available on the
+decade archives and is not tested here.
+
+\paragraph{A fused capture-corrected supply series.} NOAA and GFW have opposite
+coverage gradients (Section~\ref{sec:groundtruth}). A deduplicated union of the two,
+matched on vessel, terminal and day, with the residual under-count carried as an
+exposure offset calibrated to the EIA total, would recover the early years as
+levels rather than only as changes. The acceptance test is that the fused series
+reconciles with EIA within a few percent in every year.
+
+\paragraph{A valid horizon test.} The withdrawn test of Section~\ref{sec:parta}
+needs an unconditional arrival target: A1's conditional term composed with a
+departure-process term for cargoes not yet loaded, scored against nulls of the same
+unconditional quantity. The composition is a genuine modelling task and was parked
+because its downstream consumer, the spread, showed no response to the input it
+would sharpen.
+
+\paragraph{The untested variants.} Within public data, the remaining untested
+approaches are joint rather than marginal fits (spike-and-slab or partial least
+squares over the collinear block), a fitted regime model in place of an observable
+split, distributed lags of the signals, and the twenty-six signal keys the panel does
+not use. Each has a weaker prior than the three mechanisms already tested, and each
+faces a larger multiplicity problem against a residual that has never exceeded
+\bMaxRsqCov{} of variance. Any of them should be accompanied by its own
+pre-registration, its own multiplicity correction, and the untouched-holdout
+standard used here.
+
+\paragraph{A longer coverage-consistent sample.} The power floor falls as $1/n$.
+Halving it requires roughly six further years on the weekly grid, or a daily grid
+with a target that is not a near-random walk at that cadence. The live feed is the
+only source that continues, and its coverage is a fraction of the archives', so the
+seam of Section~\ref{sec:seam} will not close on its own.
+
+\paragraph{Process.} Two cheap changes are recorded as open work: a coverage-regime
+guard on the modelling panel so that a level break at a feed boundary fails a
+check rather than a plot, and a third-party timestamp on every future
+pre-registration entry.

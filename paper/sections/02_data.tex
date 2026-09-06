@@ -1,5 +1,16 @@
 \section{Data and pipeline}\label{sec:data}
 
+\begin{figure*}[tb]
+\centering
+\resizebox{\textwidth}{!}{\input{figures/tikz_pipeline}}
+\caption{The pipeline from sources to paper. Blue boxes are external sources, gold
+boxes are stored tables, grey boxes are derivations, and the outlined boxes are the
+replays that generate every table and figure. The watchlist closes a loop: the
+ranking computed from stored fixes decides which vessels the live feed subscribes
+to next.}
+\label{fig:pipeline}
+\end{figure*}
+
 \subsection{Sources}
 
 Vessel positions come from three feeds of different fidelity, and no signal is
@@ -9,8 +20,16 @@ exhaustive along the US coast from 2016 and ends on \noaaEnds. For Europe and th
 open ocean we use Global Fishing Watch port-visit and voyage events \citep{gfw}.
 These supply arrivals and departures but carry no coordinates and no anchorage
 events; the feed ends on \gfwEnds. A live subscription to an AIS aggregator covered a
-tier-ranked fleet from April~2026 and is used only for the vintage self-validation
-described in Section~\ref{sec:panel}.
+tier-ranked fleet from April~2026 (Section~\ref{sec:live}) and is used only for the
+vintage self-validation described in Section~\ref{sec:panel}.
+
+The fleet in scope is every LNG carrier and floating storage and regasification
+unit (FSRU) in the IGU fleet list, \nFleet{} hulls, resolved to an MMSI through a
+vessel-database lookup. The signals concern the transatlantic subset of their
+movements: laden departures from US export terminals, arrivals and discharges at
+European import terminals, and the ballast return. Cargoes bound for Asia or Latin
+America enter the panel only as an unresolved-destination band
+(Section~\ref{sec:partb}).
 
 Prices and controls are public. \HH{} spot and Lower-48 storage are from the EIA API
 \citep{eia_api}. The TTF front-month contract is from a keyless quote feed and was
@@ -21,60 +40,216 @@ and Brent are from FRED \citep{fred}. EU storage is from GIE AGSI+ \citep{agsi}.
 Heating and cooling degree days are computed from ERA5 reanalysis temperatures at
 weighted demand centres \citep{openmeteo}.
 
-\subsection{Reconstruction}
+\subsection{Reconstruction}\label{sec:reconstruction}
 
-Table~\ref{tab:inventory} gives the scale of the reconstruction. Fixes are resolved
-against berth, anchorage and approach polygons at every LNG terminal in seven zones
-(US Gulf, US Atlantic, north-west Europe, Baltic, Iberia, western Mediterranean and
-eastern Mediterranean) by a per-vessel state machine that emits zone entry,
-anchorage, mooring and departure events. Three pairings of those events underlie
-everything that follows. A \emph{leg} pairs a departure with the vessel's next zone
-entry and represents a voyage. A \emph{visit} pairs a mooring with the next departure
-and represents berth occupancy. A \emph{queue} pairs the first anchorage entry with
-the next mooring at the same terminal and represents the wait to berth. Laden state
-is inferred from reported draught relative to design draught.
+Table~\ref{tab:inventory} gives the scale of the reconstruction and
+Figure~\ref{fig:pipeline} its shape. Fixes are resolved against \nZonePolygons{}
+polygons at \nTerminals{} terminals in seven zones (US Gulf, US Atlantic, north-west
+Europe, Baltic, Iberia, western Mediterranean and eastern Mediterranean). The
+polygons were drawn by hand in QGIS from satellite imagery and port charts, one
+berth, one anchorage and one approach envelope per terminal, with sub-zones where a
+terminal has several berths. The approach envelope is deliberately drawn to contain
+the anchorage, the channel and the berth, so that a single visit stays open while a
+vessel transits between them; without it the four-to-six hour channel transit at
+Sabine Pass or Rotterdam would register as a departure and a fresh arrival.
+Figure~\ref{fig:zones} shows the three polygons at Sabine Pass with a sample of the
+events emitted inside them.
 
-\begin{table}[t]
+\begin{table*}[tb]
 \centering\small
 \caption{Reconstruction inventory. Port events are labelled by the feed that produced
 them. The two backfill feeds end months before the live feed, which determines the
 sample choice in Section~\ref{sec:partb}.}
 \label{tab:inventory}
 \input{tables/inventory}
-\end{table}
+\end{table*}
 
-\subsection{Ground truth}
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{fig7_zones}
+\caption{The hand-drawn polygons at \zoneFigureTerminal{} and a random sample of
+the \nZoneFigureEvents{} coordinate-bearing events the state machine emitted there.
+The approach envelope (light) contains the anchorage (hatched) and the berth (gold,
+at the head of the channel). Zone entries scatter along the envelope boundary,
+anchored events cluster in the anchorage boxes, and moored and departed events sit
+on the berth.}
+\label{fig:zones}
+\end{figure}
+
+\begin{figure*}[tb]
+\centering
+\resizebox{0.78\textwidth}{!}{\input{figures/tikz_state_machine}}
+\caption{The per-vessel state machine. Each fix is first resolved to a polygon
+(berth wins over anchorage, which wins over approach; an open visit is sticky to its
+terminal), then the state is advanced. Dwell-confirmed events are back-dated to the
+first qualifying fix. Transitions require a fix outside the relevant polygon, so a
+gap in coverage never emits an event on its own.}
+\label{fig:statemachine}
+\end{figure*}
+
+A per-vessel state machine (Figure~\ref{fig:statemachine}) walks each vessel's
+fixes in time order and emits zone entry, anchorage, mooring and departure events.
+A vessel is \term{anchored} after at least 30 minutes inside an anchorage polygon at
+speed over ground below 1\,kn, \term{moored} after the same dwell inside a berth
+polygon, and \term{departed} after 15 minutes outside the berth at more than 1\,kn.
+Anchorage entries and exits are raw polygon crossings with no dwell filter, so
+that queue times can be measured without the half-hour back-dating of the
+dwell-confirmed marker. A vessel whose first observed fix is already inside a
+polygon receives synthetic entry and mooring events flagged as a cold start.
+
+Laden state is inferred from the draught the vessel broadcasts relative to its
+design draught,
+\begin{equation}
+  \text{laden}_e = \mathbf{1}\!\left[\, d(t_e) \ge 0.85\, d_{\mathrm{design}} \,\right],
+  \label{eq:laden}
+\end{equation}
+where $d(t_e)$ is the most recent reported draught at or before the event time
+for inbound events and, for departures, the first draught reported in a window
+from one hour before to six hours after the event, because a master typically
+rebroadcasts the lighter draught only after undocking. When no usable draught
+exists the state is set from the terminal's flow direction: a vessel that moored at
+an export terminal leaves laden, and one that moored at an import terminal leaves
+in ballast.
+
+Three pairings of those events underlie everything that follows and are drawn in
+Section~\ref{sec:panel}. A \term{leg} pairs a departure with the vessel's next zone
+entry and represents a voyage. A \term{visit} pairs a mooring with the next departure
+and represents berth occupancy. A \term{queue} pairs the first anchorage entry with
+the next mooring at the same terminal and represents the wait to berth.
+
+\subsection{Live acquisition}\label{sec:live}
+
+The live feed is the part of the project that took most of the engineering, and its
+limits are part of the result, so it is described here even though the decade
+panel is what the tests run on. The AIS aggregator caps a subscription at 50 vessel
+identifiers per connection. The system therefore runs two ingester workers on
+separate egress addresses, each holding three WebSocket connections: two connections
+form a persistent block of 100 slots and the third is a scan rotation of 50 slots
+that is re-drawn every hour, for 300 slots in total against a fleet of \nFleet.
+
+Which vessels hold a slot is decided by a ranking recomputed hourly from stored
+fixes and static data (Figure~\ref{fig:watchlist}). Tier~1 is any vessel seen
+inside a terminal polygon in the last three days. Tier~2 is a vessel with a parsed
+ETA within 48 hours or a declared destination that resolves to a known terminal.
+Tier~3 is a vessel inside the wider zone bounding box, ordered by whether it is
+closing on a terminal. Tiers~4 and~5 are recently and not recently seen. Two
+classes are pinned into the persistent block regardless of tier: a vessel on an
+open leg inside its expected arrival window in either direction, and a vessel
+currently in port, so that a long berth queue does not decay out of coverage.
+FSRUs are demoted to the lowest tier because a deployed FSRU sits moored for
+months and its own fixes never drive a signal. At the time of writing
+\nWatchlistSlotted{} of \nWatchlistVessels{} ranked vessels hold a slot:
+\nSlotsPinned{} pinned, \nSlotsPersistent{} persistent and \nSlotsScan{} in
+rotation.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{fig9_watchlist}
+\caption{Subscription slots by tier at the time of writing. The horizontal axis is
+symmetric-log so that the \nSlotsNone{} unslotted vessels in tier~5 do not hide the
+allocation in tiers~1 to~4.}
+\label{fig:watchlist}
+\end{figure}
+
+Terrestrial AIS does not see the open ocean, and a vessel that leaves a slot goes
+dark until it is re-ranked. Two backstops exist. First, a vessel that goes silent
+near a terminal while a leg-defining event is at risk (a laden departure, an import
+arrival, a berthing) is looked up on a commercial vessel-position API and the
+returned position is injected as an ordinary fix, so the state machine
+re-acquires it for free. The lookups cost credits from a reserve that expires on a
+fixed date, so the daily budget is derived each run as the straight line from the
+current balance to zero at expiry; leg-defining classes are exempt from the line and
+lower classes spend only the surplus above it (Figure~\ref{fig:rescue}). Between
+the first snapshot and \vfCreditsAsOf{} the reserve fell from \vfCreditsStart{} to
+\vfCreditsNow{} credits against an expiry of \vfExpiry, over \nRescueLookups{}
+lookups of which \nRescued{} returned a usable position; \nRescueSkipped{} candidate
+lookups were declined by the budget, which is the measured unmet demand. Second, a
+daily discovery pass resolves newly delivered hulls from the fleet list, because
+under a closed subscription list no vessel can otherwise enter the system.
+
+\begin{figure*}[tb]
+\centering
+\includegraphics[width=\textwidth]{fig10_rescue}
+\caption{The credit-budgeted position backstop. Left: outcomes of every lookup
+attempt by rescue class, on a symmetric-log axis; green is a usable position, grey
+is a lookup that returned nothing, and light grey is a candidate the budget declined.
+Right: the account balance against the glide line from the first snapshot to zero at
+expiry, which is the policy the daily cap is derived from.}
+\label{fig:rescue}
+\end{figure*}
+
+Two limits follow directly. A vessel that was never ranked highly enough to hold
+a slot leaves no live trace at all, and a vessel that drops out of coverage mid-voyage
+is only recovered if it re-enters a slot or is bought back. Both are absent from the
+decade archives, which is why the tests of Sections~\ref{sec:parta} and~\ref{sec:partb}
+run on the NOAA and GFW backfills and the live feed serves only to validate the
+point-in-time construction.
+
+\subsection{Ground truth}\label{sec:groundtruth}
 
 The US side of the reconstruction can be checked against a published total. The EIA
-reports monthly US LNG exports. Dividing by a nominal cargo of 174,000\,m$^3$ gives an
-implied cargo count, and the ratio of observed laden departures to that count is a
-capture rate (Table~\ref{tab:capture}). Restricted to the NOAA feed, the rate is
-\captureTwentyTwenty{} in 2020 and rises to \captureTwentyThree{},
-\captureTwentyFour{} and \captureTwentyFive{} in 2023, 2024 and 2025. The gradient
-reflects the coverage of the archive in its early years. Early-year levels of any
-US signal are therefore biased low by up to half. The models below work on
-within-window changes or on standardised values, and none treats an early-year level
-as a physical quantity.
+reports monthly US LNG exports $X_m$ in MMcf of gas. Dividing by a nominal cargo of
+$V_c = 174{,}000$\,m$^3$ of LNG, which at a volumetric expansion of 600 is about
+3.69\,Bcf of gas, gives an implied cargo count, and the ratio of observed laden
+departures $D_y$ to that count is the capture rate for year $y$:
+\begin{equation}
+  c_y \;=\; \frac{D_y}{\sum_{m\in y} X_m \,/\, (600\,V_c)} .
+  \label{eq:capture}
+\end{equation}
+Restricted to the NOAA feed, $c_y$ is \captureTwentyTwenty{} in 2020 and rises to
+\captureTwentyThree{}, \captureTwentyFour{} and \captureTwentyFive{} in 2023, 2024
+and 2025 (Table~\ref{tab:capture}, Figure~\ref{fig:capture}). The gradient is a
+property of the archive, not of the vessels: the NOAA archive is assembled from
+terrestrial receivers whose density along the Gulf coast grew over the decade, and
+a cargo that loaded in 2020 out of range of a receiver left no fix. The GFW feed has
+the opposite gradient, strong in the years the NOAA archive is thin and fading after
+2022, because it is fed by satellite receptions whose coverage of the fleet
+declined. The two feeds are not fused in this paper. The project's diagnostic tool
+counts every feed and therefore double-counts departures seen by both, and a deduped
+union calibrated to the EIA total is listed as future work
+(Section~\ref{sec:future}).
 
 \begin{table}[t]
 \centering\small
-\caption{NOAA-only capture of US LNG export cargoes relative to the EIA-implied count.
-The project's diagnostic tool counts every feed and therefore double-counts
-departures seen by both NOAA and GFW; the series reported here uses the single feed.}
+\caption{NOAA-only capture of US LNG export cargoes relative to the EIA-implied count,
+Equation~\eqref{eq:capture}.}
 \label{tab:capture}
 \input{tables/capture}
 \end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{fig19_capture}
+\caption{Observed laden departures against the EIA-implied cargo count by year. The
+capture rate (gold, right axis) is the coverage of the NOAA archive, which is why
+early-year levels of every US signal are biased low.}
+\label{fig:capture}
+\end{figure}
+
+The consequence for modelling is stated here because it matters everywhere below.
+Early-year levels of any US signal are biased low by up to half. The models
+therefore never treat an early-year level as a physical quantity. The physical
+nowcasts (Section~\ref{sec:parta}) forecast within-window changes and score against
+nulls computed from the same observed series, so a uniform under-count deflates the
+model and the null identically. The spread scan (Section~\ref{sec:partb})
+residualises each signal on the controls and on its own past before it is used, so a
+slowly varying level bias is absorbed by the persistence term. What neither design
+can absorb is a level-dependent non-linearity in the early years, and that is listed
+as a limitation.
 
 Figure~\ref{fig:spread} shows the target and the headline signal on one timeline.
 The two structural events that any model must survive are visible: the 2020 and
 2021 inversions, in which \HH{} briefly exceeded \TTF{}, and the 2022 European
 crisis.
 
-\begin{figure}[t]
+\begin{figure*}[tb]
 \centering
-\includegraphics[width=\linewidth]{fig1_spread_and_stock}
+\includegraphics[width=0.92\textwidth]{fig1_spread_and_stock}
 \caption{The \HH{}--\TTF{} spread (top) and EU-bound gas at sea (bottom), daily, on
 the coverage-consistent sample used for modelling. The extremes coincide with Winter
-Storm Uri (February~2021) and the August~2022 TTF peak.}
+Storm Uri (February~2021) and the August~2022 TTF peak. The collapse of the at-sea
+stock in the final weeks is not a physical event: it is the point at which the two
+backfill feeds end and only the thin live feed remains (Section~\ref{sec:seam}),
+which is why the primary sample is truncated there.}
 \label{fig:spread}
-\end{figure}
+\end{figure*}

@@ -1,31 +1,94 @@
 \section{Building the panel point-in-time}\label{sec:panel}
 
-Every signal is built twice from the same events. A \emph{physical} basis uses
-hindsight and serves validation. A \emph{knowable} basis uses, on each day $d$, only
-what could have been observed on day $d$, and serves modelling. Two properties of
-voyage-derived features make the knowable basis difficult to construct correctly.
-Both were discovered during the project rather than anticipated.
+\begin{figure*}[tb]
+\centering
+\includegraphics[width=\textwidth]{fig8_vessel_year}
+\caption{One carrier's \vesselFigureYear{} as the three pairings. Each row is a
+terminal, US export terminals above the rule and European import terminals below.
+A gold bar is a berth visit that ends with a laden departure, a black bar one that
+ends in ballast, and a hatched bar the anchorage wait before berthing. Solid lines
+are laden legs from a US departure to the next European zone entry; dashed lines are
+the ballast return. This vessel made \vesselFigureVisits{} visits,
+\vesselFigureLadenLegs{} laden and \vesselFigureBallastLegs{} ballast legs, from
+\vesselFigureEvents{} events; the US events are from the NOAA archive and the
+European ones from GFW, which is why the European visits carry no anchorage wait.}
+\label{fig:vessel}
+\end{figure*}
+
+Figure~\ref{fig:vessel} shows the three pairings on one vessel's year. Every
+signal is built from them twice. A \term{physical} basis uses hindsight and serves
+validation. A \term{knowable} basis uses, on each day $d$, only what could have been
+observed on day $d$, and serves modelling.
+
+The headline signals are gas volumes. Let leg $i$ carry capacity $V_i$ (m$^3$ of
+LNG), depart at $t^{\mathrm{dep}}_i$ and arrive at $t^{\mathrm{arr}}_i$. The
+physical at-sea stock on day $d$ is
+\begin{equation}
+  S^{\mathrm{phys}}_d = \sum_i V_i \,
+    \mathbf{1}\!\left[t^{\mathrm{dep}}_i \le d < t^{\mathrm{arr}}_i\right],
+  \label{eq:stock-phys}
+\end{equation}
+banded by the arrival zone. The knowable stock replaces the arrival test with
+what is known on $d$: a leg is at sea if it has departed and no arrival has been
+\emph{observed} by $d$, and it is banded by destination only if a destination was
+declared by $d$, otherwise it falls in the unresolved band. Loading and discharge
+rates are amortised flows: a visit that berths for $H_j$ hours deposits $V_j/H_j$ per
+hour across those hours, so that a closed visit integrates to exactly one cargo,
+\begin{equation}
+  L_d = \sum_j V_j\, \frac{\lvert [d, d+1) \cap [t^{\mathrm{moor}}_j, t^{\mathrm{dep}}_j) \rvert}{H_j},
+  \label{eq:flow}
+\end{equation}
+and an open visit estimates $H_j$ from the terminal's closed-visit mean until it
+departs, capped at one cargo. Durations (queue waits, voyage ages) are averaged
+across terminals with weights equal to the number of legs or visits in each cell,
+$\bar{x}_d = \sum_k n_k x_k / \sum_k n_k$; volumes are summed.
+
+Two properties of voyage-derived features make the knowable basis difficult to
+construct correctly. Both were discovered during the project rather than
+anticipated, and Figure~\ref{fig:knowable} draws them.
+
+\begin{figure*}[tb]
+\centering
+\resizebox{0.66\textwidth}{!}{\input{figures/tikz_knowable}}
+\caption{Top: one leg on the event-time axis. In hindsight it is a closed, EU-bound
+leg of known duration; at an as-of date $d$ before arrival it is an open leg of
+known age and unknown destination, and the at-sea stock counts it as such. Bottom:
+the vintage axis. A table that begins to exist in 2026 must return nothing at a
+2020 as-of date even though every row in it is correctly dated.}
+\label{fig:knowable}
+\end{figure*}
 
 \subsection{The unit of observation is defined in retrospect}
 
-A voyage leg does not exist until both a departure and the next arrival have been
-observed. At time $t$, a vessel that departed five days earlier has an incomplete leg
-of unknown duration and unknown destination. In hindsight the same vessel has a
-complete leg with both. Any statistic over legs therefore conditions on completion
-unless the population is explicitly bounded. Figure~\ref{fig:leakage} quantifies the
-effect. At an as-of date of 1~June~2020, a loader that pairs all departures with all
-arrivals and then filters by date returns \leakNaive{} legs. Of these,
-\leakFutureClosed{} (\leakFutureShare) are closed by arrivals that had not yet
-occurred. With the population bounded correctly, \leakBounded{} legs remain, none of
-them closed by the future. Status labels move with the bound: the number of legs
-classified as floating storage fell from 95 to 9, because that label is assigned in
-hindsight. At an as-of date after the data maximum the two loaders agree on every
-count, which confirms that the bound is a restriction of the same query and not a
-different one.
+A voyage leg does not exist as a \emph{completed} unit until both a departure and
+the next arrival have been observed. At time $t$, a vessel that departed five days
+earlier is an open leg of known age and unknown duration and destination; that
+open leg is itself a feature, and the at-sea stock of
+Equation~\eqref{eq:stock-phys} counts it from the day it departed. What does not
+yet exist is any statistic that conditions on completion: its duration, its arrival
+zone, its floating-storage label. In hindsight the same vessel has a complete leg
+with all three. Any statistic over legs therefore conditions on completion unless
+the population is explicitly bounded to what was observable at $d$,
+\begin{equation}
+\begin{aligned}
+  \mathcal{L}(d) &= \{\, i : t^{\mathrm{dep}}_i \le d \,\},\\
+  t^{\mathrm{arr}}_i &\text{ attached only if } t^{\mathrm{arr}}_i \le d .
+\end{aligned}
+\label{eq:bound}
+\end{equation}
+Figure~\ref{fig:leakage} quantifies the effect. At an as-of date of 1~June~2020, a
+loader that pairs all departures with all arrivals and then filters by date returns
+\leakNaive{} legs. Of these, \leakFutureClosed{} (\leakFutureShare) are closed by
+arrivals that had not yet occurred. With the population bounded by
+Equation~\eqref{eq:bound}, \leakBounded{} legs remain, none of them closed by the
+future. Status labels move with the bound: the number of legs classified as
+floating storage fell from 95 to 9, because that label is assigned in hindsight. At
+an as-of date after the data maximum the two loaders agree on every count, which
+confirms that the bound is a restriction of the same query and not a different one.
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.85\linewidth]{fig2_leakage}
+\includegraphics[width=0.95\linewidth]{fig2_leakage}
 \caption{Voyage legs visible at an as-of date of 1~June~2020 under the naive loader
 and under the point-in-time bound. Recomputed from the event tables when the figure
 is generated.}
@@ -42,7 +105,7 @@ within the vessel's current voyage, but the table being joined should not exist 
 that vintage. The bound therefore reconstructs the declaration from the raw static
 messages available at $d$, and at a 2020 as-of date it returns none.
 
-\subsection{What the knowable basis bounds}
+\subsection{What the knowable basis bounds}\label{sec:bounds}
 
 The knowable basis bounds on event time. Event timestamps are back-dated to the fix
 at which a transition first qualified, so a departure is dated to the vessel's last
@@ -51,7 +114,11 @@ The gap between the two is the feature's own publication lag. We measured it
 directly. The first fix after a departure event arrives at a median lag of zero
 hours, and more than 24 hours later for 0.3\% of departures on the NOAA feed
 ($n=1{,}500$) and 1.5\% on the live feed ($n=343$). On the decade panel the lag is
-immaterial.
+immaterial. On the live feed it is a genuine data limitation: a vessel that drops
+out of terrestrial coverage as it leaves the berth is only back-dated once it
+reappears, and a satellite feed would remove the gap. This is one of the reasons the
+live acquisition system of Section~\ref{sec:live} spends most of its effort on
+keeping vessels near terminals in a slot.
 
 A separate log records the knowable value of every signal as it was printed on each
 day of live operation, so that the bound can be checked rather than assumed.
@@ -74,18 +141,39 @@ public (EIA weekly storage by six days, daily spot by one, AGSI+ by one). The ta
 signals are shifted by zero, because the knowable basis is already point-in-time and
 a second shift would double-count. Degree days are not shifted. Their role is to be
 partialled out, so the relevant quantity is the weather that occurred and not the
-weather that was forecast. Signals reported per terminal or per destination zone are
-collapsed to one series by summing volumes and by $n$-weighted averaging of
-durations.
+weather that was forecast. Figure~\ref{fig:signals} shows the eight signals that
+enter Section~\ref{sec:partb}, on this grid.
 
-\subsection{The coverage seam}
+\begin{figure*}[tb]
+\centering
+\includegraphics[width=0.95\textwidth]{fig18_signals}
+\caption{The eight pre-registered tanker signals, daily on the knowable basis,
+2018 to the coverage horizon. The upward drift in the volume signals is the growth
+of US export capacity together with the capture gradient of
+Figure~\ref{fig:capture}; the spread scan removes both through the persistence
+term. The step at the very end of the EU-bound and unresolved in-transit panels is
+the coverage seam.}
+\label{fig:signals}
+\end{figure*}
+
+\subsection{The coverage seam}\label{sec:seam}
 
 The two backfill feeds end on \noaaEnds{} (NOAA) and \gfwEnds{} (GFW). After those
 dates the signals are carried by the live feed alone, which contributes
-\nLiveEvents{} events against \nBackfillEvents{} from the backfills. The EU-bound
-stock at sea falls from \stockDecTwentyFive{} to \stockJanTwentySix{}
-million\,m$^3$ between December~2025 and January~2026, a \coverageDropShare{} drop
-with no physical cause. This was found by plotting Figure~\ref{fig:spread} and was
-not caught by any automated check. The primary modelling sample is therefore
-truncated at \noaaEnds. Full-panel results are reported in
-Appendix~\ref{app:fullpanel} and change no conclusion.
+\nLiveEvents{} events against \nBackfillEvents{} from the backfills
+(Figure~\ref{fig:coverage}). The EU-bound stock at sea falls from
+\stockDecTwentyFive{} to \stockJanTwentySix{} million\,m$^3$ between December~2025
+and January~2026, a \coverageDropShare{} drop with no physical cause. This was found
+by plotting Figure~\ref{fig:spread} and was not caught by any automated check. The
+primary modelling sample is therefore truncated at \noaaEnds. Full-panel results are
+reported in Appendix~\ref{app:fullpanel} and change no conclusion.
+
+\begin{figure*}[tb]
+\centering
+\includegraphics[width=0.95\textwidth]{fig6_coverage}
+\caption{Port events per quarter by the feed that produced them, with the span of
+each feed above. The NOAA and GFW backfills carry the decade; the live feed, split at
+the cutover from a bounding-box subscription to a vessel-identifier filter, carries
+only the tail. The dashed line is the coverage seam at which the primary sample ends.}
+\label{fig:coverage}
+\end{figure*}

@@ -1,0 +1,28 @@
+% The knowable bound on one voyage leg, and the vintage hazard beneath it.
+\begin{tikzpicture}[x=1cm, y=1cm, font=\scriptsize,
+  arr/.style={-{Latex[length=1.5mm]}, draw=ink, line width=0.5pt}]
+% ---- one leg on the event-time axis
+\draw[arr] (0, 0) -- (8.3, 0) node[right, font=\tiny] {event time};
+\foreach \x/\l in {0.9/$t_{\mathrm{dep}}$, 4.3/$d$, 6.7/$t_{\mathrm{arr}}$} {
+  \draw[ink] (\x, -0.08) -- (\x, 0.08); \node[below, font=\tiny] at (\x, -0.1) {\l};
+}
+\draw[fill=palegold, draw=ink] (0.9, 1.05) rectangle (6.7, 1.45);
+\node[left, font=\tiny] at (0.8, 1.25) {physical};
+\node[font=\tiny] at (3.8, 1.25) {closed leg: laden, EU-bound, duration $t_{\mathrm{arr}}-t_{\mathrm{dep}}$};
+\draw[fill=palegrey, draw=ink] (0.9, 0.4) rectangle (4.3, 0.8);
+\draw[draw=ink!60, dashed] (4.3, 0.4) -- (6.7, 0.4) -- (6.7, 0.8) -- (4.3, 0.8);
+\node[left, font=\tiny] at (0.8, 0.6) {knowable at $d$};
+\node[font=\tiny] at (2.6, 0.6) {open leg, age $d-t_{\mathrm{dep}}$};
+\node[font=\tiny, text=ink!70] at (5.5, 0.6) {destination unresolved};
+\draw[dashed, draw=red] (4.3, -0.45) -- (4.3, 1.75);
+\node[above, text=red, font=\tiny] at (4.3, 1.75) {as-of $d$: nothing to the right has happened yet};
+% ---- the vintage axis
+\draw[arr] (0, -1.35) -- (8.3, -1.35) node[right, font=\tiny] {vintage (years)};
+\foreach \x/\l in {1.2/2018, 3.4/2020, 5.6/2024, 7.2/2026} {
+  \draw[ink] (\x, -1.43) -- (\x, -1.27); \node[below, font=\tiny] at (\x, -1.45) {\l};
+}
+\draw[fill=paleblue, draw=ink] (7.2, -1.15) rectangle (8.3, -0.8);
+\node[font=\tiny, left] at (7.1, -0.97) {destination-declaration feed exists};
+\draw[dashed, draw=red] (3.4, -1.6) -- (3.4, -0.7);
+\node[font=\tiny, text=red, above] at (3.4, -0.7) {at a 2020 as-of the table itself must not exist};
+\end{tikzpicture}

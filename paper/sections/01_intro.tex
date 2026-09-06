@@ -1,5 +1,3 @@
-% PROPOSAL: the author rewrites this section. It states the claim as the
-% generated numbers support it. Framing and emphasis are the author's decision.
 \section{Introduction}
 
 The Henry Hub--TTF spread is the price of moving a unit of gas from the United
@@ -11,40 +9,63 @@ statistic. It is therefore natural to expect vessel positions to lead the spread
 This expectation is widely held and is the basis of a commercial data industry.
 
 This paper tests it and finds no support. An efficient-markets view predicts that
-outcome, so the null itself is not the contribution. The contribution lies in how
-the null is established, and in two construction problems encountered on the way.
+outcome, so the null on its own would be a thin result. The paper makes four
+contributions, of which the null is one.
 
-Three features of the design distinguish the result from a mere absence of findings.
-First, every target, control set, lag, sign and acceptance bar was written into a
-dated, append-only decision log before the corresponding fit, so no choice reported
-below was made after seeing its outcome. Where a pre-registered sign was falsified,
-it is reported as falsified. Second, the inference respects the structure of the
-data. Weekly changes over a four-week horizon overlap, so all standard errors are
-Newey--West with the lag fixed in advance at \hacLagRule{} weeks. Training rows whose
-target reaches into the test week are purged. The three follow-up mechanism tests
-are held to a Bonferroni bar and must replicate their sign on a holdout that was not
-examined until they had passed on the discovery sample. Third, the study bounds
+\paragraph{A validated decade-scale reconstruction.} Section~\ref{sec:data}
+describes a pipeline that turns \nFixes{} raw position fixes and two public
+archives into \nEvents{} port events at every LNG terminal in seven US and European
+zones, using hand-drawn berth, anchorage and approach polygons and a per-vessel
+state machine. The US side is checked against EIA monthly export totals and the
+check is reported as a capture rate by year. A live acquisition system, which
+allocates a scarce budget of AIS subscription slots across the world fleet and buys
+back positions for vessels that fall silent near a terminal, is described because
+most of the engineering effort went there and because its coverage limits are part
+of the result.
+
+\paragraph{Two construction hazards specific to voyage-derived features.}
+Section~\ref{sec:panel} shows that the natural unit of observation, a voyage, does
+not exist until both of its endpoints have been observed, so a statistic computed
+over completed voyages embeds the future unless the population is explicitly
+bounded. At a 2020 as-of date a straightforward loader returned \leakNaive{} legs,
+of which \leakFutureClosed{} (\leakFutureShare) had been closed by arrivals that
+had not yet occurred. Separately, the availability of a feature can change across
+data vintages. The same loader attached \leakDeclared{} destination declarations
+to 2020 voyages from a data feed that began in 2026. A date filter on observations
+cannot catch this, because the individual rows are correctly dated; the table itself
+should not exist at that vintage.
+
+\paragraph{A pre-registered, power-bounded null.} Three features of the design
+distinguish the result from a mere absence of findings. First, every target,
+control set, lag, sign and acceptance bar was written into a dated, append-only
+decision log before the corresponding fit, so no choice reported below was made
+after seeing its outcome. Where a pre-registered sign was falsified, it is reported
+as falsified. Second, the inference respects the structure of the data. Weekly
+changes over a four-week horizon overlap, so all standard errors are Newey--West
+(a covariance estimator that corrects for serial correlation in the residuals;
+Section~\ref{sec:partb}) with the lag fixed in advance at \hacLagRule{} weeks.
+Training rows whose target reaches into the test week are purged. The three
+follow-up mechanism tests are held to a Bonferroni bar (the significance threshold
+divided by the number of tests) and must replicate their sign on a holdout that was
+not examined until they had passed on the discovery sample. Third, the study bounds
 what it could have found. With \powerN{} weekly observations the design detects
 effects of at least \powerFloor{} of residual variance, and the largest observed
 anywhere is \bMaxRsqCov. The result excludes effects large enough to trade and is
 silent on smaller ones.
 
-Two further findings are methodological and apply to any feature built from
-vessel-tracking data. The natural unit of observation, a voyage, does not exist
-until both of its endpoints have been observed, so a statistic computed over
-completed voyages embeds the future unless the population is explicitly bounded. At
-a 2020 as-of date a straightforward loader returned \leakNaive{} legs, of which
-\leakFutureClosed{} (\leakFutureShare) had been closed by arrivals that had not yet
-occurred. Separately, the availability of a feature can change across data vintages.
-The same loader attached \leakDeclared{} destination declarations to 2020 voyages
-from a data feed that began in 2026. A date filter on observations cannot catch
-this, because the individual rows are correctly dated; the table itself should not
-exist at that vintage.
+\paragraph{Usable by-products.} The physical nowcasts of Section~\ref{sec:parta}
+establish that a four-week moving average is close to optimal for weekly US
+loadings, and say why. The outage rule of the same section is a monitor with a
+stated recall and delay. The vintage log of Section~\ref{sec:panel} is a cheap
+check that, to our knowledge, is rarely kept.
 
-The paper proceeds as follows. Section~\ref{sec:data} describes the pipeline and
-the decade-scale reconstruction. Section~\ref{sec:panel} explains how the signal
-panel is built point-in-time. Section~\ref{sec:prereg} describes the
-pre-registration protocol and its limits. Section~\ref{sec:parta} reports the
-physical nowcasts. Section~\ref{sec:partb} reports the spread tests.
-Section~\ref{sec:power} bounds their power. Sections~\ref{sec:discussion}
-and~\ref{sec:limitations} interpret and qualify the results.
+The paper proceeds as follows. Section~\ref{sec:data} describes the pipeline, the
+live acquisition system and the ground-truth check. Section~\ref{sec:panel}
+explains how the signal panel is built point-in-time. Section~\ref{sec:prereg}
+describes the pre-registration protocol and its limits. Section~\ref{sec:parta}
+reports the physical nowcasts. Section~\ref{sec:partb} reports the spread tests.
+Section~\ref{sec:power} bounds their power. Section~\ref{sec:discussion}
+interprets the results and lists what the work found besides the null,
+Section~\ref{sec:future} sets out what would change the answer, and
+Section~\ref{sec:limitations} qualifies everything. Appendix~\ref{app:glossary}
+defines the statistical terms used.
