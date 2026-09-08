@@ -21,3 +21,9 @@ tanker-flow-paper.zip
 
 # QGIS raster sidecars (the .tif rasters themselves are not tracked)
 *.tif.aux.xml
+
+# LaTeX build artifacts (main.pdf and main.bbl are tracked deliberately)
+paper/main.aux
+paper/main.log
+paper/main.out
+paper/main.blg
