@@ -8,9 +8,9 @@ pre-registered test that answered it.
 A laden LNG carrier leaving Sabine Pass reaches Rotterdam in fourteen to eighteen
 days. For that whole crossing the cargo is committed, visible to anyone with an AIS
 receiver, and absent from every published supply statistic. So it is natural to
-expect vessel positions to lead the transatlantic gas spread — and there is a
-commercial data industry built on exactly that belief. I tested it on a decade of
-public data and found nothing.
+expect vessel positions to lead the transatlantic gas spread, and there is a
+commercial data industry built on that belief. I tested it on a decade of public
+data and found nothing.
 
 The full write-up is **[`paper/main.pdf`](paper/main.pdf)** ("Public vessel-tracking
 data does not predict the Henry Hub–TTF spread: a pre-registered, power-bounded
@@ -21,8 +21,8 @@ version.
 
 *The target (top) and the headline signal (bottom). The stock of Europe-bound gas
 at sea is reconstructed entirely from vessel positions. The cliff at the right edge
-is a coverage seam where the archives end and the live feed begins — it is excluded
-from the primary sample, and finding it is its own small story below.*
+is a coverage seam where the archives end and the live feed begins. It is excluded
+from the primary sample; how it was found is described below.*
 
 ---
 
@@ -64,25 +64,24 @@ EIA / FRED / GIE / Open-Meteo / Yahoo ──► data/{eia,market}.py ─► eia_
 signal_daily + market_series ──────────► data/model_panel.py ──► model_panel      (the modelling grid)
 ```
 
-Here is one vessel's year, straight out of the reconstruction — the Gulf-to-Europe
-shuttle, laden out and ballast back, with berth visits and anchorage queues:
+One vessel's year, straight out of the reconstruction: the Gulf-to-Europe shuttle,
+laden out and ballast back, with berth visits and anchorage queues.
 
 ![One vessel's year](paper/figures/fig8_vessel_year.png)
 
 ### The live acquisition problem
 
-Most of the engineering went here, and it is the part I would show someone first.
-AISstream allows three concurrent connections of fifty MMSIs each: **150 subscription
-slots for a fleet of 828**. So the ingester runs a scoring layer that ranks every
-vessel hourly by how likely it is to produce a signal-defining event soon — in a
-terminal polygon, declaring an imminent arrival, closing on a zone — and reallocates
-slots on a one-hour cycle, with a scan rotation that prevents low-tier vessels from
-starving.
+Most of the engineering went here. AISstream allows three concurrent connections of
+fifty MMSIs each: **150 subscription slots for a fleet of 828**. So the ingester runs
+a scoring layer that ranks every vessel hourly by how likely it is to produce a
+signal-defining event soon (in a terminal polygon, declaring an imminent arrival,
+closing on a zone) and reallocates slots on a one-hour cycle, with a scan rotation
+that prevents low-tier vessels from starving.
 
 When a vessel still goes dark near a terminal, a second worker buys its position
 back from VesselFinder one credit at a time and injects it as a normal fix. That
-budget is a fixed reserve which **expires unused**, so the correct policy is not to
-minimise spend but to hit zero exactly at expiry: the daily cap is derived each run
+budget is a fixed reserve which **expires unused**, so the policy is to hit zero
+exactly at expiry rather than to minimise spend: the daily cap is derived each run
 from the live balance and days remaining, priority classes are exempt from it,
 lower-value classes spend only the surplus above the glide line, and every request
 the budget could not serve is logged so unmet demand stays measurable.
@@ -108,15 +107,13 @@ but a level-dependent effect in the early years would be misread.
 
 ## Two ways a voyage feature leaks, and both are the default
 
-This is the part I would keep even if the price result had come out the other way.
-
 A voyage is the natural unit of observation, and **it does not exist until both of
 its endpoints have been observed**. So any statistic computed over completed voyages
 embeds the future unless you explicitly bound the population. At a 2020 as-of date,
-a straightforward loader returned 20,351 legs — of which **13,130 (65%) had been
+a straightforward loader returned 20,351 legs, of which **13,130 (65%) had been
 closed by arrivals that had not happened yet.**
 
-The second one is subtler. The same loader attached 2,101 destination declarations
+The second is subtler. The same loader attached 2,101 destination declarations
 to 2020 voyages from a data feed that only began in 2026. A date filter on rows does
 not catch this, because every individual row is correctly dated. The *table* should
 not exist at that vintage.
@@ -134,8 +131,8 @@ as-printed, so the knowable series can be checked against what was actually know
 ## Part A: can the signals predict the physical thing they measure?
 
 Before touching a price, ask whether the pipeline predicts quantities it observes
-directly — weekly EU arrivals, weekly US loadings, terminal outages — against two
-naive nulls (last week's count, and the trailing four-week mean). Four models,
+directly (weekly EU arrivals, weekly US loadings, terminal outages) against two
+naive nulls: last week's count, and the trailing four-week mean. Four models,
 pre-registered, scored walk-forward. Excess error over the four-week mean, where
 positive is *worse* than the null:
 
@@ -146,14 +143,14 @@ positive is *worse* than the null:
 | A4 | Kalman local level | **+0.7%** |
 
 A fourth, A5, detects terminal outages by Bayesian online changepoint detection and
-is beaten by its own null. All four fail. But they fail *informatively*: they approach the moving average from
-above without crossing it, and A4 — the one with a fitted smoothing constant — chose
-a **seven-week effective window by maximum likelihood**, landing within a percent of
-the four-week mean. That is not a coincidence. For a slow industrial flow that
-behaves like a local level plus noise, the exponentially weighted mean is the optimal
-linear predictor. So this is theory confirmed, not a modelling failure, and it should
-temper anyone's expectation that a richer model beats a moving average on a series
-like this.
+is beaten by its own null. All four fail, but the pattern is informative: they
+approach the moving average from above without crossing it, and A4, the one with a
+fitted smoothing constant, chose a **seven-week effective window by maximum
+likelihood**, landing within a percent of the four-week mean. For a slow industrial
+flow that behaves like a local level plus noise, the exponentially weighted mean is
+the optimal linear predictor, so A4's result is that theory confirmed rather than a
+modelling failure, and it is a reason not to expect a richer model to beat a moving
+average on a series like this.
 
 Two things did survive Part A: A5's *null* (a rate-relative silence rule) is a
 usable outage monitor at **38% recall (6 of 16 labelled outages), a 12-day median
@@ -173,9 +170,9 @@ a winter dummy. Everything walk-forward, training rows purged where their target
 window straddles the test week, all standard errors Newey–West with the lag fixed in
 advance.
 
-**First result: the controls-only model is worse than assuming no change** — −9.3%
-at one week, −18.2% at four. So a random walk is the operative null, and the spread
-behaves like one at these horizons.
+**First result: the controls-only model is worse than assuming no change**, by −9.3%
+at one week and −18.2% at four. So a random walk is the operative null, and the
+spread behaves like one at these horizons.
 
 **Second result: no tanker signal survives the controls.** Frisch–Waugh–Lovell
 partial effects, every signal against the residual:
@@ -190,19 +187,18 @@ EU storage, on the theory that cargo matters more when Europe is short (H3); and
 observable tightness-regime split (H4). Each was written down with its sign, held to
 a Bonferroni bar of |t| > 2.394, and required to replicate on a 2025+ holdout that
 was not looked at until it had passed on discovery. Largest |t| across the three:
-**0.89**. And each fails in its own way rather than merely quietly: H3 comes out
-with the *wrong sign* against a bar it never approaches, and H4's "tight" regime
-effect is smaller in magnitude than its loose one — the reverse of what it predicted.
-That is what a real absence looks like, as opposed to an underpowered one.
+**0.89**. Each fails in a specific way rather than merely quietly: H3 comes out with
+the *wrong sign* against a bar it never approaches, and H4's "tight" regime effect is
+smaller in magnitude than its loose one, the reverse of what it predicted.
 
 ### How big an effect could this have found?
 
-A null is worthless without this number. With the weekly sample available, the design
-detects effects explaining at least **1.72% of residual variance**. The largest
-effect observed anywhere is **0.9%**.
+A null needs this number. With the weekly sample available, the design detects
+effects explaining at least **1.72% of residual variance**. The largest effect
+observed anywhere is **0.9%**.
 
-So: this excludes effects large enough to trade on, and says nothing whatsoever about
-smaller ones.
+So this excludes effects large enough to trade on, and says nothing about smaller
+ones.
 
 ---
 
@@ -210,7 +206,7 @@ smaller ones.
 
 The null is what an efficient market predicts, and I want to be precise about which
 question was actually asked. These signals come from public terrestrial AIS and a
-free voyage archive — a coarser version of what a gas desk already buys, reaching a
+free voyage archive: a coarser version of what a gas desk already buys, reaching a
 public researcher on a delay a desk would find unusable. The test was never "is the
 physical signal informative"; it was "is *public* physical data mispriced in a liquid
 benchmark at one to four weeks". A no there is close to expected.
@@ -240,8 +236,8 @@ And independently of the price result:
 Recorded as unresolved rather than explained: nearly half of matured laden departures
 never pair with a European arrival at all. They pair with the vessel's return to the
 Gulf, median about a month. Those are cargoes whose destination the public feeds
-simply never saw — and the reason the arrival model cannot assume that a leg still
-open is still Europe-bound. Between 75% and 83% of the at-sea stock has no resolved
+never saw, and the reason the arrival model cannot assume that a leg still open is
+still Europe-bound. Between 75% and 83% of the at-sea stock has no resolved
 destination.
 
 ---
@@ -255,7 +251,7 @@ Straits of Florida while Asia-bound cargoes route south. The project's notes rec
 a north-east crossing as strong evidence of a European arrival about thirteen days
 out. The crossing is inside terrestrial AIS range, so this is a coverage question,
 and the live system's slot allocation was changed to hold departing vessels through
-the Straits — but the decade archives do not carry it, so it is untested here.
+the Straits, but the decade archives do not carry it, so it is untested here.
 
 Beyond that: a deduplicated NOAA+GFW union with the residual under-count carried as
 an EIA-calibrated exposure offset (which would recover the early years as levels, not
@@ -269,8 +265,8 @@ arrive with its own pre-registration, correction and untouched holdout.
 
 ## Reproducing it
 
-Every number in the paper is generated. Nothing is typed by hand — a number without
-a generated macro behind it does not compile.
+Every number in the paper is generated; nothing is typed by hand. A number without a
+generated macro behind it does not compile.
 
 ```bash
 make signals        # rebuild the 34-signal panel from port events
@@ -289,7 +285,7 @@ make paper          # results → tables → figures → PDF
 The append-only decision log in **[`analysis/DECISIONS.md`](analysis/DECISIONS.md)**
 is the pre-registration record: every target, control set, lag, sign and acceptance
 bar was written there before the corresponding fit, and where a sign was falsified it
-is recorded as falsified. The log's honest limitation is stated in the paper — the git
+is recorded as falsified. The log's honest limitation is stated in the paper: the git
 history does not independently establish that each entry preceded the fit it governs.
 
 ## Running the pipeline
@@ -322,14 +318,14 @@ make viz                      # FastAPI: map, signals and pipeline-health views 
 
 Needs a `.env` with `DB_*` and `AISSTREAM_API_KEY`; `VF_API_KEY`, `EIA_API_KEY`,
 `FRED_API_KEY` and `GIE_AGSI_API_KEY` each degrade to a skip when absent. Every
-variable must be declared on `Settings` in `config.py` — `pydantic-settings` forbids
-extras, so an undeclared key breaks every entry point at import.
+variable must be declared on `Settings` in `config.py`, because `pydantic-settings`
+forbids extras, so an undeclared key breaks every entry point at import.
 
 ## Repo map
 
 | Path | What is in it |
 |---|---|
-| [`CLAUDE.md`](CLAUDE.md) | The living architecture spec — full schema, every module, every design call |
+| [`CLAUDE.md`](CLAUDE.md) | The living architecture spec: full schema, every module, every design call |
 | [`analysis/DECISIONS.md`](analysis/DECISIONS.md) | Append-only pre-registration and results log |
 | [`analysis/SIGNALS.md`](analysis/SIGNALS.md) | The 34-signal catalogue: definition, construction, rationale |
 | [`analysis/MODELS.md`](analysis/MODELS.md) | Model specifications for Parts A and B |
@@ -356,8 +352,8 @@ I built tanker-flow with AI assistance (Claude Code) as a deliberate part of the
 workflow, and I would rather show that than hide it. Directing AI well to produce a
 correct, non-trivial system is part of the skillset, not a shortcut around it.
 
-**What is mine:** the architecture, the domain model — the port-event state machine,
-the dual-basis signal, the credit-budgeted rescue backstop — and every hypothesis,
+**What is mine:** the architecture, the domain model (the port-event state machine,
+the dual-basis signal, the credit-budgeted rescue backstop), and every hypothesis,
 sign, acceptance bar and consequential tradeoff. AI accelerated implementation,
 refactors and data exploration under that direction.
 
