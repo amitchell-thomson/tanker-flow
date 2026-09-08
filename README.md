@@ -2,8 +2,7 @@
 
 **Does public vessel-tracking data predict the Henry Hub–TTF gas spread?**
 
-No. This repo is the pipeline built to ask that question properly, and the
-pre-registered test that answered it.
+No. This repo is the pipeline built to investigate that question properly.
 
 A laden LNG carrier leaving Sabine Pass reaches Rotterdam in fourteen to eighteen
 days. For that whole crossing the cargo is committed, visible to anyone with an AIS
@@ -14,8 +13,7 @@ data and found nothing.
 
 The full write-up is **[`paper/main.pdf`](paper/main.pdf)** ("Public vessel-tracking
 data does not predict the Henry Hub–TTF spread: a pre-registered, power-bounded
-null"), rebuildable with `make paper`. What follows is the shorter, less formal
-version.
+null"), rebuildable with `make paper`. What follows is the shorter, summary version.
 
 ![Spread and EU-bound gas at sea](paper/figures/fig1_spread_and_stock.png)
 
